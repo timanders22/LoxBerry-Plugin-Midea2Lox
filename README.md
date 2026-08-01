@@ -36,7 +36,11 @@ Suchen der Geräte Token und Schlüssel abzuholen. Danach läuft alles lokal.
 - **Python ≥ 3.10** — das prüft `preroot.sh` und bricht sonst mit einer
   Meldung ab. Ältere, über Jahre hochgezogene LoxBerry-Installationen bringen
   teils noch Python 3.7 oder 3.9 mit; hier hilft nur ein aktuelles Abbild.
-- MQTT-Gateway-Plugin *(freiwillig — ohne läuft alles über UDP)*
+- **Kein zusätzliches Plugin.** Der MQTT-Gateway ist seit LoxBerry 3 Bestandteil
+  des Systems (`webfrontend/htmlauth/system/mqtt.cgi`, erreichbar unter
+  *System → MQTT Gateway* bzw. `/admin/system/mqtt.cgi`). In der
+  Vorgabekonfiguration steht der Broker auf `localhost:1883` und der Gateway
+  startet automatisch mit.
 
 Die Python-Module werden in eine **eigene virtuelle Umgebung** unter
 `bin/plugins/Midea2Lox/venv` installiert. Das System-Python bleibt unangetastet
