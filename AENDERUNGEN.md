@@ -177,3 +177,29 @@ Der Python-Teil des ursprünglichen Autors hat es **richtig** gemacht:
 
 Er unterschied also bereits nach LoxBerry-Fassung. Der Fehler lag allein in
 den von mir neu geschriebenen Texten und in der Prüflogik der Oberfläche.
+
+---
+
+# Midea2Lox 4.0.2 — Untergrenze richtiggestellt
+
+## `LB_MINIMUM` von 2.0 auf 3.0.0
+
+Bis 4.0.1 stand die Untergrenze auf `2.0`. Das war zu großzügig, aus zwei
+voneinander unabhängigen Gründen:
+
+1. **msmart-ng verlangt Python ≥ 3.10.** LoxBerry 2 baut auf Debian 10 mit
+   Python 3.7 auf — das Plugin kann dort grundsätzlich nicht arbeiten.
+   `preroot.sh` hätte solche Systeme zwar mit einer verständlichen Meldung
+   abgewiesen, aber erst *nach* dem Start der Installation.
+2. **Ab LoxBerry 3 ist der MQTT-Gateway Bestandteil des Systems** und kein
+   Plugin mehr. Mit der neuen Untergrenze entfällt jede Fallunterscheidung
+   zwischen beiden Welten.
+
+Damit ist die Angabe in der `plugin.cfg` jetzt das, was sie sein soll: eine
+ehrliche Aussage darüber, wo das Plugin laufen kann.
+
+Der Zweig `if LoxberryVersion <= 2` in `midea2lox.py` bleibt vorerst stehen. Er
+ist mit dieser Untergrenze unerreichbar, schadet aber nicht — und er stammt vom
+ursprünglichen Autor, der die Unterscheidung von Anfang an richtig gemacht hat.
+
+Sonst keine Änderungen gegenüber 4.0.1.
