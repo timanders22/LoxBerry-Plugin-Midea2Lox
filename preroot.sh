@@ -1,130 +1,61 @@
 #!/bin/bash
 
-# Shell script which is executed by bash *BEFORE* installation is started
-# (*BEFORE* preinstall and *BEFORE* preupdate). Use with caution and remember,
-# that all systems may be different!
+# Wird von bash *VOR* der Installation als root ausgefuehrt.
 #
-# Exit code must be 0 if executed successfull. 
-# Exit code 1 gives a warning but continues installation.
-# Exit code 2 cancels installation.
+# Rueckgabewert 0 = in Ordnung, 1 = Warnung, 2 = Installation abbrechen.
 #
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# Will be executed as user "root".
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-#
-# You can use all vars from /etc/environment in this script.
-#
-# We add 5 additional arguments when executing this script:
-# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
-#
-# For logging, print to STDOUT. You can use the following tags for showing
-# different colorized information during plugin installation:
-#
-# <OK> This was ok!"
-# <INFO> This is just for your information."
-# <WARNING> This is a warning!"
-# <ERROR> This is an error!"
-# <FAIL> This is a fail!"
+# Aufgabe dieses Skripts: pruefen, ob das System ein brauchbares Python 3
+# mitbringt. Frueher hat das Plugin an dieser Stelle bei zu altem Python
+# OpenSSL 1.1.1w und Python 3.9.16 aus dem Quelltext gebaut und per
+# "sudo make install" ins System geschoben. Das ist ersatzlos entfallen:
+# OpenSSL 1.1.1 ist seit dem 11.09.2023 abgekuendigt, und ein Plugin hat
+# nichts am System-OpenSSL zu suchen. Stattdessen bricht die Installation
+# jetzt mit einer klaren Meldung ab.
 
-# To use important variables from command line use the following code:
-COMMAND=$0    # Zero argument is shell command
-PTEMPDIR=$1   # First argument is temp folder during install
-PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
-PDIR=$3       # Third argument is Plugin installation folder
-PVERSION=$4   # Forth argument is Plugin version
-#LBHOMEDIR=$5 # Comes from /etc/environment now. Fifth argument is
-              # Base folder of LoxBerry
-PTEMPPATH=$6  # Sixth argument is full temp path during install (see also $1)
+PVERSION=$4
 
-# Combine them with /etc/environment
-PCGI=$LBPCGI/$PDIR
-PHTML=$LBPHTML/$PDIR
-PTEMPL=$LBPTEMPL/$PDIR
-PDATA=$LBPDATA/$PDIR
-PLOG=$LBPLOG/$PDIR # Note! This is stored on a Ramdisk now!
-PCONFIG=$LBPCONFIG/$PDIR
-PSBIN=$LBPSBIN/$PDIR
-PBIN=$LBPBIN/$PDIR
+# msmart-ng verlangt ab 2026.4.0 mindestens Python 3.10.
+PYTHON_MIN_MAJOR=3
+PYTHON_MIN_MINOR=10
 
-echo -n "<INFO> Current working folder is: "
-pwd
-echo "<INFO> Command is: $COMMAND"
-echo "<INFO> Temporary folder is: $PTEMPDIR"
-echo "<INFO> (Short) Name is: $PSHNAME"
-echo "<INFO> Installation folder is: $PDIR"
-echo "<INFO> Plugin version is: $PVERSION"
-echo "<INFO> Plugin CGI folder is: $PCGI"
-echo "<INFO> Plugin HTML folder is: $PHTML"
-echo "<INFO> Plugin Template folder is: $PTEMPL"
-echo "<INFO> Plugin Data folder is: $PDATA"
-echo "<INFO> Plugin Log folder (on RAMDISK!) is: $PLOG"
-echo "<INFO> Plugin CONFIG folder is: $PCONFIG"
+echo "<INFO> Midea2Lox $PVERSION - pruefe die Python-Fassung..."
 
-# Set minimum required versions
-PYTHON_MINIMUM_MAJOR=3
-PYTHON_MINIMUM_MINOR=9
+PYTHON3_REF=$(command -v python3)
 
-install_python(){
-    echo "No Python 3.9, start installing..."
-	
-	OPENSSL_VER=1.1.1w
-	mkdir openssl
-	cd openssl
-	wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-	tar xf openssl-${OPENSSL_VER}.tar.gz
-	cd openssl-${OPENSSL_VER}
-	./config zlib shared no-ssl3
-	make -j4
-	sudo make install
-	cd ..
-	cd ..
-	
-	sudo apt update && sudo apt upgrade
-	sudo apt install libffi-dev libbz2-dev liblzma-dev libsqlite3-dev libncurses5-dev libgdbm-dev zlib1g-dev libreadline-dev libssl-dev tk-dev build-essential libncursesw5-dev libc6-dev openssl git
-	sudo apt-get install libffi-dev
-	wget https://www.python.org/ftp/python/3.9.16/Python-3.9.16.tgz
-	tar -zxvf Python-3.9.16.tgz
-	cd Python-3.9.16
-	./configure --enable-optimizations --with-ssl-default-suites=openssl
-	sudo make altinstall
-	cd ..
-	
-	echo "<INFO> Chown all TMP files"
-	pwd
-	chown -R loxberry:loxberry *
-}
-
-
-# Get python references
-PYTHON3_REF=$(which python3 | grep "/python3")
-PYTHON_REF=$(which python | grep "/python")
-
-
-python_ref(){
-    local my_ref=$1
-    echo $($my_ref -c 'import platform; major, minor, patch = platform.python_version_tuple(); print(major); print(minor);')
-}
-
-# Print success_msg/error_msg according to the provided minimum required versions
-check_version(){
-    local major=$1
-    local minor=$2
-    local python_ref=$3
-    [[ $major -ge $PYTHON_MINIMUM_MAJOR && $minor -ge $PYTHON_MINIMUM_MINOR ]] && echo $python_ref || install_python
-}
-
-# Logic
-if [[ ! -z $PYTHON3_REF ]]; then
-    version=($(python_ref python3))
-    check_version ${version[0]} ${version[1]} $PYTHON3_REF
-elif [[ ! -z $PYTHON_REF ]]; then
-    # Didn't find python3, let's try python
-    version=($(python_ref python))
-    check_version ${version[0]} ${version[1]} $PYTHON_REF
-else
-    # Python is not installed at all
-    install_python
+if [ -z "$PYTHON3_REF" ]; then
+	echo "<FAIL> Es wurde kein python3 gefunden."
+	echo "<FAIL> Midea2Lox braucht mindestens Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}."
+	exit 2
 fi
 
-# Exit with Status 0
+VERSION_MAJOR=$("$PYTHON3_REF" -c 'import sys; print(sys.version_info[0])' 2>/dev/null)
+VERSION_MINOR=$("$PYTHON3_REF" -c 'import sys; print(sys.version_info[1])' 2>/dev/null)
+
+if [ -z "$VERSION_MAJOR" ] || [ -z "$VERSION_MINOR" ]; then
+	echo "<FAIL> Die Python-Fassung liess sich nicht ermitteln ($PYTHON3_REF)."
+	exit 2
+fi
+
+echo "<INFO> Gefunden: Python ${VERSION_MAJOR}.${VERSION_MINOR} unter $PYTHON3_REF"
+
+if [ "$VERSION_MAJOR" -lt "$PYTHON_MIN_MAJOR" ] || \
+   { [ "$VERSION_MAJOR" -eq "$PYTHON_MIN_MAJOR" ] && [ "$VERSION_MINOR" -lt "$PYTHON_MIN_MINOR" ]; }; then
+	echo "<FAIL> Zu alt. Midea2Lox braucht mindestens Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR},"
+	echo "<FAIL> gefunden wurde ${VERSION_MAJOR}.${VERSION_MINOR}."
+	echo "<FAIL>"
+	echo "<FAIL> Das betrifft in aller Regel LoxBerry-Installationen, die ueber viele"
+	echo "<FAIL> Jahre hochgezogen wurden und noch das Python des urspruenglichen"
+	echo "<FAIL> Abbilds benutzen. Ein Plugin darf das Python des Systems nicht"
+	echo "<FAIL> austauschen - der richtige Weg ist ein aktuelles LoxBerry-Abbild."
+	exit 2
+fi
+
+# Das Modul venv gehoert nicht bei jeder Installation zum Lieferumfang.
+if ! "$PYTHON3_REF" -c 'import venv' 2>/dev/null; then
+	echo "<WARNING> Das Python-Modul 'venv' fehlt. Es wird ueber dpkg/apt"
+	echo "<WARNING> (python3-venv) nachinstalliert - falls das scheitert,"
+	echo "<WARNING> bricht die Installation spaeter mit einer Meldung ab."
+fi
+
+echo "<OK> Python-Pruefung bestanden."
 exit 0

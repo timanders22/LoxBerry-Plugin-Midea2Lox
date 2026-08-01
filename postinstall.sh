@@ -1,113 +1,115 @@
 #!/bin/bash
 
-# Shell script which is executed by bash *AFTER* complete installation is done
-# (but *BEFORE* postupdate). Use with caution and remember, that all systems may
-# be different!
+# Wird von bash *NACH* der Installation als Benutzer "loxberry" ausgefuehrt.
 #
-# Exit code must be 0 if executed successfull. 
-# Exit code 1 gives a warning but continues installation.
-# Exit code 2 cancels installation.
+# Rueckgabewert 0 = in Ordnung, 1 = Warnung, 2 = Installation abbrechen.
 #
-# Will be executed as user "loxberry".
+# Legt die eigene Python-Umgebung (venv) an und installiert die benoetigten
+# Module hinein. Der Weg ueber ein venv ist Absicht: er umgeht PEP 668, das
+# auf Debian 12 und 13 jede systemweite pip-Installation abweist.
 #
-# You can use all vars from /etc/environment in this script.
-#
-# We add 5 additional arguments when executing this script:
-# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
-#
-# For logging, print to STDOUT. You can use the following tags for showing
-# different colorized information during plugin installation:
-#
-# <OK> This was ok!"
-# <INFO> This is just for your information."
-# <WARNING> This is a warning!"
-# <ERROR> This is an error!"
-# <FAIL> This is a fail!"
+# Anders als frueher wird hier *jeder* Schritt geprueft. Schlaegt das Anlegen
+# der Umgebung oder eine der Modulinstallationen fehl, bricht die Installation
+# mit Rueckgabewert 2 ab, statt Erfolg zu melden und ein totes Plugin zu
+# hinterlassen.
 
-# To use important variables from command line use the following code:
-COMMAND=$0    # Zero argument is shell command
-PTEMPDIR=$1   # First argument is temp folder during install
-PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
-PDIR=$3       # Third argument is Plugin installation folder
-PVERSION=$4   # Forth argument is Plugin version
-#LBHOMEDIR=$5 # Comes from /etc/environment now. Fifth argument is
-              # Base folder of LoxBerry
-PTEMPPATH=$6  # Sixth argument is full temp path during install (see also $1)
+PTEMPDIR=$1
+PSHNAME=$2
+PDIR=$3
+PVERSION=$4
 
-# Combine them with /etc/environment
-PCGI=$LBPCGI/$PDIR
-PHTML=$LBPHTML/$PDIR
-PTEMPL=$LBPTEMPL/$PDIR
 PDATA=$LBPDATA/$PDIR
-PLOG=$LBPLOG/$PDIR # Note! This is stored on a Ramdisk now!
-PCONFIG=$LBPCONFIG/$PDIR
-PSBIN=$LBPSBIN/$PDIR
 PBIN=$LBPBIN/$PDIR
+PCONFIG=$LBPCONFIG/$PDIR
 
-ARGV2=$2 # Second argument is real Plugin name
-ARGV3=$3 # Third argument is Plugin installation folder
-ARGV5=$5 # Fifth argument is Base folder of LoxBerry
+VENV="$PBIN/venv"
+PIP="$VENV/bin/pip3"
 
-chmod +x $PDATA/midea2lox.py
-chmod +x $PDATA/discover.py
+# Fassungen der Python-Module an einer Stelle
+MSMART_VERSION="2026.7.0"
+PAHO_VERSION="<2.0.0"
 
-# Set minimum required versions
-PYTHON_MINIMUM_MAJOR=3
-PYTHON_MINIMUM_MINOR=9
+echo "<INFO> Midea2Lox $PVERSION wird eingerichtet"
+echo "<INFO> Datenverzeichnis:      $PDATA"
+echo "<INFO> Programmverzeichnis:   $PBIN"
+echo "<INFO> Konfigurationsordner:  $PCONFIG"
 
-# Get python references
-PYTHON3_REF=$(which python3 | grep "/python3")
-PYTHON_REF=$(which python | grep "/python")
+chmod +x "$PDATA/midea2lox.py" 2>/dev/null
+chmod +x "$PDATA/discover.py" 2>/dev/null
 
-use_installed_alt_python(){
-	echo "use installed altertnative Python3.9"
-    python3.9 -m venv $PBIN/venv
-}
+# ---------------------------------------------------------------------------
+# 1. Virtuelle Python-Umgebung anlegen
+# ---------------------------------------------------------------------------
 
-python_ref(){
-    local my_ref=$1
-    echo $($my_ref -c 'import platform; major, minor, patch = platform.python_version_tuple(); print(major); print(minor);')
-}
+echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
 
-# Print success_msg/error_msg according to the provided minimum required versions
-check_version(){
-    local major=$1
-    local minor=$2
-    local python_ref=$3
-    [[ $major -ge $PYTHON_MINIMUM_MAJOR && $minor -ge $PYTHON_MINIMUM_MINOR ]] && python3 -m venv $PBIN/venv || use_installed_alt_python
-}
+rm -rf "$VENV"
 
-# Logic
-if [[ ! -z $PYTHON3_REF ]]; then
-    version=($(python_ref python3))
-    check_version ${version[0]} ${version[1]} $PYTHON3_REF
-elif [[ ! -z $PYTHON_REF ]]; then
-    # Didn't find python3, let's try python
-    version=($(python_ref python))
-    check_version ${version[0]} ${version[1]} $PYTHON_REF
-else
-    # Python is not installed at all !?
-    use_installed_alt_python
+if ! python3 -m venv "$VENV"; then
+	echo "<FAIL> Die virtuelle Python-Umgebung konnte nicht angelegt werden."
+	echo "<FAIL> Meist fehlt dafuer das Paket python3-venv. Es steht in dpkg/apt;"
+	echo "<FAIL> wenn der Paketschritt fehlgeschlagen ist, bitte im"
+	echo "<FAIL> Installationsprotokoll weiter oben nachsehen."
+	exit 2
 fi
 
-# Installing Python requirements in Virtual enviroment
-#python3.9 -m venv $PBIN/venv
+if [ ! -x "$PIP" ]; then
+	echo "<FAIL> In der neuen Umgebung ist kein pip3 vorhanden ($PIP)."
+	exit 2
+fi
 
-source $PBIN/venv/bin/activate
+echo "<OK> Virtuelle Umgebung angelegt."
 
-pip3 install --upgrade pip
-pip3 install --upgrade pip setuptools wheel
-pip3 install requests --extra-index-url https://www.piwheels.org/simple --prefer-binary
-pip3 install "paho-mqtt<2.0.0" --extra-index-url https://www.piwheels.org/simple --prefer-binary
-pip3 install ifaddr --extra-index-url https://www.piwheels.org/simple --prefer-binary
-pip3 install msmart-ng==2025.9.0 --extra-index-url https://www.piwheels.org/simple --prefer-binary
+# ---------------------------------------------------------------------------
+# 2. Module hineininstallieren - jeder Schritt wird geprueft
+# ---------------------------------------------------------------------------
 
-deactivate
+# piwheels liefert fertige Pakete fuer den Raspberry Pi. Auf x86 ist der
+# zusaetzliche Index unschaedlich, dort greift PyPI.
+PIPOPTS="--extra-index-url https://www.piwheels.org/simple --prefer-binary"
+
+pip_install() {
+	local paket="$1"
+	echo "<INFO> Installiere $paket ..."
+	if ! $PIP install $PIPOPTS "$paket"; then
+		echo "<FAIL> Die Installation von '$paket' ist fehlgeschlagen."
+		echo "<FAIL> Ohne dieses Modul kann Midea2Lox nicht arbeiten."
+		echo "<FAIL> Haeufigste Ursache: keine Internetverbindung waehrend der Installation."
+		exit 2
+	fi
+	echo "<OK> $paket installiert."
+}
+
+echo "<INFO> Aktualisiere pip in der Umgebung..."
+$PIP install --upgrade pip setuptools wheel >/dev/null 2>&1 || \
+	echo "<WARNING> pip liess sich nicht aktualisieren - wird fortgesetzt."
+
+pip_install "requests"
+pip_install "paho-mqtt${PAHO_VERSION}"
+pip_install "ifaddr"
+pip_install "msmart-ng==${MSMART_VERSION}"
+
+# ---------------------------------------------------------------------------
+# 3. Gegenprobe: laesst sich msmart in der Umgebung wirklich laden?
+# ---------------------------------------------------------------------------
+
+echo "<INFO> Pruefe die Umgebung gegen..."
+if ! "$VENV/bin/python3" -c "from msmart.device import AirConditioner; import paho.mqtt.client" 2>&1; then
+	echo "<FAIL> Die Module liessen sich zwar installieren, aber nicht laden."
+	exit 2
+fi
+
+INSTALLED=$("$VENV/bin/python3" -c "import msmart; print(msmart.__version__)" 2>/dev/null)
+echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
+
+# ---------------------------------------------------------------------------
 
 /bin/echo "#############################################################################################"
 /bin/echo "#  Nach der Installation bitte die Einstellungen zu allen MiniServern anpassen und speichern."
-/bin/echo "#  Danach den Service starten."
+/bin/echo "#  Danach den Dienst starten."
+/bin/echo "#"
+/bin/echo "#  Der Reiter \"Einbindung in Loxone\" im Plugin enthaelt eine Schritt-fuer-Schritt-"
+/bin/echo "#  Anleitung samt kompletter Baustein-Liste zum Nachbauen."
 /bin/echo "#############################################################################################"
 
-# Exit with Status 0
 exit 0

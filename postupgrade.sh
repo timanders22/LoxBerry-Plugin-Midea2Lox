@@ -1,21 +1,29 @@
 #!/bin/bash
 
-ARGV0=$0 # Zero argument is shell command
-ARGV1=$1 # First argument is temp folder during install
-ARGV2=$2 # Second argument is Plugin-Name for scipts etc.
-ARGV3=$3 # Third argument is Plugin installation folder
-ARGV4=$4 # Forth argument is Plugin version
-ARGV5=$5 # Fifth argument is Base folder of LoxBerry
+# Wird nach einer Aktualisierung ausgefuehrt (nach postinstall).
+# Holt die in preupgrade.sh gesicherten Konfigurationsdateien zurueck
+# und startet den Dienst.
 
-echo "<INFO> Copy back existing config files"
-cp -p -v -r /tmp/$ARGV1\_upgrade/config/$ARGV3/* $ARGV5/config/plugins/$ARGV3/ 
+PTEMPDIR=$1
+PSHNAME=$2
+PDIR=$3
+PVERSION=$4
+LBHOME=$5
 
-echo "<INFO> Remove temporary folders"
-rm -r /tmp/$ARGV1\_upgrade
+echo "<INFO> Stelle die gesicherten Konfigurationsdateien wieder her"
+if [ -d "/tmp/${PTEMPDIR}_upgrade/config/$PDIR" ]; then
+	cp -p -v -r "/tmp/${PTEMPDIR}_upgrade/config/$PDIR/." "$LBHOME/config/plugins/$PDIR/"
+else
+	echo "<WARNING> Keine Sicherung gefunden - es gelten die Vorgabewerte."
+fi
 
-#starting Midea2Lox
-cd $ARGV5/data/plugins/$ARGV3
-    ./midea2lox.py > /dev/null 2>&1 &
+echo "<INFO> Entferne die temporaeren Ordner"
+rm -rf "/tmp/${PTEMPDIR}_upgrade"
 
-# Exit with Status 0
+# Der Dienst wird ueber das Startskript gestartet, nicht direkt. Bis 3.4.8
+# stand hier ein "./midea2lox.py &" - das umging das Startskript und lief
+# damit ohne dessen Pruefungen.
+echo "<INFO> Starte Midea2Lox"
+"$LBHOME/system/daemons/plugins/$PDIR" restart >/dev/null 2>&1
+
 exit 0
