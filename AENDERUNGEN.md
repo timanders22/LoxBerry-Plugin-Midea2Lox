@@ -1,3 +1,65 @@
+# Midea2Lox 4.1.0 — Oberfläche von Perl auf PHP
+
+Damit entspricht das Plugin dem Hausstandard, den die übrigen Plugins bereits
+verwenden.
+
+| bisher | jetzt |
+|---|---|
+| `webfrontend/htmlauth/index.cgi` (Perl, HTML::Template) | `webfrontend/htmlauth/index.php` |
+| `templates/settings.html` | entfällt — die Reiter stehen in der Seite |
+| — | `mi_lib.php` (gemeinsame Funktionen), `mi_test.php` (Prüfungen) |
+
+Die fünf Reiter, ihre Reihenfolge und ihre Inhalte bleiben unverändert. Für die
+Nutzer ändert sich nichts: keine neuen Adressen, keine Anpassung in Loxone.
+
+## Behoben: die Geräteliste war unbrauchbar
+
+Die Perl-Fassung las `devices.cfg` als Komma-Liste (`ID,IP,Name`). Tatsächlich
+schreibt `discover.py` eine **INI-Datei mit einem Abschnitt je Gerät**, und
+genau so liest sie auch der Dienst `midea2lox.py`:
+
+    [Midea_123456789]
+    type = AC
+    id = 123456789
+    ip = 192.168.1.50
+    port = 6444
+
+Folge: Die Liste „Gefundene Klimageräte" blieb leer — oder zeigte ein
+Phantom-Gerät. Die einzige Zeile mit Kommas ist nämlich die Aufzählung der
+Betriebsarten, also wurde `modes = ['auto'` als Geräte-ID und `'cool'` als
+IP-Adresse angezeigt. Im Reiter *Einbindung in Loxone* stand damit ein
+unbrauchbarer Titel für den virtuellen Eingang, und die Selbstprüfung meldete
+„1 Gerät" wo keines war.
+
+Die neue Auswertung liest das echte Format, samt Typ und Port. Sie benutzt
+bewusst **nicht** `parse_ini_file`: die Schlüssel enthalten Leerzeichen
+(`device min temperature`), damit kommt PHPs INI-Leser nicht zurecht. Der
+irreführende Kommentarkopf in `config/devices.cfg` wurde ebenfalls berichtigt.
+
+## Weiteres
+
+- Eingaben werden geprüft und bei Fehlern **abgewiesen statt zurechtgebogen**:
+  UDP-Port 1–65535, Verbindungsdauer 10–3600 s, Miniserver und Region nur aus
+  der jeweiligen Liste. Bisher ersetzte die Perl-Fassung unplausible Werte
+  stillschweigend durch Vorgaben — wer sich vertippte, merkte es nie.
+- Ein leeres Passwortfeld behält das gespeicherte Passwort, statt es zu löschen.
+- `midea2lox.cfg` wird mit Rechten 0600 geschrieben — sie enthält das
+  Midea-Passwort.
+- Der Pluginordner wird aus dem eigenen Ablageort abgeleitet statt fest
+  eingetragen. Er heißt laut `plugin.cfg` `Midea2Lox` mit großen Buchstaben,
+  und unter Linux ist das ein Unterschied.
+- Knopf-Legende in jedem Reiter mit Schaltflächen.
+
+## Was nicht geprüft werden konnte
+
+Wie schon bei 4.0.0: **kein Lauf an einer echten Klimaanlage**, und diesmal
+zusätzlich **kein PHP-Syntaxtest** — die Arbeitsumgebung hatte keinen
+PHP-Interpreter. Geprüft wurden Klammer- und Tag-Bilanz, die Vollständigkeit
+aller aufgerufenen Funktionen und die neue Geräte-Auswertung gegen eine
+nachgebaute `devices.cfg`.
+
+---
+
 # Midea2Lox 4.0.0 — Änderungen gegenüber 3.4.8
 
 Dies ist ein **Fork** von [seppe912/Midea2Lox](https://github.com/seppe912/Midea2Lox).

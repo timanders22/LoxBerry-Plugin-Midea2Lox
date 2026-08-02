@@ -1,6 +1,20 @@
 #!/bin/bash
+
+# Wird beim Deinstallieren des Plugins ausgefuehrt.
+
+PDIR=$3
+
 echo "<INFO> stoppe Midea2Lox"
-killall midea2lox.py
+killall midea2lox.py 2>/dev/null
 sleep 1
+
+# Die virtuelle Python-Umgebung liegt unter bin/plugins/<Ordner>/venv und
+# belegt je nach Fassung 60 bis 100 MB. LoxBerry entfernt das Verzeichnis
+# beim Deinstallieren zwar in aller Regel selbst - schaden kann es nicht,
+# und auf Systemen, auf denen es liegenbleibt, ist es damit erledigt.
+if [ -n "$PDIR" ] && [ -d "$LBPBIN/$PDIR/venv" ]; then
+	echo "<INFO> entferne die virtuelle Python-Umgebung"
+	rm -rf "$LBPBIN/$PDIR/venv"
+fi
 
 exit 0
