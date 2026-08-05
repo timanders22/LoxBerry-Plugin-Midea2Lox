@@ -7,7 +7,7 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Er hat die Weiterentwicklung in [Issue #15](https://github.com/seppe912/Midea2Lox/issues/15)
 > ausdrücklich freigegeben, weil er selbst keinen LoxBerry mehr betreibt.
 > Sein Code ist die Grundlage, die Lizenz (Apache 2.0) bleibt unverändert.
-> Was sich gegenüber 3.4.8 geändert hat, steht in `AENDERUNGEN_4.0.0.md`.
+> Was sich gegenüber 3.4.8 geändert hat, steht in den [Releases](https://github.com/timanders22/LoxBerry-Plugin-Midea2Lox/releases).
 
 ## Was das Plugin macht
 
