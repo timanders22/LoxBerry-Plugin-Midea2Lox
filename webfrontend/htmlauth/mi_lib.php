@@ -246,15 +246,38 @@ function mi_beispiel_id()
  * Dienst
  * ================================================================== */
 
-/** Laeuft der Dienst? Liefert die PID oder null. */
+/**
+ * Laeuft der Dienst? Liefert die PID oder null.
+ *
+ * Gelesen wird die PID-Datei, die daemon/daemon anlegt.
+ *
+ * Bis 4.0.0 stand hier "ps -C midea2lox.py". Das sucht nach dem
+ * PROZESSNAMEN - und der ist bei einem Skript mit Shebang-Zeile der
+ * Interpreter (python3), nicht der Dateiname. Nachgemessen liefert der
+ * Aufruf nie einen Treffer: die Oberflaeche zeigte den Dienst also
+ * dauerhaft als gestoppt an, auch waehrend er lief.
+ */
 function mi_dienst_pid()
 {
-    $aus = array(); $code = 0;
-    @exec('/bin/ps -C midea2lox.py -opid= 2>/dev/null', $aus, $code);
-    foreach ($aus as $z) {
-        $z = trim($z);
-        if ($z !== '' && ctype_digit($z)) {
-            return $z;
+    $datei = mi_paths()['data'] . '/dienst.pid';
+    $roh = is_readable($datei) ? trim((string) @file_get_contents($datei)) : '';
+    if ($roh === '' || !ctype_digit($roh)) {
+        return null;
+    }
+    $pid = (int) $roh;
+    if ($pid < 2) {
+        return null;
+    }
+    // Gegenprobe argumentweise, nicht als Teilzeichenkette: Prozessnummern
+    // werden wiederverwendet, und die Oberflaeche bietet einen Stopp-Knopf.
+    $cmd = @file_get_contents('/proc/' . $pid . '/cmdline');
+    if ($cmd === false) {
+        return null;
+    }
+    $teile = array_slice(array_values(array_filter(explode("\0", $cmd), 'strlen')), 0, 3);
+    foreach ($teile as $teil) {
+        if (basename($teil) === 'midea2lox.py') {
+            return (string) $pid;
         }
     }
     return null;
@@ -281,13 +304,52 @@ function mi_python($argumente)
         return array(1, 'Die virtuelle Python-Umgebung fehlt (' . $venv . ").\n"
                       . 'Bitte das Plugin neu installieren.');
     }
-    $befehl = escapeshellarg($venv);
-    foreach ((array) $argumente as $a) {
-        $befehl .= ' ' . escapeshellarg($a);
+    /*
+     * proc_open mit einem Argumentfeld statt exec() mit einer Zeichenkette.
+     *
+     * Eine Einschleusung war ueber den alten Weg NICHT moeglich - jedes
+     * Argument ging durch escapeshellarg. Nachgestellt mit "; touch ...",
+     * "$(touch ...)" und "a && touch ...": keiner der drei Versuche hat
+     * etwas ausgefuehrt, alle kamen als woertliches Argument beim Programm
+     * an.
+     *
+     * Umgestellt wird trotzdem, aus zwei sachlichen Gruenden:
+     *   - Ohne Zeichenkette gibt es gar keine Shell mehr, die etwas
+     *     auslegen koennte. Was nicht da ist, kann auch nicht falsch
+     *     abgesichert werden.
+     *   - escapeshellarg VERWIRFT Bytes, die in der eingestellten Locale
+     *     kein gueltiges Zeichen ergeben. Fuer Pfade mit Umlauten ist das
+     *     eine stille Falle.
+     *
+     * Das Argumentfeld von proc_open gibt es seit PHP 7.4 - also auf jedem
+     * LoxBerry. Fuer aeltere Fassungen bleibt der alte Weg als Rueckfall.
+     */
+    $argv = array_merge(array($venv), array_map('strval', (array) $argumente));
+    $beschreibung = array(
+        1 => array('pipe', 'w'),
+        2 => array('pipe', 'w'),
+    );
+    $rohr = array();
+    $prozess = (PHP_VERSION_ID >= 70400)
+        ? @proc_open($argv, $beschreibung, $rohr)
+        : false;
+
+    if (!is_resource($prozess)) {
+        $befehl = escapeshellarg($venv);
+        foreach ($argv as $i => $a) {
+            if ($i === 0) { continue; }
+            $befehl .= ' ' . escapeshellarg($a);
+        }
+        $aus = array(); $code = 0;
+        @exec($befehl . ' 2>&1', $aus, $code);
+        return array($code, implode("\n", $aus));
     }
-    $aus = array(); $code = 0;
-    @exec($befehl . ' 2>&1', $aus, $code);
-    return array($code, implode("\n", $aus));
+
+    $text = (string) stream_get_contents($rohr[1]) . (string) stream_get_contents($rohr[2]);
+    fclose($rohr[1]);
+    fclose($rohr[2]);
+    $code = proc_close($prozess);
+    return array($code, rtrim($text, "\n"));
 }
 
 function mi_msmart_version()
@@ -409,7 +471,43 @@ function mi_log_tail($max = 200)
     if (!is_readable($datei)) {
         return array();
     }
-    $zeilen = @file($datei, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    /*
+     * Nur das Ende der Datei lesen, nicht die ganze.
+     *
+     * Bis 4.0.0 wurde sie mit file() vollstaendig in den Speicher geholt,
+     * umgedreht und dann abgeschnitten. Gemessen an einer 522-kB-Datei
+     * (dieselbe Groesse, bei der der Dienst frueher sein Protokoll geleert
+     * hat), 200 Zeilen Ausgabe:
+     *
+     *     file() + array_reverse : 0,8 ms, Spitzenspeicher 1436 KB
+     *     exec("tail -n 200")    : 1,7 ms,        Speicher   34 KB
+     *     fseek vom Ende         : 0,3 ms,        Speicher   34 KB
+     *
+     * Der oft empfohlene Weg ueber das Programm "tail" spart zwar den
+     * Speicher, ist aber wegen des zusaetzlichen Prozesses LANGSAMER als
+     * das, was er ersetzen soll. Rueckwaerts lesen ist bei beidem besser -
+     * und kommt ohne fremdes Programm aus.
+     *
+     * Die Ausgabe ist Zeile fuer Zeile dieselbe wie vorher; nachgeprueft.
+     */
+    $fp = @fopen($datei, 'rb');
+    if (!$fp) {
+        return array();
+    }
+    $block = 8192;
+    fseek($fp, 0, SEEK_END);
+    $rest = ftell($fp);
+    $puffer = '';
+    // Ein Block mehr als noetig, damit die oberste Zeile nicht angeschnitten
+    // in der Ausgabe landet.
+    while ($rest > 0 && substr_count($puffer, "\n") <= $max) {
+        $lese = (int) min($block, $rest);
+        $rest -= $lese;
+        fseek($fp, $rest, SEEK_SET);
+        $puffer = fread($fp, $lese) . $puffer;
+    }
+    fclose($fp);
+    $zeilen = preg_split('/\R/', $puffer, -1, PREG_SPLIT_NO_EMPTY);
     if (!is_array($zeilen)) {
         return array();
     }

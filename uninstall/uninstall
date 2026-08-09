@@ -5,16 +5,59 @@
 PDIR=$3
 
 echo "<INFO> stoppe Midea2Lox"
-killall midea2lox.py 2>/dev/null
-sleep 1
+# Ueber die PID-Datei, nicht ueber killall: killall sucht nach dem
+# Prozessnamen, und der ist bei einem Skript mit Shebang-Zeile der
+# Interpreter (python3). "killall midea2lox.py" hat deshalb nie etwas
+# beendet - der Dienst lief nach dem Deinstallieren weiter, bis zum
+# naechsten Neustart.
+BASE="${5:-${LBHOMEDIR:-/opt/loxberry}}"
+PIDDATEI="$BASE/data/plugins/${PDIR:-midea2lox}/dienst.pid"
+if [ -f "$PIDDATEI" ]; then
+	PID=$(cat "$PIDDATEI" 2>/dev/null)
+	case "$PID" in
+		''|*[!0-9]*) PID="" ;;
+	esac
+	if [ -n "$PID" ] && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null \
+	     | sed 's#.*/##' | grep -qx "midea2lox.py"; then
+		kill "$PID" 2>/dev/null
+		i=0
+		while [ $i -lt 20 ] && kill -0 "$PID" 2>/dev/null; do
+			sleep 0.25
+			i=$((i + 1))
+		done
+		kill -9 "$PID" 2>/dev/null
+		echo "<OK> Dienst beendet."
+	fi
+	rm -f "$PIDDATEI"
+else
+	echo "<INFO> Kein laufender Dienst gefunden."
+fi
 
 # Die virtuelle Python-Umgebung liegt unter bin/plugins/<Ordner>/venv und
 # belegt je nach Fassung 60 bis 100 MB. LoxBerry entfernt das Verzeichnis
 # beim Deinstallieren zwar in aller Regel selbst - schaden kann es nicht,
 # und auf Systemen, auf denen es liegenbleibt, ist es damit erledigt.
-if [ -n "$PDIR" ] && [ -d "$LBPBIN/$PDIR/venv" ]; then
-	echo "<INFO> entferne die virtuelle Python-Umgebung"
-	rm -rf "$LBPBIN/$PDIR/venv"
+#
+# ACHTUNG, hier stand ein Fehler: Bis 4.0.0 lautete die Bedingung
+#     [ -d "$LBPBIN/$PDIR/venv" ]
+# $LBPBIN wird in einem uninstall-Skript aber NICHT gesetzt - LoxBerry
+# uebergibt die Pfade als Argumente ($1..$5), nicht als Umgebungsvariablen.
+# Die Bedingung pruefte damit auf "/<ordner>/venv", also auf einen Pfad
+# direkt unter der Wurzel. Der existiert nie, der Block lief nie, und die
+# 60 bis 100 MB blieben bei jedem betroffenen System liegen.
+VENV="$BASE/bin/plugins/${PDIR:-midea2lox}/venv"
+if [ -d "$VENV" ]; then
+	echo "<INFO> entferne die virtuelle Python-Umgebung ($VENV)"
+	rm -rf "$VENV"
 fi
 
+# Die Sicherung der Konfiguration liegt neben dem Konfigordner, damit sie
+# Update und Neuinstallation uebersteht. Beim Deinstallieren ist genau das
+# falsch: darin stehen Geraetetoken und -schluessel der Klimageraete.
+BK="$BASE/config/plugins/${PDIR:-midea2lox}.backup.json"
+if [ -f "$BK" ]; then
+	rm -f "$BK" && echo "<OK> Sicherung der Konfiguration entfernt."
+fi
+
+echo "<INFO> Der minuetliche Waechter wird mit dem Cron-Eintrag von LoxBerry entfernt."
 exit 0

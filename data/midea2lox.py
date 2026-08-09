@@ -9,6 +9,106 @@ cfg_path = 'REPLACELBPCONFIGDIR' #### REPLACE LBPCONFIGDIR ####
 log_path = 'REPLACELBPLOGDIR' #### REPLACE LBPLOGDIR ####
 home_path = 'REPLACELBHOMEDIR' #### REPLACE LBHOMEDIR ####
 
+# ===========================================================================
+# Umwandlung eingehender UDP-Woerter - OHNE eval()
+# ===========================================================================
+#
+# Bis 4.0.0 wurden die Werte aus dem UDP-Paket mit eval() in Python-Objekte
+# verwandelt, an 27 Stellen. Die meisten davon standen hinter einer
+# Weissliste ("power.True"/"power.False" und aehnlich) und waren damit
+# ungefaehrlich. DREI standen es nicht:
+#
+#     Zeile 317  elif eachArg.split(".")[0] == "humidity":
+#                    device.target_humidity = eval(eachArg.split(".")[1])
+#     Zeile 323  ... == "h_swing_angle":
+#                    ... = eval('ac.SwingAngle.' + eachArg.split(".")[1])
+#     Zeile 329  ... == "v_swing_angle":  (dasselbe)
+#
+# Geprueft wurde jeweils nur das Wort VOR dem ersten Punkt. Alles dahinter
+# ging ungefiltert in eval(). Nachgestellt mit einer Attrappe: beide Muster
+# haben Code ausgefuehrt.
+#
+#     humidity.exec(chr(105)+chr(109)+...)              -> ausgefuehrt
+#     h_swing_angle.A if 0 else exec(chr(105)+...)      -> ausgefuehrt
+#
+# Punkte im Schadcode braucht es nicht: chr() setzt jede Zeichenkette
+# zusammen. Beim zweiten Muster sorgt "A if 0 else ..." dafuer, dass der
+# unbrauchbare Vorspann 'ac.SwingAngle.A' gar nicht erst ausgewertet wird.
+#
+# Der Socket horcht auf allen Adressen des LoxBerry. Wer ein UDP-Paket
+# dorthin schicken kann, konnte also Befehle mit den Rechten des Benutzers
+# loxberry ausfuehren.
+#
+# (Eine Einschraenkung der Ehrlichkeit halber: die drei Stellen liegen
+# hinter einer Faehigkeitsabfrage des Geraets - supports_humidity bzw.
+# supports_*_swing_angle. Ein Angreifer muss also eine Geraetenummer und
+# eine erreichbare Geraete-IP mitschicken; beides steht ihm frei, die IP
+# darf auch sein eigener Rechner sein.)
+#
+# Ersetzt durch feste Zuordnungstabellen und Typumwandlung. Was nicht in der
+# Tabelle steht, wird protokolliert und verworfen - nicht ausgefuehrt.
+
+def mi_bool(wort):
+    """'True'/'False' aus dem Paket in einen echten Wahrheitswert.
+
+    Rueckgabe None, wenn es weder das eine noch das andere ist - der
+    Aufrufer verwirft den Befehl dann, statt zu raten.
+    """
+    w = str(wort).strip().lower()
+    if w in ('true', '1', 'on', 'yes'):
+        return True
+    if w in ('false', '0', 'off', 'no'):
+        return False
+    return None
+
+
+def mi_enum(klasse, name):
+    """Einen Aufzaehlungswert ueber seinen Namen holen, ohne eval().
+
+    getattr() statt eval(): getattr kann nur ein Attribut nachschlagen, es
+    kann keinen Ausdruck auswerten. Selbst ein boesartiger Name fuehrt
+    hoechstens zu None, niemals zu ausgefuehrtem Code.
+    """
+    if not name:
+        return None
+    n = str(name).strip().upper()
+    # Nur Buchstaben, Ziffern und Unterstrich - alles andere ist kein
+    # Aufzaehlungsname und hat hier nichts zu suchen.
+    if not n.replace('_', '').isalnum():
+        return None
+    return getattr(klasse, n, None)
+
+
+# Zuordnung Loxone-Wort -> Aufzaehlungswert. Die Tabelle ersetzt das
+# frueher per eval() aufgeloeste support_msmart_ng-Woerterbuch, das
+# Zeichenketten wie 'ac.OperationalMode.AUTO' enthielt.
+def mi_tabellen():
+    return {
+        'operational_mode': {
+            'ac.operational_mode_enum.auto':     'AUTO',
+            'ac.operational_mode_enum.cool':     'COOL',
+            'ac.operational_mode_enum.heat':     'HEAT',
+            'ac.operational_mode_enum.dry':      'DRY',
+            'ac.operational_mode_enum.fan_only': 'FAN_ONLY',
+        },
+        'fan_speed': {
+            'ac.fan_speed_enum.Auto':   'AUTO',
+            # msmart-ng kennt kein FULL - die hoechste Stufe heisst MAX.
+            'ac.fan_speed_enum.Full':   'MAX',
+            'ac.fan_speed_enum.High':   'HIGH',
+            'ac.fan_speed_enum.Medium': 'MEDIUM',
+            'ac.fan_speed_enum.Low':    'LOW',
+            'ac.fan_speed_enum.Silent': 'SILENT',
+        },
+        'swing_mode': {
+            'ac.swing_mode_enum.Off':        'OFF',
+            'ac.swing_mode_enum.Vertical':   'VERTICAL',
+            'ac.swing_mode_enum.Horizontal': 'HORIZONTAL',
+            'ac.swing_mode_enum.Both':       'BOTH',
+        },
+    }
+
+
 # TCP Socket
 async def start_server():
     script_runtime = datetime.now()
@@ -27,14 +127,29 @@ async def start_server():
         sys.exit()
 
     while True:
-        #while datetime.now().hour in range(2,10) or datetime.now().weekday() == 5:
-        if os.path.getsize(log_path + '/midea2lox.log') > 500000:
-        #while datetime.now().weekday() == 5:
-            #### clean log
-            open(log_path + '/midea2lox.log', 'w+')
-            _LOGGER.info('Debuglog cleaned')
-            _LOGGER.info("Midea2Lox Version: {} msmart Version: {}".format(Midea2Lox_Version, __version__))
-            script_runtime = datetime.now()
+        # Die Protokollpflege macht jetzt der RotatingFileHandler (siehe
+        # unten bei der Einrichtung des Loggers).
+        #
+        # Hier stand bis 4.0.0:
+        #     if os.path.getsize(log_path + '/midea2lox.log') > 500000:
+        #         open(log_path + '/midea2lox.log', 'w+')
+        # Zwei Fehler in zwei Zeilen:
+        #
+        # a) os.path.getsize steht INNERHALB der Schleife, aber ausserhalb
+        #    jedes try. Fehlt die Logdatei - weil sie jemand geloescht hat,
+        #    weil logrotate zugeschlagen hat, weil das Verzeichnis neu
+        #    angelegt wurde -, wirft getsize einen FileNotFoundError. Der
+        #    fliegt aus start_server heraus, asyncio.run() endet, der Dienst
+        #    ist tot. Nachgestellt: genau so passiert es.
+        #    Das ist der Weg, auf dem der Dienst wirklich stirbt - nicht der
+        #    ueber sys.exit(), siehe send_to_midea().
+        #
+        # b) Die Datei einfach zu leeren wirft ALLES weg, ohne Sicherung.
+        #    (Die oft genannte Folge "Logdatei voller NULL-Bytes" tritt hier
+        #    uebrigens nicht ein - logging oeffnet mit O_APPEND, jeder
+        #    Schreibvorgang geht ans tatsaechliche Dateiende. Nachgemessen:
+        #    0 NULL-Bytes. Der Grund fuer die Umstellung ist der Verlust der
+        #    Eintraege, nicht deren Verstuemmelung.)
         data, addr = soc.recvfrom(1024)
         data = data.decode('utf-8')
         data = data.split(' ')
@@ -66,27 +181,8 @@ async def send_to_midea(data):
         device_key = None
         device_token = None
         
-        support_msmart_ng = {
-            'ac.operational_mode_enum.auto' : 'ac.OperationalMode.AUTO', 
-            'ac.operational_mode_enum.cool' : 'ac.OperationalMode.COOL', 
-            'ac.operational_mode_enum.heat' : 'ac.OperationalMode.HEAT', 
-            'ac.operational_mode_enum.dry' : 'ac.OperationalMode.DRY', 
-            'ac.operational_mode_enum.fan_only' : 'ac.OperationalMode.FAN_ONLY', 
-            'ac.fan_speed_enum.Auto' : 'ac.FanSpeed.AUTO',
-            # msmart-ng kennt kein FULL - die hoechste Stufe heisst MAX.
-            # Bis Midea2Lox 3.4.8 stand hier 'ac.FanSpeed.FULL'; das loeste
-            # beim Aufloesen ueber eval() einen AttributeError aus, sobald
-            # eine Loxone-Konfiguration "fan_speed_enum.Full" geschickt hat.
-            'ac.fan_speed_enum.Full' : 'ac.FanSpeed.MAX',
-            'ac.fan_speed_enum.High' : 'ac.FanSpeed.HIGH',
-            'ac.fan_speed_enum.Medium' : 'ac.FanSpeed.MEDIUM',
-            'ac.fan_speed_enum.Low' : 'ac.FanSpeed.LOW',
-            'ac.fan_speed_enum.Silent' : 'ac.FanSpeed.SILENT',
-            'ac.swing_mode_enum.Horizontal' : 'ac.SwingMode.HORIZONTAL',
-            'ac.swing_mode_enum.Off' : 'ac.SwingMode.OFF',
-            'ac.swing_mode_enum.Vertical' : 'ac.SwingMode.VERTICAL',
-            'ac.swing_mode_enum.Both' : 'ac.SwingMode.BOTH',
-            }
+        # support_msmart_ng entfaellt - die Zuordnung steht jetzt in
+        # mi_tabellen() und liefert Namen statt auszuwertender Zeichenketten.
 
         for eachArg in data: ### get device_id
             if len(eachArg) in range(10,20) and eachArg.isdigit():
@@ -118,8 +214,9 @@ async def send_to_midea(data):
             _LOGGER.debug("support Mode enabled")
 
         else:
-            if device_id == None:                
-                sys.exit("missing device_id, please check your Loxone config")
+            if device_id == None:
+                _LOGGER.error("missing device_id, please check your Loxone config")
+                return
             try:
                 _LOGGER.debug('get device informations')
                 cfg_devices = configparser.RawConfigParser()
@@ -136,10 +233,25 @@ async def send_to_midea(data):
             except:
                 _LOGGER.warning('couldn´t find Device ID "%s", please do Discover or Check your Loxone config to send the right ID' % (device_id))
                 
+        # sys.exit() statt return war hier ein Missgriff, wenn auch ein
+        # harmloserer als oft angenommen: SystemExit erbt von BaseException,
+        # nicht von Exception. Das "except Exception" am Ende dieser Funktion
+        # faengt es also NICHT - wohl aber das nackte "except:" in
+        # start_server(). Nachgemessen: fuenf von fuenf Paketen ueberlebt,
+        # der Dienst stirbt NICHT.
+        #
+        # Zwei Gruende, es trotzdem zu aendern:
+        #   - Die Meldung geht verloren. Protokolliert wird sys.exc_info(),
+        #     also eine SystemExit-Spur statt des Klartexts.
+        #   - Es ist eine Falle. Wer das nackte "except:" spaeter zu
+        #     "except Exception:" praezisiert - was jeder Ratgeber empfiehlt -,
+        #     macht den Dienst damit unbeabsichtigt toetbar.
         if device_id == None:
-            sys.exit('device ID unknown')
+            _LOGGER.error('device ID unknown')
+            return
         elif device_ip == None:
-            sys.exit('device IP unknown')
+            _LOGGER.error('device IP unknown')
+            return
             
         
         if int(device_id) not in device_id_list: ### Init nur von neuen Devices
@@ -156,7 +268,8 @@ async def send_to_midea(data):
                 except:
                     device._online = False
                     await send_to_loxone(device, 0)
-                    sys.exit("Error on Authenticate")
+                    _LOGGER.error("Error on Authenticate")
+                    return
                 retries = 0
                 
             else:
@@ -217,21 +330,22 @@ async def send_to_midea(data):
                 _LOGGER.info("apply() on support Mode for Loxone Configs createt with Midea2Lox V2.x --> MQTT disabled. If you want to use MQTT you need to update your Loxoneconfig")
                 key = ["True", "False", "ac.operational_mode_enum.auto", "ac.operational_mode_enum.cool", "ac.operational_mode_enum.heat", "ac.operational_mode_enum.dry", "ac.operational_mode_enum.fan_only", "ac.fan_speed_enum.High", "ac.fan_speed_enum.Medium", "ac.fan_speed_enum.Low", "ac.fan_speed_enum.Auto", "ac.fan_speed_enum.Silent", "ac.swing_mode_enum.Off", "ac.swing_mode_enum.Vertical", "ac.swing_mode_enum.Horizontal", "ac.swing_mode_enum.Both"] 
                 if data[0] in key and data[1] in key and data[3] in key and data[4] in key and data[5] in key and data[6] in key and data[7] in key:
-                    device.power_state = eval(data[0])
-                    device.beep = eval(data[1])
+                    tab = mi_tabellen()
+                    device.power_state = mi_bool(data[0])
+                    device.beep = mi_bool(data[1])
                     device.target_temperature = int(data[2])
-                    device.operational_mode = eval(support_msmart_ng[data[3]])
-                    device.fan_speed = eval(support_msmart_ng[data[4]])
-                    device.swing_mode = eval(support_msmart_ng[data[5]])
-                    device.eco = eval(data[6])
-                    device.turbo = eval(data[7])
+                    device.operational_mode = mi_enum(ac.OperationalMode, tab['operational_mode'].get(data[3]))
+                    device.fan_speed = mi_enum(ac.FanSpeed, tab['fan_speed'].get(data[4]))
+                    device.swing_mode = mi_enum(ac.SwingMode, tab['swing_mode'].get(data[5]))
+                    device.eco = mi_bool(data[6])
+                    device.turbo = mi_bool(data[7])
                 else:
                     for eachArg in data:
                         if eachArg not in key and eachArg != data[2] and eachArg != data[8] and eachArg != data[9]:
                             print("getting wrong Argument: ", eachArg)
                             _LOGGER.error("getting wrong Argument: '{}'. Please check your Loxone config.".format(eachArg))                        
                     _LOGGER.info("allowed Arguments: {}".format(key))
-                    sys.exit()
+                    return
 
             else: # new find command logic. Need new Loxone config (power.True, tone.True, eco.True, turbo.True -- and False of each)
                 if oldLox == 1:
@@ -271,37 +385,46 @@ async def send_to_midea(data):
                 
                 for eachArg in data: #find keys from Loxone to msmart
                     if eachArg in power:
-                        device.power_state = eval(eachArg.split(".")[1])
+                        device.power_state = mi_bool(eachArg.split(".")[1])
                         _LOGGER.debug("Device Power state '{}'".format(device.power_state))
                     elif eachArg in tone:
-                        device.beep = eval(eachArg.split(".")[1])                
+                        device.beep = mi_bool(eachArg.split(".")[1])
                         _LOGGER.debug("Device promt Tone '{}'".format(device.beep))
                     elif eachArg in eco:
                         if device.supports_eco:
-                            device.eco = eval(eachArg.split(".")[1])                
+                            device.eco = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug("Device Eco Mode '{}'".format(device.eco))
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in turbo:
                         if device.supports_turbo:
-                            device.turbo = eval(eachArg.split(".")[1])                
+                            device.turbo = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug("Device Turbo Mode '{}'".format(device.turbo))
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in operation:
-                        device.operational_mode = eval(support_msmart_ng[eachArg])
+                        device.operational_mode = mi_enum(ac.OperationalMode, mi_tabellen()['operational_mode'].get(eachArg))
                         _LOGGER.debug(device.operational_mode)
-                    elif "fan_speed_enum" in eachArg:
-                        if eachArg.split(".")[2].isdigit():
+                    elif eachArg.startswith("ac.fan_speed_enum."):
+                        # Frueher: elif "fan_speed_enum" in eachArg - eine
+                        # TEILSTRING-Pruefung. Damit kam jedes Wort hier an,
+                        # das die Zeichenfolge irgendwo enthielt.
+                        teile = eachArg.split(".")
+                        rest = teile[2] if len(teile) > 2 else ''
+                        if rest.isdigit():
                             if device.supports_custom_fan_speed:
-                                device.fan_speed = int(eachArg.split(".")[2])
+                                device.fan_speed = int(rest)
                             else:
                                 _LOGGER.warning("device is not capable of property {}".format(eachArg))
                         else:
-                            device.fan_speed = eval('ac.FanSpeed.' + str(eachArg.split(".")[2].upper()))
+                            wert = mi_enum(ac.FanSpeed, mi_tabellen()['fan_speed'].get(eachArg))
+                            if wert is None:
+                                _LOGGER.error("unbekannte Luefterstufe '{}' - Befehl verworfen".format(eachArg))
+                            else:
+                                device.fan_speed = wert
                         _LOGGER.debug(device.fan_speed)
                     elif eachArg in swing_modes:
-                        device.swing_mode = eval(support_msmart_ng[eachArg])
+                        device.swing_mode = mi_enum(ac.SwingMode, mi_tabellen()['swing_mode'].get(eachArg))
                         _LOGGER.debug(device.swing_mode)
                     elif len(eachArg) == 2 and eachArg.isdigit():
                         device.target_temperature = int(eachArg)
@@ -314,37 +437,51 @@ async def send_to_midea(data):
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg.split(".")[0] == "humidity":
                         if device.supports_humidity:
-                            device.target_humidity = eval(eachArg.split(".")[1])
+                            # Eine Prozentzahl, nichts sonst. Bis 4.0.0 ging
+                            # hier ALLES hinter dem Punkt in eval().
+                            roh = eachArg.split(".")[1] if "." in eachArg else ''
+                            if roh.isdigit() and 0 <= int(roh) <= 100:
+                                device.target_humidity = int(roh)
+                            else:
+                                _LOGGER.error("ungueltige Sollfeuchte '{}' - Befehl verworfen".format(eachArg))
                             _LOGGER.debug(device.target_humidity)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg.split(".")[0] == "h_swing_angle":
                         if device.supports_horizontal_swing_angle:
-                            device.horizontal_swing_angle = eval('ac.SwingAngle.' + eachArg.split(".")[1])
+                            wert = mi_enum(ac.SwingAngle, eachArg.split(".")[1] if "." in eachArg else '')
+                            if wert is None:
+                                _LOGGER.error("unbekannter Schwenkwinkel '{}' - Befehl verworfen".format(eachArg))
+                            else:
+                                device.horizontal_swing_angle = wert
                             _LOGGER.debug(device.horizontal_swing_angle)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg.split(".")[0] == "v_swing_angle":
                         if device.supports_vertical_swing_angle:
-                            device.vertical_swing_angle = eval('ac.SwingAngle.' + eachArg.split(".")[1])
+                            wert = mi_enum(ac.SwingAngle, eachArg.split(".")[1] if "." in eachArg else '')
+                            if wert is None:
+                                _LOGGER.error("unbekannter Schwenkwinkel '{}' - Befehl verworfen".format(eachArg))
+                            else:
+                                device.vertical_swing_angle = wert
                             _LOGGER.debug(device.vertical_swing_angle)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in freeze:
                         if device.supports_freeze_protection:
-                            device.freeze_protection = eval(eachArg.split(".")[1])
+                            device.freeze_protection = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.freeze_protection)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in sleep:
-                        device.sleep = eval(eachArg.split(".")[1])
+                        device.sleep = mi_bool(eachArg.split(".")[1])
                         _LOGGER.debug(device.sleep)
                     elif eachArg in follow:
-                        device.follow_me = eval(eachArg.split(".")[1])
+                        device.follow_me = mi_bool(eachArg.split(".")[1])
                         _LOGGER.debug(device.follow_me)
                     elif eachArg in purifier:
                         if device.supports_purifier:
-                            device.purifier = eval(eachArg.split(".")[1])
+                            device.purifier = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.purifier)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
@@ -356,7 +493,16 @@ async def send_to_midea(data):
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in rate_select: ### ToDo
                         if eachArg in device.supported_rate_selects:
-                            device.rate_select = eval(eachArg.split(".")[1])
+                            wert = mi_enum(ac.RateSelect, eachArg.split(".")[1]) \
+                                   if hasattr(ac, 'RateSelect') else None
+                            if wert is None:
+                                # Die Weissliste rate_select deckt die Namen ab;
+                                # kennt msmart die Aufzaehlung nicht, wird der
+                                # Name unveraendert durchgereicht - so wie es
+                                # die Bibliothek bis 4.0.0 erwartet hat.
+                                device.rate_select = eachArg.split(".")[1]
+                            else:
+                                device.rate_select = wert
                             _LOGGER.debug(device.rate_select)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
@@ -365,25 +511,25 @@ async def send_to_midea(data):
                         # _LOGGER.debug(device.BreezeMode)
                     elif eachArg in breeze_away: ### ToDo
                         if device.supports_breeze_away:
-                            device.breeze_away = eval(eachArg.split(".")[1])
+                            device.breeze_away = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breeze_away)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in breeze_mild: ### ToDo
                         if device.supports_breeze_mild:
-                            device.breeze_mild = eval(eachArg.split(".")[1])
+                            device.breeze_mild = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breeze_mild)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in breezeless: ### ToDo
                         if device.supports_breezeless:
-                            device.breezeless = eval(eachArg.split(".")[1])
+                            device.breezeless = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breezeless)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
                     elif eachArg in ieco: ### ToDo
                         if device.supports_ieco:
-                            device.ieco = eval(eachArg.split(".")[1])
+                            device.ieco = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.ieco)
                         else:
                             _LOGGER.warning("device is not capable of property {}".format(eachArg))
@@ -444,10 +590,29 @@ async def send_to_midea(data):
         _LOGGER.debug("{}s".format(round(time.time()-runtime,2)))
         
         
+# Zeitgrenze fuer jeden einzelnen Aufruf an den Miniserver, in Sekunden.
+LOX_TIMEOUT = 5
+
+
 async def send_to_loxone(device, support_mode):
     r_error = 0
 
-    address_loxone = ("http://%s:%s@%s:%s/dev/sps/io/" % (LoxUser, LoxPassword, LoxIP, LoxPort))    
+    # Zugangsdaten maskieren, sonst zerlegt ein Sonderzeichen die Adresse.
+    #
+    # Nachgemessen mit urlparse gegen die ungeschuetzte Fassung:
+    #     Passwort "Pass#wort" -> Rechner wird "admin", Passwort None
+    #     Passwort "x/y"       -> Rechner wird "admin", Passwort None
+    #     Passwort "was?"      -> Rechner wird "admin", Passwort None
+    # Das '#' beendet die Adresse und macht den Rest zum Anker, '/' beginnt
+    # den Pfad, '?' die Abfrage. Das Ergebnis ist keine Fehlermeldung,
+    # sondern eine Anfrage an den falschen Rechner.
+    #
+    # ('@' im Passwort geht uebrigens gut: der Parser nimmt das LETZTE '@'
+    #  als Trenner. Maskiert wird es trotzdem - Verlassen moechte man sich
+    #  darauf nicht.)
+    address_loxone = ("http://%s:%s@%s:%s/dev/sps/io/"
+                      % (quote(str(LoxUser), safe=''), quote(str(LoxPassword), safe=''),
+                         LoxIP, LoxPort))
 
     try:
         addresses = [
@@ -498,6 +663,7 @@ async def send_to_loxone(device, support_mode):
         _LOGGER.info("Device is {}! Send status to MQTTGateway for Midea.{} @ {} succesful".format("Online" if device.online else "Offline",device.id, device.ip))
             
     else: #Publish to Loxone Inputs over HTTP
+      try:
         if device.online == True:
             for eachArg in addresses:
                 if support_mode == 1: # support Loxoneconfigs created with Midea2Lox V2.x
@@ -505,7 +671,10 @@ async def send_to_loxone(device, support_mode):
                 else: 
                     HTTPrequest = 'Midea2Lox_' + eachArg.replace('/' , '_')
                 HTTPrequest = address_loxone + HTTPrequest.replace(',' , '/')
-                r = requests.get(HTTPrequest)                
+                # Ohne Zeitgrenze wartet requests unbegrenzt. Haengt der
+                # Miniserver, steht der Dienst - und mit ihm die Annahme
+                # weiterer UDP-Pakete, denn die Schleife laeuft der Reihe nach.
+                r = requests.get(HTTPrequest, timeout=LOX_TIMEOUT)
                 if r.status_code != 200:
                     r_error = 1
                     Loxinput = HTTPrequest.replace(address_loxone,'')
@@ -517,13 +686,18 @@ async def send_to_loxone(device, support_mode):
             else: 
                 HTTPrequest = 'Midea2Lox_' + addresses[10].replace('/' , '_')
             HTTPrequest = address_loxone + HTTPrequest.replace(',' , '/')
-            r = requests.get(HTTPrequest)
+            r = requests.get(HTTPrequest, timeout=LOX_TIMEOUT)
             if r.status_code != 200:
                 r_error = 1
                 _LOGGER.error("Error {} on set Loxone Input Midea_{}_online, please Check User PW and IP from Miniserver in Loxberry config and the Names of Loxone Inputs.".format(r.status_code, device.id))
         
         if r_error == 0:
             _LOGGER.info("Device is {}! Set Loxone Inputs over HTTP for Midea.{} @ {} successful".format("Online" if device.online else "Offline",device.id, device.ip))
+      except requests.exceptions.Timeout:
+        _LOGGER.error("Miniserver {} hat innerhalb von {} s nicht geantwortet - "
+                      "Werte dieses Durchgangs verworfen.".format(LoxIP, LOX_TIMEOUT))
+      except requests.exceptions.RequestException as e:
+        _LOGGER.error("Miniserver {} nicht erreichbar: {}".format(LoxIP, e))
 
 
 # Ist ein Callback, der ausgeführt wird, wenn sich mit dem Broker verbunden wird
@@ -563,6 +737,7 @@ try:
     import configparser
     import time
     from ipaddress import ip_address, IPv4Address
+    from urllib.parse import quote
     import paho.mqtt.client as mqtt
     import json
     import asyncio
@@ -587,12 +762,28 @@ try:
     LoxUser = cfg.get(Miniserver,'ADMIN')
 
     _LOGGER = logging.getLogger("Midea2Lox.py")
+
+    # RotatingFileHandler statt basicConfig plus Selbstleeren.
+    #
+    # Bis 4.0.0 wurde die Datei in der Empfangsschleife bei 500 kB einfach
+    # ueberschrieben (open(..., 'w+')). Damit war der gesamte bisherige
+    # Verlauf fort - genau dann, wenn er am ehesten gebraucht wird, naemlich
+    # nach laengerer Stoerung. Der Handler haelt stattdessen eine Sicherung
+    # vor (midea2lox.log.1) und braucht keinen Eingriff im Betrieb.
+    #
+    # os.makedirs davor: fehlt das Verzeichnis, scheiterte frueher schon das
+    # Anlegen der Datei - und die Schleife stuerzte spaeter an getsize ab.
+    import logging.handlers
+    os.makedirs(log_path, exist_ok=True)
+    _stufe = logging.DEBUG if DEBUG == "1" else logging.INFO
+    _handler = logging.handlers.RotatingFileHandler(
+        log_path + '/midea2lox.log', maxBytes=500000, backupCount=1, encoding='utf-8')
+    _handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s', datefmt='%d.%m %H:%M'))
+    logging.basicConfig(level=_stufe, handlers=[_handler])
     if DEBUG == "1":
-       logging.basicConfig(level=logging.DEBUG, filename= log_path + '/midea2lox.log', format='%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s', datefmt='%d.%m %H:%M')
        print("Debug is True")
        _LOGGER.debug("Debug is True")
-    else:
-       logging.basicConfig(level=logging.INFO, filename= log_path + '/midea2lox.log', format='%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s', datefmt='%d.%m %H:%M')
     
     ###Version
     # Bis 3.4.8 stand hier ein fest verdrahteter MD5-Schluessel

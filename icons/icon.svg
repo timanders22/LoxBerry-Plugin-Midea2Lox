@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="50%" fx="35%" fy="35%">
+      <stop offset="0%" stop-color="#7dc424" />
+      <stop offset="65%" stop-color="#6dac20" />
+      <stop offset="100%" stop-color="#568819" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Badge Ring -->
+  <circle cx="256" cy="256" r="246" fill="url(#bg-grad)" />
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" />
+
+  <g filter="url(#shadow)">
+    <!-- AC Unit + Airflows (exakt auf Mittelachse X=256 zentriert) -->
+    <g transform="translate(76.8, -5) scale(0.7)">
+      <!-- Gehaeuse des Innengeraets -->
+      <rect x="108" y="140" width="296" height="116" rx="26" ry="26"
+            fill="none" stroke="#ffffff" stroke-width="24"/>
+      <!-- Luftaustritt am unteren Rand des Gehaeuses -->
+      <line x1="140" y1="222" x2="372" y2="222"
+            stroke="#ffffff" stroke-width="16" stroke-linecap="round"/>
+
+      <!-- Drei Luftstroeme, nach unten hin schwaecher werdend -->
+      <g fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round">
+        <path d="M 168 300 q 44 -30 88 0 q 44 30 88 0"/>
+        <path d="M 184 348 q 36 -26 72 0 q 36 26 72 0" stroke-opacity="0.75"/>
+        <path d="M 200 396 q 28 -22 56 0 q 28 22 56 0" stroke-opacity="0.5"/>
+      </g>
+    </g>
+
+    <!-- Dashed Line -->
+    <path d="M 150 345 L 362 345" stroke="#ffffff" stroke-width="4" stroke-dasharray="6 8" opacity="0.8" />
+  </g>
+
+  <!-- Typography -->
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="0.5">Midea 2 Lox</text>
+  <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
+</svg>

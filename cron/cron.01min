@@ -1,0 +1,40 @@
+#!/bin/sh
+# Midea2Lox - Waechter, minuetlich.
+#
+# WARUM ES DIESEN WAECHTER GIBT
+# Das daemon-Skript startet den Dienst beim Systemstart und auf Knopfdruck.
+# Faellt der Prozess dazwischen aus, blieb das Plugin bis 4.0.0 so lange
+# stumm, bis jemand die Oberflaeche oeffnete und von Hand neu startete - und
+# Loxone bekam davon nichts mit ausser ausbleibenden Werten.
+#
+# Ausfallwege gab es mehrere; der sicherste war ein FileNotFoundError auf die
+# Logdatei mitten in der Empfangsschleife (siehe midea2lox.py, Kommentar in
+# start_server). Der ist behoben - ein Waechter gehoert trotzdem dazu: ein
+# Dienst, der wochenlang durchlaufen soll, faellt irgendwann aus einem Grund
+# aus, den niemand vorhergesehen hat.
+#
+# Alle Pfade werden aus EINEM Platzhalter abgeleitet. REPLACELBPDATADIR ist
+# <home>/data/plugins/<ordner>; daraus ergeben sich Ordnername und
+# Wurzelverzeichnis. So kann kein zweiter Platzhalter danebenliegen.
+
+PDATA="REPLACELBPDATADIR"
+[ -d "$PDATA" ] || exit 0
+
+PDIR=$(basename "$PDATA")
+HOME_DIR=$(cd "$PDATA/../../.." 2>/dev/null && pwd)
+[ -n "$HOME_DIR" ] || exit 0
+
+DAEMON="$HOME_DIR/system/daemons/plugins/$PDIR"
+[ -x "$DAEMON" ] || exit 0
+
+# Kein Neustart, solange der Anwender den Dienst bewusst angehalten hat.
+# Die Merkdatei legt das daemon-Skript bei "start" an und bei "stop" fort.
+[ -f "$PDATA/soll_laufen" ] || exit 0
+
+if ! "$DAEMON" status >/dev/null 2>&1; then
+    LOG="$HOME_DIR/log/plugins/$PDIR/midea2lox.log"
+    echo "$(date '+%d.%m %H:%M') Waechter        WARNING  :0 Dienst lief nicht - Neustart." \
+        >> "$LOG" 2>/dev/null
+    "$DAEMON" start >/dev/null 2>&1
+fi
+exit 0

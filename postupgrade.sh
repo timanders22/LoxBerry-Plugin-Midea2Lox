@@ -5,9 +5,7 @@
 # und startet den Dienst.
 
 PTEMPDIR=$1
-PSHNAME=$2
 PDIR=$3
-PVERSION=$4
 LBHOME=$5
 
 echo "<INFO> Stelle die gesicherten Konfigurationsdateien wieder her"

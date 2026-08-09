@@ -13,8 +13,6 @@
 # mit Rueckgabewert 2 ab, statt Erfolg zu melden und ein totes Plugin zu
 # hinterlassen.
 
-PTEMPDIR=$1
-PSHNAME=$2
 PDIR=$3
 PVERSION=$4
 

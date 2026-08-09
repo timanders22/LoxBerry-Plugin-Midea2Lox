@@ -1,0 +1,19 @@
+# Die virtuelle Python-Umgebung entsteht bei der Installation unter
+# bin/plugins/<Ordner>/venv und belegt 60 bis 100 MB. Sie gehoert nicht
+# ins Paket.
+venv/
+
+# Uebersetzte Python-Zwischenstaende
+__pycache__/
+*.pyc
+*.pyo
+
+# Laufzeitdaten
+*.pid
+*.tmp
+
+# Betriebssystem- und Editorreste
+.DS_Store
+Thumbs.db
+*~
+*.swp
