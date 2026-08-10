@@ -5,6 +5,35 @@
  * Kompatibel mit PHP 7.4 und PHP 8.x (LoxBerry 3.x/4.x).
  */
 
+
+/* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
+ *
+ * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
+ * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
+ * Installation genauso wie eine an einem anderen Ort - und es trifft auch
+ * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
+ * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
+ * abfangen muss).
+ *
+ * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
+ * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
+ */
+if (!function_exists('lb_wurzel_ermitteln')) {
+    function lb_wurzel_ermitteln()
+    {
+        $d = __DIR__;
+        for ($i = 0; $i < 8; $i++) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+                return $d;
+            }
+            $eltern = dirname($d);
+            if ($eltern === $d) { break; }
+            $d = $eltern;
+        }
+        return '';
+    }
+}
+
 function mi_paths()
 {
     static $p = null;
@@ -13,11 +42,11 @@ function mi_paths()
     }
     $home = getenv('LBHOMEDIR');
     if (!$home || !is_dir($home)) {
-        foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
             if (is_dir($k)) { $home = $k; break; }
         }
     }
-    $home = $home ? $home : '/opt/loxberry';
+    $home = $home ? $home : lb_wurzel_ermitteln();
     // Den Pluginordner aus dem eigenen Ablageort ableiten statt ihn fest
     // einzutragen: er heisst laut plugin.cfg "Midea2Lox" mit grossen
     // Buchstaben, und unter Linux ist das ein Unterschied.
