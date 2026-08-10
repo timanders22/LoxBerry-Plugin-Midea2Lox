@@ -4,14 +4,22 @@ ARGV1=$1 # First argument is temp folder during install
 ARGV3=$3 # Third argument is Plugin installation folder
 ARGV5=$5 # Fifth argument is Base folder of LoxBerry
 
-echo "<INFO> Creating temporary folders for upgrading"
-mkdir -p /tmp/$ARGV1\_upgrade
-mkdir -p /tmp/$ARGV1\_upgrade/config
-#mkdir -p /tmp/$ARGV1\_upgrade/log
-#mkdir -p /tmp/$ARGV1\_upgrade/files
+# Der Sicherungsordner liegt unter data/, NICHT unter /tmp.
+#
+# /tmp ist auf dem LoxBerry eine Ramdisk: bricht die Installation ab oder
+# startet der Rechner dazwischen neu, ist die Sicherung weg. Und /tmp ist fuer
+# jeden lesbar - in der Konfiguration stehen die Zugangsdaten des Midea-Kontos.
+# Geaendert am 10.08.2026 nach der Durchsicht aller Plugins.
+SICHER="$ARGV5/data/plugins/$ARGV3/upgrade_sicherung"
+
+echo "<INFO> Creating backup folder for upgrading $SICHER"
+rm -rf "$SICHER" 2>/dev/null
+mkdir -p "$SICHER/config"
+chmod 0700 "$SICHER" 2>/dev/null
 
 echo "<INFO> Backing up existing config files"
-cp -p -v -r $ARGV5/config/plugins/$ARGV3/ /tmp/$ARGV1\_upgrade/config
+cp -a "$ARGV5/config/plugins/$ARGV3/." "$SICHER/config/" 2>/dev/null \
+    && echo "<OK> Konfiguration gesichert (Rechte 0700)."
 
 echo "<INFO> stoppe Midea2Lox"
 # Ueber das Startskript beenden, nicht ueber killall.
