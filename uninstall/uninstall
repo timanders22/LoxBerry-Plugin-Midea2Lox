@@ -1,4 +1,24 @@
 #!/bin/bash
+# Rueckfall ohne fest verdrahteten Pfad.
+#
+# Ein fest verdrahteter Systempfad ist aus zwei Gruenden falsch: LoxBerry laesst
+# sich anderswohin installieren, und der Pluginpruefer beanstandet die
+# Zeichenkette. Eine feste Anzahl von ".." waere nur die naechste Wette -
+# je nachdem, wohin LoxBerry diese Datei bei der Installation legt, sind es
+# drei oder vier Ebenen. Deshalb wird aufwaerts gesucht, bis ein
+# Verzeichnis gefunden ist, das nachweislich eine LoxBerry-Wurzel ist:
+# es traegt config/plugins UND data/plugins.
+lb_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ]; then
+            echo "$v"; return 0
+        fi
+        v=$(dirname "$v"); i=$((i + 1))
+    done
+    return 1
+}
 
 # Wird beim Deinstallieren des Plugins ausgefuehrt.
 
@@ -10,7 +30,8 @@ echo "<INFO> stoppe Midea2Lox"
 # Interpreter (python3). "killall midea2lox.py" hat deshalb nie etwas
 # beendet - der Dienst lief nach dem Deinstallieren weiter, bis zum
 # naechsten Neustart.
-BASE="${5:-${LBHOMEDIR:-/opt/loxberry}}"
+BASE="${5:-$LBHOMEDIR}"
+[ -n "$BASE" ] && [ -d "$BASE" ] || BASE=$(lb_wurzel_suchen)
 PIDDATEI="$BASE/data/plugins/${PDIR:-midea2lox}/dienst.pid"
 if [ -f "$PIDDATEI" ]; then
 	PID=$(cat "$PIDDATEI" 2>/dev/null)
