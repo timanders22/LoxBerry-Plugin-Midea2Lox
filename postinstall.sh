@@ -110,4 +110,42 @@ echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
 /bin/echo "#  Anleitung samt kompletter Baustein-Liste zum Nachbauen."
 /bin/echo "#############################################################################################"
 
+
+# ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
+# Zurueckspielen aus der Zweitschrift - aber NUR, wenn die Datei des Nutzers
+# wirklich verloren ist. Erkannt wird das an dreierlei: sie fehlt, sie ist
+# leer, oder sie ist zeichengenau die mitgelieferte Vorgabe (Pruefsumme
+# unten). Der letzte Fall ist der eigentliche: genau so sieht die Datei nach
+# dem Kopierschritt des Installers aus.
+#
+# Eine gueltige Konfiguration wird NIE ueberschrieben. Eine Sicherung, die
+# echte Einstellungen ersetzt, waere schlimmer als gar keine.
+NETZ_BASE="${5:-$LBHOMEDIR}"
+NETZ_PDIR="${3:-Midea2Lox}"
+NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
+netz_zurueck() {
+    datei=$1; soll=$2
+    ziel="$NETZ_CFG/$datei"
+    zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"
+    [ -f "$zweit" ] || return 0
+    verloren=0
+    if [ ! -f "$ziel" ] || [ ! -s "$ziel" ]; then
+        verloren=1
+    else
+        ist=$(sha256sum "$ziel" 2>/dev/null | cut -d" " -f1)
+        [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
+    fi
+    if [ "$verloren" = "1" ]; then
+        if cp -p "$zweit" "$ziel" 2>/dev/null; then
+            echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
+        else
+            echo "<WARNING> $datei liess sich nicht zurueckspielen. Die Sicherung"
+            echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
+        fi
+    fi
+}
+netz_zurueck "devices.cfg" "db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
+netz_zurueck "midea2lox.cfg" "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+netz_zurueck "mqtt_subscriptions.cfg" "a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
+
 exit 0

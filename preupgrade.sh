@@ -50,4 +50,30 @@ else
 fi
 
 # Exit with Status 0
+
+# ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
+# Zweitschrift NEBEN den Konfigurationsordner, zusaetzlich zur bisherigen
+# Sicherung. Grund: der Installer kopiert config/* aus dem Archiv ueber
+# config/plugins/<ordner> (plugininstall.pl Zeile 899, cp -r ohne -n) und
+# ueberschreibt dabei die Datei des Nutzers. Bisher haing die Rettung allein
+# an postupgrade.sh. Laeuft das aus irgendeinem Grund nicht durch, greift
+# jetzt postinstall.sh auf diese Zweitschrift zu - sie liegt ausserhalb des
+# ueberschriebenen Ordners und wird vom Installer nicht angefasst.
+NETZ_BASE="${5:-$LBHOMEDIR}"
+NETZ_PDIR="${3:-Midea2Lox}"
+NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
+if [ -s "$NETZ_CFG/devices.cfg" ]; then
+    cp -p "$NETZ_CFG/devices.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.devices.cfg" 2>/dev/null \
+        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.devices.cfg" 2>/dev/null
+fi
+if [ -s "$NETZ_CFG/midea2lox.cfg" ]; then
+    cp -p "$NETZ_CFG/midea2lox.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.midea2lox.cfg" 2>/dev/null \
+        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.midea2lox.cfg" 2>/dev/null
+fi
+if [ -s "$NETZ_CFG/mqtt_subscriptions.cfg" ]; then
+    cp -p "$NETZ_CFG/mqtt_subscriptions.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.mqtt_subscriptions.cfg" 2>/dev/null \
+        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.mqtt_subscriptions.cfg" 2>/dev/null
+fi
+echo "<INFO> Zweitschrift der Einstellungen angelegt."
+
 exit 0
