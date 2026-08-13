@@ -119,6 +119,15 @@ if (isset($_POST['test'])) {
     $mi_tab = 'tab-test';
 }
 
+// ---------- Loxone-Vorlage herunterladen (Hausstandard) ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage']) && function_exists('mi_vorlage')) {
+    list($mi_vname, $mi_vinhalt) = mi_vorlage();
+    header('Content-Type: application/x-download');
+    header('Content-Disposition: attachment; filename="' . $mi_vname . '"');
+    echo $mi_vinhalt;
+    exit;
+}
+
 $mi_pid     = mi_dienst_pid();
 $mi_geraete = mi_devices();
 $mi_mq      = mi_mqtt_config();
@@ -142,6 +151,8 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-wrap h2 { color: #4f7d17; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px;
   font-size: 1.15em; margin: 22px 0 8px; }
 .sm-small { font-size: 0.88em; color: #555; }
+.sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-mono { font-family: monospace; }
 .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
 .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
@@ -448,6 +459,15 @@ zu.
 <p class="sm-small"><b><?php echo mi_t('UI.DER_UDP_WEG'); ?></b> <?php echo mi_t('UI.STATTDESSEN_EINEN'); ?> <i><?php echo mi_t('UI.VIRTUELLEN_UDP_EINGANG'); ?></i> <?php echo mi_t('UI.AUF_PORT'); ?> <b><?php echo mi_e($mi_port); ?></b> <?php echo mi_t('UI.ANLEGEN_JE_WERT_EINEN_BEFEHL'); ?></p>
 <pre class="sm-pre">\iMidea/<?php echo mi_e($mi_bsp); ?>/indoor_temperature,\i\v</pre>
 <p class="sm-small"><?php echo mi_t('UI.DAS_MUSTER_HEI_T_SUCHE'); ?> <span class="sm-mono">\i</span> <?php echo mi_t('UI.UND_NIMM_DIE_ZAHL_DIE'); ?><span class="sm-mono">\v</span><?php echo mi_t('UI.TEXT'); ?></p>
+
+<?php if ($mi_geraete) { ?>
+<h2><?php echo mi_t('UI.H_VORLAGE'); ?></h2>
+<div class="sm-hinweis"><?php echo mi_t('UI.H_VORLAGE_TEXT'); ?> <?php echo mi_t('UI.H_VORLAGE_TEXT2'); ?></div>
+<form action="index.php" method="post" style="margin-bottom:14px;">
+  <input data-role="none" type="hidden" name="vorlage" value="1">
+  <button data-role="none" class="sm-btn" type="submit" style="background:#546e7a;"><?php echo mi_t('UI.K_VORLAGE'); ?></button>
+</form>
+<?php } ?>
 </div>
 
 <div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_4_BEFEHLE_AN_DAS'); ?></b><br><br>

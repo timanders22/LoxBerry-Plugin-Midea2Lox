@@ -542,3 +542,41 @@ function mi_log_tail($max = 200)
     }
     return array_slice(array_reverse($zeilen), 0, $max);
 }
+
+/** Vorlage der Gateway-Eingaenge nach dem Heimkino-Kunstgriff (12.08.2026):
+ *  VirtualInHttp mit Dummy-Adresse http://localhost und Abfragezyklus 604800 s,
+ *  nur damit Loxone die richtig benannten Eingaenge anlegt - die Werte kommen
+ *  vom MQTT-Gateway. Format wie Original-Export aus Loxone Config 17.1.
+ *  Enthalten sind je Geraet die fuenf Zahlenwerte aus der Tabelle im Reiter
+ *  "Einbindung in Loxone"; die Textwerte operational_mode und fan_speed
+ *  bleiben aussen vor. */
+function mi_vorlage()
+{
+    $topic   = mi_mqtt_topic();
+    $geraete = mi_devices();
+    $crlf = "\r\n";
+    $werte = array(
+        'power_state'         => array('Ein/Aus',           'false', '0',   '1',  '<v.0>'),
+        'indoor_temperature'  => array('Raumtemperatur',    'true',  '0',   '50', '<v.1> °C'),
+        'outdoor_temperature' => array('Aussentemperatur',  'true',  '-50', '60', '<v.1> °C'),
+        'target_temperature'  => array('Solltemperatur',    'true',  '0',   '40', '<v.1> °C'),
+        'online'              => array('Erreichbarkeit',    'false', '0',   '1',  '<v.0>'),
+    );
+    $o  = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualInHttp HintText="" Title="Midea Klimageraete" Comment="Erzeugt vom LoxBerry-Plugin Midea2Lox (' . date('d.m.Y') . '). Werte kommen vom MQTT-Gateway - Abo ' . htmlspecialchars($topic, ENT_QUOTES | ENT_XML1, 'UTF-8') . '/# noetig." Address="http://localhost" PollingTime="604800">' . $crlf;
+    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
+    foreach ($geraete as $d) {
+        if (!isset($d['id']) || $d['id'] === '') { continue; }
+        // Nicht $d['name'] benutzen: der ist fuer die Oberflaeche bereits
+        // HTML-maskiert (&auml;) und wuerde im XML doppelt maskiert.
+        $name = (isset($d['typ']) && $d['typ'] !== '' ? $d['typ'] : 'Klimageraet') . ' ' . $d['id'];
+        foreach ($werte as $wert => $w) {
+            $titel = $topic . '_' . $d['id'] . '_' . $wert;
+            $o .= "\t" . '<VirtualInHttpCmd Title="' . htmlspecialchars($titel, ENT_QUOTES | ENT_XML1, 'UTF-8') . '" ';
+            $o .= 'Comment="' . htmlspecialchars($w[0] . ' ' . $name, ENT_QUOTES | ENT_XML1, 'UTF-8') . '" Check=" " ';
+            $o .= 'Signed="' . $w[1] . '" Analog="true" SourceValLow="0" DestValLow="0" SourceValHigh="1" DestValHigh="1" DefVal="0" MinVal="' . $w[2] . '" MaxVal="' . $w[3] . '" Unit="' . htmlspecialchars($w[4], ENT_QUOTES | ENT_XML1, 'UTF-8') . '" HintText=""/>' . $crlf;
+        }
+    }
+    $o .= '</VirtualInHttp>' . $crlf;
+    return array('VI_midea2lox.xml', $o);
+}
