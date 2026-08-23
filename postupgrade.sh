@@ -6,6 +6,9 @@
 
 PTEMPDIR=$1
 PDIR=$3
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
+# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
+LBHOMEDIR="${LBHOMEDIR:-$5}"
 LBHOME=$5
 
 # Die Sicherung liegt seit dem 10.08.2026 unter data/ statt unter /tmp: /tmp
@@ -14,7 +17,7 @@ LBHOME=$5
 # Nebenbei behoben: der alte Pfad trug ein zusaetzliches /$PDIR am Ende, weil
 # 'cp -r quelle/ ziel' das Quellverzeichnis MIT anlegt. preupgrade sichert
 # jetzt mit 'cp -a quelle/. ziel/' den Inhalt - ohne die Zwischenebene.
-SICHER="$LBHOME/data/plugins/$PDIR/upgrade_sicherung"
+SICHER="$LBHOME/data/plugins/$PDIR.upgrade_sicherung"
 
 echo "<INFO> Stelle die gesicherten Konfigurationsdateien wieder her"
 if [ -d "$SICHER/config" ] && [ -n "$(ls -A "$SICHER/config" 2>/dev/null)" ]; then

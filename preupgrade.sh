@@ -3,6 +3,9 @@
 ARGV1=$1 # First argument is temp folder during install
 ARGV3=$3 # Third argument is Plugin installation folder
 ARGV5=$5 # Fifth argument is Base folder of LoxBerry
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
+# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
+LBHOMEDIR="${LBHOMEDIR:-$5}"
 
 # Der Sicherungsordner liegt unter data/, NICHT unter /tmp.
 #
@@ -10,7 +13,16 @@ ARGV5=$5 # Fifth argument is Base folder of LoxBerry
 # startet der Rechner dazwischen neu, ist die Sicherung weg. Und /tmp ist fuer
 # jeden lesbar - in der Konfiguration stehen die Zugangsdaten des Midea-Kontos.
 # Geaendert am 10.08.2026 nach der Durchsicht aller Plugins.
-SICHER="$ARGV5/data/plugins/$ARGV3/upgrade_sicherung"
+# Die Sicherung liegt NEBEN dem Ordner, nicht darin. Gemessen an
+# sbin/plugininstall.pl (Zweig master, 23.08.2026): der Installer ruft
+# &purge_installation nicht nur beim Deinstallieren, sondern auch im
+# Upgrade-Zweig (:886), und deren Rumpf loescht ohne jede Bedingung
+# (:1629 ff.) config/plugins/<x>/, bin/plugins/<x>/, data/plugins/<x>/,
+# templates/plugins/<x>/ und beide webfrontend/-Ordner. Eine Sicherung IN
+# data/plugins/<x>/ wird also von genau dem Schritt vernichtet, den sie
+# ueberdauern soll. Der Punkt im Namen ist der ganze Unterschied:
+# "rm -rf .../<x>/" trifft den Nachbarn "<x>.upgrade_sicherung" nicht.
+SICHER="$ARGV5/data/plugins/$ARGV3.upgrade_sicherung"
 
 echo "<INFO> Creating backup folder for upgrading $SICHER"
 rm -rf "$SICHER" 2>/dev/null
