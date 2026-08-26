@@ -119,6 +119,23 @@ if (isset($_POST['test'])) {
     $mi_tab = 'tab-test';
 }
 
+/* ==================================================================
+ * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
+ * ==================================================================
+ *
+ * Stand der Kopf davor, war er beim Aufruf von header() schon
+ * geschrieben - "Cannot modify header information", und der Knopf
+ * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON
+ * statt einer Datei.
+ *
+ * Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos und
+ * headers_sent() immer falsch. Und wer OHNE gueltiges Formularmerkmal
+ * misst, wird vom Wachposten abgewiesen, bevor der Handler anlaeuft.
+ * Beides hat den Fehler lange verdeckt.
+ *
+ * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
+ * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * ================================================================== */
 // ---------- Loxone-Vorlage herunterladen (Hausstandard) ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage']) && function_exists('mi_vorlage')) {
     list($mi_vname, $mi_vinhalt) = mi_vorlage();
@@ -142,8 +159,6 @@ if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion'
     $mi_version = (string) LBSystem::pluginversion();
 }
 
-LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
-                'https://wiki.loxberry.de/plugins/midea2lox/start', 'help.html');
 
 /* ---------------- Einstellungen sichern ----------------
  *
@@ -191,6 +206,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
         }
     }
 }
+
+
+LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
+                'https://wiki.loxberry.de/plugins/midea2lox/start', 'help.html');
 
 ?>
 
