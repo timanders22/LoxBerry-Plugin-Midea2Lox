@@ -97,6 +97,13 @@ function mi_t($schluessel)
     if ($texte === null) {
         $ordner = mi_paths()['home'] . '/templates/plugins/'
                 . mi_paths()['plugin'] . '/lang';
+        /* Rueckfall auf den Plugin-Ordner. Ohne ihn findet das Plugin seine
+         * Texte NUR am installierten Ort - wer es vor der Installation
+         * pruefen will, sieht eine textlose Seite und haelt sie fuer kaputt.
+         * Die uebrigen Plugins des Hauses haben diesen Rueckfall. */
+        if (!is_dir($ordner)) {
+            $ordner = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
+        }
         $texte = @parse_ini_file($ordner . '/language_' . mi_sprache() . '.ini',
                                  true, INI_SCANNER_RAW);
         if (!is_array($texte)) { $texte = array(); }
@@ -579,4 +586,106 @@ function mi_vorlage()
     }
     $o .= '</VirtualInHttp>' . $crlf;
     return array('VI_midea2lox.xml', $o);
+}
+
+
+/**
+ * Die Fassung des LoxBerry-MQTT-Gateways - 0 heisst "nicht feststellbar".
+ *
+ * Sie steht als Mqtt.Gatewayversion in config/system/general.json (ab Werk
+ * 1) und entscheidet, was der Anwender eintragen muss: unter V1 jedes Thema
+ * von Hand auf der Abo-Seite, ab V2 erscheint die Themengruppe von selbst in
+ * den Subscriptions.
+ *
+ * Die Datei wird hier eigens gelesen, obwohl andere Stellen sie auch lesen.
+ * Das ist Absicht: dieser Baustein passt damit in jedes Plugin, unabhaengig
+ * davon, wie es seinen MQTT-Zustand ermittelt - und er geht nicht kaputt,
+ * wenn jemand jene Funktion umbaut.
+ */
+function mi_gateway_fassung()
+{
+    $home = getenv('LBHOMEDIR');
+    if (!$home && defined('LBHOMEDIR')) {
+        $home = LBHOMEDIR;
+    }
+    if (!$home || !is_dir($home)) {
+        return 0;
+    }
+    $d = @json_decode((string) @file_get_contents(
+        $home . '/config/system/general.json'), true);
+    if (!is_array($d)) {
+        return 0;
+    }
+    foreach (array('Mqtt', 'mqtt') as $ab) {
+        if (!isset($d[$ab]) || !is_array($d[$ab])) {
+            continue;
+        }
+        foreach (array('Gatewayversion', 'gatewayversion') as $sl) {
+            if (isset($d[$ab][$sl]) && (string) $d[$ab][$sl] !== '') {
+                return (int) $d[$ab][$sl];
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * Der Hinweis zum MQTT-Abo - in der Fassung, die zum GATEWAY passt.
+ *
+ * Bis hierher stand an der Ausgabestelle unbedingt "Ohne diesen Eintrag
+ * kommt am Miniserver nichts an". Das gilt fuer Gateway V1; ab V2 schickte
+ * der Satz jeden Anwender zu einem Eingabeplatz, den es nicht mehr gibt.
+ *
+ * Drei Ausgaenge: ist die Fassung nicht feststellbar, werden BEIDE Faelle
+ * genannt statt einer behauptet.
+ */
+function mi_abo_text()
+{
+    $f = mi_gateway_fassung();
+    if ($f <= 0) {
+        return mi_t('UI.ABO_UNBEKANNT');
+    }
+    $gemessen = ' <span class="sm-mono">'
+              . sprintf(mi_t('UI.ABO_GEMESSEN'), $f) . '</span>';
+    return mi_t($f >= 2 ? 'UI.ABO_V2' : 'UI.OHNE_DIESEN_EINTRAG_KOMMT_AM') . $gemessen;
+}
+
+
+/**
+ * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
+ *
+ * Die sieben Punkte aus REGELN_2, und der wichtigste ist der dritte: eine
+ * halb gueltige Datei ueberschreibt GAR NICHTS. Wer eine Sicherung
+ * zurueckspielt, will entweder den ganzen Stand oder gar keinen - eine zur
+ * Haelfte uebernommene Konfiguration ist schlimmer als die alte, und man
+ * sieht es ihr nicht an.
+ *
+ * Unbekannte Schluessel sind eine Beanstandung, kein stiller Verlust: sie
+ * stammen aus einer anderen Fassung oder einem anderen Plugin.
+ *
+ * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
+ */
+function mi_sicherung_lesen($roh)
+{
+    $mangel = array();
+    $daten = json_decode((string) $roh, true);
+    if (!is_array($daten)) {
+        return array(null, array(mi_t('UI.SICH_KEIN_JSON')), 0);
+    }
+    $neu = mi_vorgaben();
+    $bekannt = array_keys($neu);
+    $anzahl = 0;
+    foreach ($daten as $k => $w) {
+        if (!in_array($k, $bekannt, true)) {
+            $mangel[] = sprintf(mi_t('UI.SICH_FREMD'),
+                                 htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
+            continue;
+        }
+        $neu[$k] = $w;
+        $anzahl++;
+    }
+    if ($anzahl === 0) {
+        $mangel[] = mi_t('UI.SICH_LEER');
+    }
+    return array($mangel ? null : $neu, $mangel, $anzahl);
 }
