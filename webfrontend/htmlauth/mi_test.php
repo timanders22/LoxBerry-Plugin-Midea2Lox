@@ -181,12 +181,12 @@ function mi_pruefungen($cfg)
 function mi_discover()
 {
     $p = mi_paths();
-    $skript = $p['data'] . '/discover.py';
+    $skript = $p['datadir'] . '/discover.py';
     if (!is_readable($skript)) {
         return sprintf(mi_t('UI.DISCOVER_FEHLT'), $skript);
     }
     $alt = getcwd();
-    @chdir($p['data']);
+    @chdir($p['datadir']);
     list($code, $aus) = mi_python(array($skript));
     if ($alt !== false) { @chdir($alt); }
     /* Den Rueckgabewert auswerten, nicht nur die Ausgabe. Bis 4.2.12 wurde

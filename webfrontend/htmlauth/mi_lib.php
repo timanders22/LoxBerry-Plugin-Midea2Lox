@@ -61,7 +61,7 @@ function mi_paths()
         'devices' => $home . '/config/plugins/' . $ordner . '/devices.cfg',
         'abo'     => $home . '/config/plugins/' . $ordner . '/mqtt_subscriptions.cfg',
         'log'     => $home . '/log/plugins/' . $ordner . '/midea2lox.log',
-        'data'    => $home . '/data/plugins/' . $ordner,
+        'datadir'    => $home . '/data/plugins/' . $ordner,
         'leben'   => $home . '/data/plugins/' . $ordner . '/lebenszeichen.json',
         'bin'     => $home . '/bin/plugins/' . $ordner,
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
@@ -186,7 +186,7 @@ function mi_merkwort()
     if ($wort !== null) {
         return $wort;
     }
-    $datei = mi_paths()['data'] . '/formmerkwort';
+    $datei = mi_paths()['datadir'] . '/formmerkwort';
     if (is_readable($datei)) {
         $roh = trim((string) @file_get_contents($datei));
         if (preg_match('/^[0-9a-f]{32,64}$/', $roh)) {
@@ -699,7 +699,7 @@ function mi_beispiel_id()
  */
 function mi_dienst_pid()
 {
-    $datei = mi_paths()['data'] . '/dienst.pid';
+    $datei = mi_paths()['datadir'] . '/dienst.pid';
     $roh = is_readable($datei) ? trim((string) @file_get_contents($datei)) : '';
     if ($roh === '' || !ctype_digit($roh)) {
         return null;
