@@ -82,7 +82,23 @@ start_dienst() {
         nohup ./midea2lox.py >/dev/null 2>&1 &
         echo $! > "$piddatei"
     fi
-    sleep 1
+    # Die WIRKUNG pruefen, nicht den Aufruf.
+    #
+    # Bis 4.2.12 stand hier nur "sleep 1", und start_dienst meldete IMMER
+    # Erfolg. Kam der Dienst wegen einer unbrauchbaren Konfiguration gar
+    # nicht hoch, sagte "status" danach "gestoppt", der minuetliche Waechter
+    # startete ihn neu, und das wiederholte sich endlos - ohne dass irgendwo
+    # der Grund stand.
+    sleep 2
+    if laufende_pid >/dev/null; then
+        echo "Midea2Lox laeuft. PID: $(laufende_pid)"
+        return 0
+    fi
+    rm -f "$piddatei"
+    echo "FEHLER: Midea2Lox wurde gestartet, lief aber nach zwei Sekunden"
+    echo "        nicht mehr. Der Grund steht in $logdir/midea2lox.log -"
+    echo "        meist eine unvollstaendige Konfiguration."
+    return 1
 }
 
 stop_dienst() {

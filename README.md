@@ -10,6 +10,140 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Was 4.3.0 bringt
+
+Diese Fassung behebt fünf Stellen, an denen das Plugin still das Falsche tat,
+und ergänzt sechs Funktionen. Alles Schwere ist gemessen; was nicht gemessen
+werden konnte, steht unten unter *Offene Punkte*.
+
+### Behoben
+
+* **Der Knopf „Einstellungen sichern" lieferte eine leere Seite.**
+  `index.php` rief `mi_cfg()` ohne Argumente auf; die Funktion verlangt zwei.
+  Gemessen unter PHP 7.4.33 und 8.4.24: `ArgumentCountError`, Rückgabewert
+  255, 0 Byte Ausgabe — über einen Webserver HTTP 500. Auf dem Gerät steht
+  `display_errors` aus, es gab also nicht einmal einen Text zum Suchen.
+* **Das Zurückspielen wurde vom nächsten Speichern rückgängig gemacht.**
+  Nach dem Schreiben wurde die Konfiguration nicht neu gelesen, und die
+  Erfolgsmeldung landete in einer Variablen, die nirgends ausgegeben wird.
+  Die Seite sah danach aus wie vorher; wer daraufhin „Speichern" drückte,
+  schrieb alles zurück — außer dem Kennwort, das aus der Sicherung stehen
+  blieb. Genau die halb zurückgespielte Konfiguration, die der Code an
+  anderer Stelle mit großem Aufwand verhindert.
+* **Ein einziges UDP-Paket, das kein UTF-8 war, beendete den Dienst.**
+  Die Umwandlung stand vor der Absicherung. Nachgestellt mit einem echten
+  Socket: das erste Paket wurde verarbeitet, das zweite tötete den Dienst,
+  das dritte kam nie an — und im Protokoll stand kein Grund. Der Empfang
+  läuft jetzt über einen Datagramm-Endpunkt mit Warteschlange; ein
+  unbrauchbares Paket wird gemeldet und verworfen.
+* **Die Gerätesuche starb an dem Fall, für den sie geschrieben war.**
+  `discover.py` fragte einen gerade erst angelegten Abschnitt nach dem
+  Schlüssel `token`; `RawConfigParser` wirft dort `NoOptionError`. Das nackte
+  `except` fing ihn und beendete das Skript **vor** den beiden
+  Schreibbefehlen — `devices.cfg` wurde nie geschrieben, auch nicht für die
+  Geräte, die vorher schon gefunden waren. Betroffen war jedes V2-Gerät und
+  jedes V3-Gerät ohne Wolkenantwort.
+* **Die eingetragenen Zugangsdaten und die Region erreichten `msmart-ng`
+  nicht.** `MideaUser`, `MideaPassword` und `region` kamen im ganzen
+  `data/`-Baum kein einziges Mal vor, während vier Stellen des Plugins
+  sagten, sie würden für die Gerätesuche gebraucht. Sie werden jetzt
+  übergeben — und die Regionsliste ist vorher auf das gebracht worden, was
+  `msmart-ng` überhaupt kennt (siehe unten).
+
+Dazu: fehlendes Formularmerkmal an allen Formularen, ungeprüfte Werte in der
+Sicherungsdatei, ein Wiederholungszähler, den Auffrischen und Anwenden sich
+teilten, eine Bedingung, die wegen des Operatorrangs vor jedem Setzbefehl ein
+überflüssiges Auffrischen auslöste, `rate_select`, das nie funktionieren
+konnte, die Lüfterstufe `Full`, die als `Max` zurückkam, und ein Gerät, das
+bei mitgesendeter IP ohne Token angesprochen wurde.
+
+### Neu
+
+* **Abfragetakt.** Das Plugin war rein reaktiv: ohne ein UDP-Paket aus Loxone
+  passierte nichts. Jetzt gibt es ein Feld *Abfragetakt* — **ab Werk 0, also
+  aus**, damit eine bestehende Anlage nicht die doppelte Last bekommt.
+* **Lebenszeichen.** Vier Themen: `status/ok`, `status/ts`, `status/zaehler`
+  und `status/dienst`. Ein virtueller Eingang behält seinen letzten Wert;
+  ohne Lebenszeichen sieht ein toter Dienst in der App aus wie ein ruhiger.
+  `status/dienst` misst der minütliche Cron-Lauf, nicht der Dienst selbst —
+  ein Dienst, der seinen eigenen Tod melden soll, ist der falsche Zeuge.
+* **Die Sicherung trägt den Aktionstoken.** Sie enthält jetzt auch die
+  Geräteliste samt `token` und `key` je Gerät. Ohne sie standen nach dem
+  Zurückspielen alle Felder richtig, und man musste trotzdem neu suchen
+  lassen — die Datei war für ihren eigentlichen Zweck, den Umzug, wertlos.
+  **Damit trägt sie ein Geheimnis; der Warnkasten am Knopf sagt das.**
+* **Zweite Loxone-Vorlage für die Befehle.** Bisher erzeugte das Plugin nur
+  die virtuellen Eingänge. Jetzt gibt es einen zweiten Knopf für den
+  virtuellen Ausgang samt allen 27 Befehlen.
+* **Die Themenliste ist vollständig.** Der Dienst sendet 28 Werte je Gerät;
+  die Tabelle nannte 7. Alle 28 stehen jetzt im Reiter MQTT, gegliedert nach
+  Grundwerten, Komfort und Energie — die drei Energiewerte waren nirgends
+  dokumentiert.
+* **Schalten aus dem Reiter Test**, mit Trockenlauf. Der Befehl geht über
+  denselben Weg wie ein Befehl aus Loxone; was hier funktioniert,
+  funktioniert dort.
+
+Dazu: eigene Bezeichnung je Gerät, einstellbares MQTT-Themenpräfix,
+einstellbare Wartezeit auf den Miniserver, eine Aufgabegrenze für den
+Wächter, und eine Selbstprüfung mit 19 statt 8 Zeilen.
+
+### Die Region — warum die Liste kürzer geworden ist
+
+Die Oberfläche bot elf Regionen an. Am Quelltext von `msmart-ng` nachgesehen
+(`mill1000/midea-msmart`, Zweig `main`, abgerufen am 27.08.2026) kennt die
+Bibliothek genau **drei** Wolkenbereiche: `DE`, `KR` und `US`. Ohne Angabe
+gilt die Vorgabe `US`; eine unbekannte Region beendet die Suche mit einem
+`ValueError`.
+
+Wer die Felder einfach „anschließt", ohne das vorher zu messen, macht damit
+die Gerätesuche kaputt, die heute wenigstens läuft: neun von elf Einträgen
+hätten den Fehler ausgelöst. Deshalb bildet das Plugin die Länder auf den
+Serverbereich ab — alle europäischen auf `DE` — und zeigt die Zuordnung im
+Reiter Test an. China ist entfallen: dafür hat `msmart-ng` keine Zugangsdaten,
+und ein Eintrag, der nur einen Fehler erzeugen kann, ist kein Angebot. Eine
+bestehende Konfiguration mit `region=CN` wird beanstandet und **nicht** still
+auf etwas anderes gebogen.
+
+Nebenbei ist damit ein möglicher Grund für ausbleibende Token beseitigt: ohne
+Regionsangabe nahm `msmart-ng` seine Vorgabe **US** — für ein europäisches
+Konto der falsche Server.
+
+### Offene Punkte
+
+Drei Fragen ließen sich ohne Gerät nicht beantworten. Sie sind im Code und in
+der Selbstprüfung als solche gekennzeichnet, statt behauptet zu werden:
+
+1. **Liest LoxBerry die mitgelieferte Abo-Datei wirklich?** Der Satz stammt
+   aus dieser README (Abschnitt weiter unten) und ist nicht am Gerät
+   gemessen. Die Zeile im Reiter Test beantwortet deshalb nur, was sie
+   beantworten kann: ob die Datei da ist und zum eingestellten Präfix passt.
+2. **Welche Fassung hat das MQTT-Gateway?** Steht `Mqtt.Gatewayversion` nicht
+   in der `general.json`, nennt die Oberfläche **beide** Fälle, statt einen
+   zu behaupten.
+3. **Welche Fassung hat `paho-mqtt`?** Unter 2.x ist das Anlegen des Clients
+   ohne Angabe der Rückruf-Fassung ein Fehler, der still auf HTTP
+   zurückfällt. Der Dienst übergibt sie jetzt, wenn die Bibliothek sie kennt;
+   die Selbstprüfung zeigt die Fassung an. `postinstall.sh` klemmt paho
+   weiterhin auf kleiner 2.0.0.
+
+### Was am Gerät nicht gemessen werden konnte
+
+Kein LoxBerry, kein Miniserver, kein Klimagerät, kein laufendes MQTT-Gateway;
+`msmart-ng` und `paho` sind auf dem Entwicklungsrechner nicht installiert.
+Gemessen wurde gegen Attrappen und über einen echten Webserver: die
+Oberfläche in allen Zuständen und beiden Sprachen, jeder Knopf, die Sicherung
+in sieben Fällen, der Dienst mit Attrappen für msmart, paho und requests.
+Alles, was ein echtes Gerät braucht — Anmeldung, Auffrischen, Anwenden, die
+Fähigkeitsabfrage und die tatsächlichen Messwerte —, ist gelesen, nicht
+gemessen.
+
+**Die Energiewerte sind ausdrücklich ungemessen.** `msmart-ng` schreibt
+selbst, viele Geräte meldeten Energiewerte, ohne sie anzukündigen. Wer sie
+als Zählerstand nach Loxone gibt, misst sie vorher an einem Gerät nach — eine
+Zahl, die richtig aussieht, ist schlimmer als keine.
+
+---
+
 ## Was 4.1.0 behebt
 
 Acht Meldungen eines Mitlesers, jede einzeln nachgestellt. Drei davon haben

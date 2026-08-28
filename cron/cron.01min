@@ -8,10 +8,25 @@
 # Loxone bekam davon nichts mit ausser ausbleibenden Werten.
 #
 # Ausfallwege gab es mehrere; der sicherste war ein FileNotFoundError auf die
-# Logdatei mitten in der Empfangsschleife (siehe midea2lox.py, Kommentar in
-# start_server). Der ist behoben - ein Waechter gehoert trotzdem dazu: ein
-# Dienst, der wochenlang durchlaufen soll, faellt irgendwann aus einem Grund
-# aus, den niemand vorhergesehen hat.
+# Logdatei mitten in der Empfangsschleife. Der ist behoben - ein Waechter
+# gehoert trotzdem dazu: ein Dienst, der wochenlang durchlaufen soll, faellt
+# irgendwann aus einem Grund aus, den niemand vorhergesehen hat.
+#
+# NEU IN 4.3.0 - ZWEI DINGE
+#
+# 1. EINE AUFGABEGRENZE. Bis 4.2.12 startete der Waechter endlos neu. Bei
+#    einer kaputten Konfiguration hiess das: jede Minute ein Start, jede
+#    Minute eine Warnzeile in die Logdatei - geschrieben mit >> aus der
+#    Schale, am RotatingFileHandler vorbei, der ja im toten Python-Prozess
+#    lebt. Die Datei wuchs damit ungebremst, und der eigentliche Grund stand
+#    nirgends. Nach GRENZE erfolglosen Versuchen in Folge wird aufgegeben und
+#    das einmal gesagt. Ein erfolgreicher Start setzt den Zaehler zurueck -
+#    eine Bremse, die sich nicht zurueckstellt, ist die naechste Falle.
+#
+# 2. DAS LEBENSZEICHEN. Ob der Dauerlaeufer laeuft, misst der Cron-Lauf, nicht
+#    der Dienst: ein Dienst, der seinen eigenen Tod melden soll, ist der
+#    falsche Zeuge. Das Ergebnis geht ueber data/lebenszeichen.py an
+#    <praefix>/status/dienst.
 #
 # Alle Pfade werden aus EINEM Platzhalter abgeleitet. REPLACELBPDATADIR ist
 # <home>/data/plugins/<ordner>; daraus ergeben sich Ordnername und
@@ -27,14 +42,71 @@ HOME_DIR=$(cd "$PDATA/../../.." 2>/dev/null && pwd)
 DAEMON="$HOME_DIR/system/daemons/plugins/$PDIR"
 [ -x "$DAEMON" ] || exit 0
 
+LOG="$HOME_DIR/log/plugins/$PDIR/midea2lox.log"
+ZAEHLER="$PDATA/neustartzaehler"
+VENV="$HOME_DIR/bin/plugins/$PDIR/venv/bin/python3"
+LEBEN="$PDATA/lebenszeichen.py"
+GRENZE=5
+
+melde() {
+    # Nur schreiben, wenn das Verzeichnis da ist - sonst schweigt der Cron,
+    # statt jede Minute einen Fehler in den Systemlogger zu schicken.
+    [ -d "$(dirname "$LOG")" ] && \
+        echo "$(date '+%d.%m %H:%M') Waechter        $1  :0 $2" >> "$LOG" 2>/dev/null
+}
+
+lebenszeichen() {
+    # $1 = 1 oder 0, $2 = Grund
+    [ -x "$VENV" ] && [ -f "$LEBEN" ] || return 0
+    "$VENV" "$LEBEN" "$1" "$2" >/dev/null 2>&1
+}
+
 # Kein Neustart, solange der Anwender den Dienst bewusst angehalten hat.
 # Die Merkdatei legt das daemon-Skript bei "start" an und bei "stop" fort.
-[ -f "$PDATA/soll_laufen" ] || exit 0
+if [ ! -f "$PDATA/soll_laufen" ]; then
+    rm -f "$ZAEHLER"
+    lebenszeichen 0 "bewusst angehalten"
+    exit 0
+fi
 
-if ! "$DAEMON" status >/dev/null 2>&1; then
-    LOG="$HOME_DIR/log/plugins/$PDIR/midea2lox.log"
-    echo "$(date '+%d.%m %H:%M') Waechter        WARNING  :0 Dienst lief nicht - Neustart." \
-        >> "$LOG" 2>/dev/null
-    "$DAEMON" start >/dev/null 2>&1
+if "$DAEMON" status >/dev/null 2>&1; then
+    # Laeuft. Zaehler zuruecksetzen - und zwar nur, wenn er ueberhaupt
+    # dastand, damit nicht jede Minute geschrieben wird.
+    [ -f "$ZAEHLER" ] && rm -f "$ZAEHLER"
+    lebenszeichen 1 ""
+    exit 0
+fi
+
+# Laeuft nicht.
+N=0
+[ -f "$ZAEHLER" ] && N=$(cat "$ZAEHLER" 2>/dev/null)
+case "$N" in
+    ''|*[!0-9]*) N=0 ;;
+esac
+
+if [ "$N" -ge "$GRENZE" ]; then
+    # Aufgegeben. Genau EINE Meldung, nicht jede Minute eine.
+    if [ "$N" -eq "$GRENZE" ]; then
+        melde "ERROR  " "Der Dienst liess sich $GRENZE mal hintereinander nicht starten. Es wird nicht weiter versucht. Bitte im Reiter Test die Zeile \"Ist die Konfiguration heil?\" ansehen und danach den Dienst von Hand starten."
+        echo $((N + 1)) > "$ZAEHLER"
+    fi
+    lebenszeichen 0 "aufgegeben nach $GRENZE Versuchen"
+    exit 0
+fi
+
+N=$((N + 1))
+echo "$N" > "$ZAEHLER"
+melde "WARNING" "Dienst lief nicht - Neustart ($N/$GRENZE)."
+"$DAEMON" start >/dev/null 2>&1
+
+# Die WIRKUNG pruefen, nicht den Rueckgabewert des Aufrufs: das Startskript
+# meldet Erfolg, sobald es die Prozessnummer geschrieben hat.
+sleep 2
+if "$DAEMON" status >/dev/null 2>&1; then
+    rm -f "$ZAEHLER"
+    melde "INFO   " "Dienst laeuft wieder."
+    lebenszeichen 1 "nach Neustart"
+else
+    lebenszeichen 0 "Neustart $N/$GRENZE ohne Wirkung"
 fi
 exit 0

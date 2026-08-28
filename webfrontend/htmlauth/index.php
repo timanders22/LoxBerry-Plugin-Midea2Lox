@@ -4,14 +4,51 @@
  *
  * Ausschliesslich Oberflaeche. Die Werte holt der Dienst data/midea2lox.py,
  * der ueber system/daemons laeuft; Befehle nimmt er per UDP entgegen.
+ *
+ * ==================================================================
+ * REIHENFOLGE IN DIESER DATEI - BAUVORSCHRIFT, NICHT GESCHMACK
+ * ==================================================================
+ *   1. Bibliothek laden
+ *   2. Konfiguration lesen, Vorgaben vervollstaendigen
+ *   3. WACHPOSTEN
+ *   4. Reiterwahl
+ *   5. ALLE Handler - darunter JEDER Download, der mit exit endet
+ *   6. ERST JETZT LBWeb::lbheader()
+ *   7. HTML
+ *
+ * Stand ein Download hinter dem Kopf, war er beim Aufruf von header() schon
+ * geschrieben - "Cannot modify header information", und der Knopf
+ * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON statt
+ * einer Datei. Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos
+ * und headers_sent() immer falsch.
  */
 
 require_once 'loxberry_web.php';
 require_once __DIR__ . '/mi_lib.php';
 
-$mi_p       = mi_paths();
-$mi_meldung = '';
-$mi_fehler  = array();
+$mi_p        = mi_paths();
+$mi_meldung  = '';
+$mi_fehler   = array();
+$mi_hinweise = array();
+
+$mi_cfg = mi_config_read();
+$mi_fehlten = mi_cfg_fehlende();
+
+/* ---------------------------------------------------------------- *
+ * 3. Der Wachposten
+ *
+ * EIN Posten, nicht sieben einzelne Abfragen. Bis 4.2.12 gab es ihn
+ * nicht - der Kopfkommentar behauptete ihn, gemessen trugen neun von
+ * neun Formularen kein Merkmal. Damit genuegte eine fremde Seite, um bei
+ * einem angemeldeten Anwender den Dienst anzuhalten oder die
+ * Sicherungsdatei samt Midea-Passwort abzuholen.
+ * ---------------------------------------------------------------- */
+$mi_wache = mi_wachposten();
+if ($mi_wache !== '') {
+    // Abgewiesen heisst gemeldet - und es wird NICHTS ausgefuehrt.
+    $_POST = array();
+    $mi_fehler[] = $mi_wache;
+}
 
 /* Aktiver Reiter.
  *
@@ -19,60 +56,77 @@ $mi_fehler  = array();
  * (?form=...). Letzteres brauchen die Reiter, seit sie echte Verweise sind.
  * Die Positivliste MUSS jeden Reiter enthalten - fehlt einer, ist er
  * sichtbar und anklickbar, aber nach jedem Absenden springt die Seite
- * zurueck auf Einstellungen. */
+ * zurueck auf Einstellungen. Die Zeile darunter, die Reiterleiste im HTML
+ * und die id der Flaechen muessen deckungsgleich bleiben; der Reiter Test
+ * zaehlt das nach (mi_smactive_probe). */
 $mi_muster = '/^tab-(settings|mqtt|loxone|test|log)$/';
-$mi_wunsch = isset($_POST['activetab']) ? (string) $_POST['activetab']
-    : (isset($_GET['form']) ? 'tab-' . (string) $_GET['form'] : '');
+$mi_wunsch = isset($_POST['activetab']) && is_string($_POST['activetab'])
+    ? $_POST['activetab']
+    : (isset($_GET['form']) && is_string($_GET['form']) ? 'tab-' . $_GET['form'] : '');
 $mi_tab = preg_match($mi_muster, $mi_wunsch) ? $mi_wunsch : 'tab-settings';
-
-$mi_cfg = mi_config_read();
 
 $mi_test_titel = '';
 $mi_test_text  = '';
 
+/* Fehlende Schluessel werden AUFGESCHRIEBEN, nicht bei jedem Lauf neu
+ * angenommen. Ein stiller Vorgabewert ist eine Annahme, keine Auskunft. */
+if ($mi_fehlten && $mi_wache === '') {
+    if (mi_config_write($mi_cfg)) {
+        $mi_hinweise[] = sprintf(mi_t('UI.CFG_ERGAENZT'), mi_e(implode(', ', $mi_fehlten)));
+    }
+}
+
 /* ---------------------------------------------------------------- *
- * Formulare
+ * 5. Handler
  * ---------------------------------------------------------------- */
+
+// ---------- Einstellungen speichern ----------
 if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     $neu = $mi_cfg;
 
-    $ms = isset($_POST['MINISERVER']) ? trim((string) $_POST['MINISERVER']) : '';
-    if (!preg_match('/^MINISERVER\d+$/', $ms)) {
-        $mi_fehler[] = 'Der Miniserver muss aus der Liste gew&auml;hlt werden.';
-    } else {
-        $neu['MINISERVER'] = $ms;
-    }
-
-    $port = isset($_POST['UDP_PORT']) ? trim((string) $_POST['UDP_PORT']) : '';
-    if (!ctype_digit($port) || (int) $port < 1 || (int) $port > 65535) {
-        $mi_fehler[] = 'Der UDP-Port ist eine Zahl zwischen 1 und 65535.';
-    } else {
-        $neu['UDP_PORT'] = $port;
-    }
-
-    $conn = isset($_POST['maxConnectionLifetime'])
-        ? trim((string) $_POST['maxConnectionLifetime']) : '';
-    if (!ctype_digit($conn) || (int) $conn < 10 || (int) $conn > 3600) {
-        $mi_fehler[] = 'Die Verbindungsdauer ist eine Zahl zwischen 10 und 3600 Sekunden.';
-    } else {
-        $neu['maxConnectionLifetime'] = $conn;
-    }
-
-    $reg = isset($_POST['region']) ? trim((string) $_POST['region']) : '';
-    if (!array_key_exists($reg, mi_regionen())) {
-        $mi_fehler[] = 'Die Region muss aus der Liste gew&auml;hlt werden.';
-    } else {
-        $neu['region'] = $reg;
+    /* Jedes Feld durch mi_wert_pruefen() - dieselbe Positivliste, die auch
+     * die zurueckgespielte Sicherung benutzt. Eine zweite Wahrheit ueber
+     * zulaessige Werte gibt es nicht. */
+    foreach (array('MINISERVER', 'UDP_PORT', 'maxConnectionLifetime',
+                   'region', 'abfragetakt', 'lox_timeout') as $feld) {
+        $roh = isset($_POST[$feld]) ? $_POST[$feld] : '';
+        if (!is_string($roh)) {
+            $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($feld));
+            continue;
+        }
+        $roh = trim($roh);
+        $f = mi_wert_pruefen($feld, $roh);
+        if ($f !== '') {
+            $mi_fehler[] = $f;
+        } else {
+            $neu[$feld] = $roh;
+        }
     }
 
     $neu['DEBUG'] = (isset($_POST['DEBUG']) && $_POST['DEBUG'] === '1') ? '1' : '0';
 
+    /* is_string() ZUERST. Mit MideaPassword[]=x war die Pruefung "leer heisst
+     * unveraendert" bis 4.2.12 wirkungslos: ein Feld ist nicht '', der Wert
+     * ging durch, und in der Datei stand danach MideaPassword=Array - das
+     * gespeicherte Kennwort war zerstoert. Gemessen. */
     if (isset($_POST['MideaUser'])) {
-        $neu['MideaUser'] = trim((string) $_POST['MideaUser']);
+        if (is_string($_POST['MideaUser'])) {
+            $neu['MideaUser'] = trim($_POST['MideaUser']);
+        } else {
+            $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaUser');
+        }
     }
-    // Leeres Passwortfeld heisst "unveraendert lassen", nicht "loeschen".
-    if (isset($_POST['MideaPassword']) && $_POST['MideaPassword'] !== '') {
-        $neu['MideaPassword'] = (string) $_POST['MideaPassword'];
+    if (isset($_POST['MideaPassword'])) {
+        if (!is_string($_POST['MideaPassword'])) {
+            $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaPassword');
+        } elseif ($_POST['MideaPassword'] !== '') {
+            // Leeres Passwortfeld heisst "unveraendert lassen", nicht
+            // "loeschen" - geloescht wird ueber den ausdruecklichen Haken.
+            $neu['MideaPassword'] = $_POST['MideaPassword'];
+        }
+    }
+    if (isset($_POST['MideaPassword_loeschen']) && $_POST['MideaPassword_loeschen'] === '1') {
+        $neu['MideaPassword'] = '';
     }
 
     $neu['LoxberryIP'] = mi_localip();
@@ -83,17 +137,19 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
             if (isset($_POST['speichern_suchen'])) {
                 require_once __DIR__ . '/mi_test.php';
                 list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren('discover', $mi_cfg);
-                $mi_meldung = 'Gespeichert. Das Ergebnis der Ger&auml;tesuche steht '
-                            . 'im Reiter <i>Test</i>.';
+                $mi_meldung = mi_t('UI.GESPEICHERT_SUCHE');
                 $mi_tab = 'tab-test';
             } else {
-                mi_dienst('restart');
-                $mi_meldung = 'Gespeichert. Der Dienst wurde neu gestartet.';
+                $was = mi_dienst('restart');
+                if ($was === '') {
+                    $mi_meldung = mi_t('UI.GESPEICHERT_NEUSTART');
+                } else {
+                    $mi_meldung = mi_t('UI.GESPEICHERT_OHNE_DIENST');
+                }
                 $mi_tab = 'tab-settings';
             }
         } else {
-            $mi_fehler[] = 'Die Datei <span class="sm-mono">midea2lox.cfg</span> liess sich '
-                         . 'nicht schreiben. Rechte im Konfigurationsordner pr&uuml;fen.';
+            $mi_fehler[] = mi_t('UI.CFG_SCHREIBFEHLER');
         }
     }
     if ($mi_fehler) {
@@ -101,73 +157,140 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     }
 }
 
-if (isset($_POST['dienst'])) {
-    $was = (string) $_POST['dienst'];
-    if (mi_dienst($was)) {
-        $mi_meldung = 'Der Dienst wurde ' . ($was === 'stop' ? 'angehalten'
-            : ($was === 'start' ? 'gestartet' : 'neu gestartet')) . '.';
+// ---------- MQTT speichern (eigener Handler, eigener Reiter) ----------
+if (isset($_POST['mqtt_speichern'])) {
+    $roh = isset($_POST['mqtt_praefix']) ? $_POST['mqtt_praefix'] : '';
+    if (!is_string($roh)) {
+        $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'mqtt_praefix');
     } else {
-        $mi_fehler[] = 'Der Dienst liess sich nicht steuern &ndash; '
-                     . '<span class="sm-mono">' . mi_e($mi_p['daemon']) . '</span> fehlt.';
+        $roh = trim($roh, "/ \t\n\r\0\x0B");
+        $f = mi_wert_pruefen('mqtt_praefix', $roh);
+        if ($f !== '') {
+            $mi_fehler[] = $f;
+        } else {
+            $neu = $mi_cfg;
+            $neu['mqtt_praefix'] = $roh;
+            if (mi_config_write($neu)) {
+                $mi_cfg = mi_config_read();
+                /* Das Abo wandert mit. Wer das Praefix aendert und die
+                 * mqtt_subscriptions.cfg stehen laesst, abonniert danach
+                 * einen Zweig, in den niemand mehr schreibt. */
+                mi_abo_datei_schreiben($mi_cfg);
+                $was = mi_dienst('restart');
+                if ($was === '') {
+                    $mi_meldung = mi_t('UI.MQTT_GESPEICHERT');
+                } else {
+                    $mi_meldung = mi_t('UI.GESPEICHERT_OHNE_DIENST');
+                }
+            } else {
+                $mi_fehler[] = mi_t('UI.CFG_SCHREIBFEHLER');
+            }
+        }
+    }
+    $mi_tab = 'tab-mqtt';
+}
+
+// ---------- Bezeichnungen der Geraete speichern ----------
+if (isset($_POST['bez_speichern'])) {
+    $zuordnung = array();
+    $roh = isset($_POST['bezeichnung']) ? $_POST['bezeichnung'] : array();
+    if (!is_array($roh)) {
+        $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'bezeichnung');
+    } else {
+        foreach ($roh as $id => $wert) {
+            $id = trim((string) $id);
+            if (!preg_match('/^\d{6,20}$/', $id)) {
+                $mi_fehler[] = sprintf(mi_t('UI.PRUEF_GERAETE_ID'), mi_e($id));
+                continue;
+            }
+            if (!is_string($wert) || !mi_wert_taugt($wert) || strlen(trim($wert)) > 120) {
+                $mi_fehler[] = sprintf(mi_t('UI.PRUEF_BEZEICHNUNG'), mi_e($id));
+                continue;
+            }
+            $zuordnung[$id] = trim($wert);
+        }
+    }
+    // Alle Beanstandungen melden - aber nur dann speichern, wenn keine da
+    // ist. Melden ist richtig, halb speichern nicht.
+    if (!$mi_fehler && $zuordnung) {
+        if (mi_devices_bezeichnung_schreiben($zuordnung)) {
+            $mi_meldung = mi_t('UI.BEZ_GESPEICHERT');
+        } else {
+            $mi_fehler[] = mi_t('UI.BEZ_SCHREIBFEHLER');
+        }
     }
     $mi_tab = 'tab-settings';
 }
 
+// ---------- Dienst steuern ----------
+if (isset($_POST['dienst'])) {
+    $was = is_string($_POST['dienst']) ? $_POST['dienst'] : '';
+    $ergebnis = mi_dienst($was);
+    if ($ergebnis === '') {
+        if ($was === 'stop') {
+            $mi_meldung = mi_t('UI.DIENST_ANGEHALTEN');
+        } elseif ($was === 'start') {
+            $mi_meldung = mi_t('UI.DIENST_GESTARTET');
+        } else {
+            $mi_meldung = mi_t('UI.DIENST_NEU');
+        }
+    } elseif ($ergebnis === 'fehlt') {
+        // Bis 4.2.12 meldeten BEIDE Faelle "Startskript fehlt" - auch der,
+        // in dem gar keine gueltige Aktion angefordert war.
+        $mi_fehler[] = sprintf(mi_t('UI.DIENST_SKRIPT_FEHLT'), mi_e($mi_p['daemon']));
+    } else {
+        $mi_fehler[] = mi_t('UI.DIENST_UNBEKANNT');
+    }
+    $mi_tab = 'tab-settings';
+}
+
+// ---------- Pruefungen und Schaltbefehle des Reiters Test ----------
 if (isset($_POST['test'])) {
     require_once __DIR__ . '/mi_test.php';
-    list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren((string) $_POST['test'], $mi_cfg);
+    $was = is_string($_POST['test']) ? $_POST['test'] : '';
+    list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren($was, $mi_cfg);
+    $mi_tab = 'tab-test';
+}
+if (isset($_POST['schalten'])) {
+    require_once __DIR__ . '/mi_test.php';
+    $id  = isset($_POST['schalt_id'])  && is_string($_POST['schalt_id'])  ? $_POST['schalt_id']  : '';
+    $bef = isset($_POST['schalt_bef']) && is_string($_POST['schalt_bef']) ? $_POST['schalt_bef'] : '';
+    $trocken = isset($_POST['schalten']) && $_POST['schalten'] === 'trocken';
+    list($mi_test_titel, $mi_test_text) = mi_schalten($mi_cfg, $id, $bef, $trocken);
     $mi_tab = 'tab-test';
 }
 
-/* ==================================================================
- * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
- * ==================================================================
- *
- * Stand der Kopf davor, war er beim Aufruf von header() schon
- * geschrieben - "Cannot modify header information", und der Knopf
- * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON
- * statt einer Datei.
- *
- * Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos und
- * headers_sent() immer falsch. Und wer OHNE gueltiges Formularmerkmal
- * misst, wird vom Wachposten abgewiesen, bevor der Handler anlaeuft.
- * Beides hat den Fehler lange verdeckt.
- *
- * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
- * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
- * ================================================================== */
-// ---------- Loxone-Vorlage herunterladen (Hausstandard) ----------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage']) && function_exists('mi_vorlage')) {
-    list($mi_vname, $mi_vinhalt) = mi_vorlage();
+// ---------- Loxone-Vorlagen herunterladen ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
+    $welche = is_string($_POST['vorlage']) ? $_POST['vorlage'] : '';
+    if ($welche === 'ausgang') {
+        list($mi_vname, $mi_vinhalt) = mi_vorlage_ausgang($mi_cfg);
+    } else {
+        list($mi_vname, $mi_vinhalt) = mi_vorlage($mi_cfg);
+    }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $mi_vname . '"');
     echo $mi_vinhalt;
     exit;
 }
 
-$mi_pid     = mi_dienst_pid();
-$mi_geraete = mi_devices();
-$mi_mq      = mi_mqtt_config();
-$mi_topic   = mi_mqtt_topic();
-$mi_port    = mi_cfg($mi_cfg, 'UDP_PORT', '7013');
-$mi_ip      = mi_cfg($mi_cfg, 'LoxberryIP', mi_localip());
-$mi_bsp     = mi_beispiel_id();
-$mi_zeilen  = mi_log_tail();
-
-$mi_version = '';
-if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-    $mi_version = (string) LBSystem::pluginversion();
-}
-
-
 /* ---------------- Einstellungen sichern ----------------
  *
- * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
- * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
- * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
- * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
+ * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Bei diesem
+ * Plugin ist das nicht das Midea-Kennwort, sondern token und key je Geraet
+ * aus devices.cfg: nur damit kommt das Plugin ohne die Wolke an ein
+ * V3-Geraet. Ohne sie stuenden nach dem Zurueckspielen alle Felder richtig,
+ * und man muesste trotzdem neu suchen lassen - die Datei waere fuer ihren
+ * eigentlichen Zweck, den Umzug, wertlos.
+ *
+ * Damit traegt sie ein Geheimnis, und der Warnkasten am Knopf sagt das.
+ *
+ * Bis 4.2.12 stand hier mi_cfg() ohne Argumente. Die Funktion verlangt zwei;
+ * gemessen unter 7.4.33 und 8.4.24 endete der Knopf mit ArgumentCountError,
+ * Rueckgabewert 255 und 0 Byte Ausgabe - auf jeder Anlage eine leere Seite.
+ * Es ist mi_config_read(), das die volle Konfiguration liefert. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
-    $mi_js = json_encode(mi_cfg(),
+    $mi_js = json_encode(mi_sicherung_bauen($mi_cfg),
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($mi_js !== false) {
         header('Content-Type: application/json; charset=utf-8');
@@ -187,26 +310,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
     if (!isset($_FILES['mi_sicherung']) || !is_array($_FILES['mi_sicherung'])
         || !isset($_FILES['mi_sicherung']['tmp_name'])
+        || !is_string($_FILES['mi_sicherung']['tmp_name'])
         || !@is_uploaded_file($_FILES['mi_sicherung']['tmp_name'])) {
         $mi_fehler[] = mi_t('UI.SICH_KEINE_DATEI');
     } elseif ((int) $_FILES['mi_sicherung']['size'] > 262144) {
         $mi_fehler[] = mi_t('UI.SICH_ZU_GROSS');
     } else {
-        list($mi_neu, $mi_mangel, $mi_n) = mi_sicherung_lesen(
+        list($mi_neu, $mi_mangel, $mi_n, $mi_ng) = mi_sicherung_lesen(
             (string) @file_get_contents($_FILES['mi_sicherung']['tmp_name']));
         if ($mi_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. */
-            $mi_fehler[] = mi_t('UI.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $mi_mangel);
-        } elseif (mi_config_write($mi_neu)) {
-            $mi_meldungen[] = sprintf(mi_t('UI.SICH_UEBERNOMMEN'), $mi_n);
-        } else {
+             * nichts. Eine zur Haelfte uebernommene Konfiguration ist
+             * schlimmer als die alte, und man sieht es ihr nicht an. */
+            $mi_fehler[] = mi_t('UI.SICH_ABGELEHNT') . ' ' . implode(' ', $mi_mangel);
+        } elseif (!mi_config_write($mi_neu[0])) {
             $mi_fehler[] = mi_t('UI.SICH_SCHREIBFEHLER');
+        } elseif (!mi_devices_write($mi_neu[1])) {
+            $mi_fehler[] = mi_t('UI.SICH_GERAETE_SCHREIBFEHLER');
+        } else {
+            /* DIE KONFIGURATION NEU LESEN. Ohne diese Zeile zeigte das
+             * Formular darunter weiter den alten Stand; zusammen mit der
+             * fehlenden Meldung sah die Seite aus wie vor dem Klick. Wer
+             * daraufhin "Speichern" drueckte, schrieb alles zurueck - ausser
+             * dem Kennwort, das aus der Sicherung stehen blieb. Genau die
+             * halb zurueckgespielte Konfiguration, die mi_sicherung_lesen()
+             * verhindern soll. Gemessen. */
+            $mi_cfg = mi_config_read();
+            mi_abo_datei_schreiben($mi_cfg);
+            /* Punkt 7 der sieben: den Dienst nachziehen UND sagen, was mit
+             * ihm geschehen ist.
+             *
+             * AUSGESCHRIEBEN statt als Bedingungsausdruck.
+             * sprachplatzhalter_pruefen.py erkennt einen Schluessel nur,
+             * wenn er woertlich in der Klammer der Sprachfunktion steht, und
+             * findet ihn nicht mehr, sobald er hinter einem Fragezeichen
+             * liegt - es meldete daraufhin fuer beide Texte "traegt
+             * Platzhalter, wird aber nirgends durch sprintf gereicht". Ein
+             * Werkzeug, das den Schluessel nicht sieht, prueft ihn auch
+             * nicht.
+             *
+             * (Das Beispiel steht hier bewusst NICHT in der Aufrufform. Ein
+             * Erklaertext, der das gesuchte Muster woertlich zeigt, wird vom
+             * Sucher getroffen und meldet einen Schluessel, den es nie gab -
+             * genau das ist beim Schreiben dieser Zeilen passiert.) */
+            $was = mi_dienst('restart');
+            if ($was === '') {
+                $mi_meldung = sprintf(mi_t('UI.SICH_UEBERNOMMEN'), $mi_n, $mi_ng);
+            } else {
+                $mi_meldung = sprintf(mi_t('UI.SICH_UEBERNOMMEN_OHNE_DIENST'), $mi_n, $mi_ng);
+            }
         }
     }
+    $mi_tab = 'tab-settings';
 }
 
+
+$mi_pid     = mi_dienst_pid();
+$mi_geraete = mi_devices();
+$mi_mq      = mi_mqtt_config();
+$mi_topic   = mi_mqtt_topic($mi_cfg);
+$mi_port    = mi_cfg($mi_cfg, 'UDP_PORT', '7013');
+$mi_ip      = mi_cfg($mi_cfg, 'LoxberryIP', mi_localip());
+$mi_bsp     = mi_beispiel_id();
+
+$mi_version = '';
+if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
+    $mi_version = (string) LBSystem::pluginversion();
+}
+
+/* Eine unbekannte Region ist ein Aktualisierungsfall, kein Grund zu raten.
+ * Bis 4.2.12 bot die Liste elf Regionen an; msmart-ng kennt drei. */
+if (!array_key_exists($mi_cfg['region'], mi_regionen())) {
+    $mi_hinweise[] = sprintf(mi_t('UI.REGION_UNBEKANNT'), mi_e($mi_cfg['region']));
+}
 
 LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
                 'https://wiki.loxberry.de/plugins/midea2lox/start', 'help.html');
@@ -217,9 +393,13 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-wrap { max-width: 1100px; }
 .sm-wrap h2 { color: #4f7d17; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px;
   font-size: 1.15em; margin: 22px 0 8px; }
+.sm-wrap h3 { color: #4f7d17; font-size: 1.02em; margin: 16px 0 6px; }
 .sm-small { font-size: 0.88em; color: #555; }
 .sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
+.sm-warnung { border: 1px solid #f0c9a0; background: #fdf4ec; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
+.sm-hilfe { font-size: 0.85em; color: #555; margin: 4px 0 0; max-width: 640px; }
 .sm-mono { font-family: monospace; }
 .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
 .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
@@ -228,6 +408,7 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-tab.sm-active { background: #6dac20; color: #fff !important; border-color: #6dac20; font-weight: 600; }
 .sm-pane { display: none; padding-top: 4px; }
 .sm-pane.sm-active { display: block; }
+.sm-rollen { overflow-x: auto; max-width: 100%; }
 .sm-tbl { border-collapse: collapse; width: 100%; margin: 8px 0; }
 .sm-tbl td, .sm-tbl th { border: 1px solid #ddd; padding: 6px 9px; text-align: left; font-size: 0.9em; }
 .sm-tbl th { background: #f0f0f0; }
@@ -241,7 +422,7 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-log { background: #1e1e1e; color: #ddd; font-family: monospace; font-size: 0.82em;
   padding: 10px; border-radius: 6px; max-height: 460px; overflow: auto; white-space: pre-wrap; }
 .sm-knopfreihe { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; align-items: stretch; }
-.sm-knopfreihe form { margin: 0; display: flex; }
+.sm-knopfreihe form { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .sm-wrap .sm-knopfreihe button, .sm-wrap .sm-btn {
   border: 0 !important; border-radius: 6px !important; padding: 9px 16px !important;
   font-size: 0.9em !important; cursor: pointer; color: #fff !important;
@@ -264,7 +445,7 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
   white-space: pre-wrap; font-size: 0.86em; }
 .sm-scheibe { width: 12px; height: 12px; border-radius: 50%; display: inline-block;
   margin-right: 6px; vertical-align: -1px; }
-.sm-gruen { background: #6dac20; } .sm-rot { background: #c62828; }
+.sm-gruen { background: #6dac20; } .sm-rot { background: #c62828; } .sm-grau { background: #9e9e9e; }
 </style>
 
 <div class="sm-wrap">
@@ -276,9 +457,11 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 <?php } elseif ($mi_meldung !== '') { ?>
 <div class="sm-alert sm-ok"><?php echo $mi_meldung; ?></div>
 <?php } ?>
+<?php foreach ($mi_hinweise as $h) { ?>
+<div class="sm-alert sm-info"><?php echo $h; ?></div>
+<?php } ?>
 
-<?php
-/*
+<!--
  * Reiter als echte Verweise, sm-active vom SERVER.
  *
  * Bis 4.0.0 standen hier <div class="sm-tab"> ohne Verweis, und sm-active
@@ -286,64 +469,73 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
  * steht, war die Seite ohne JavaScript vollstaendig leer - und die Reiter
  * liessen sich nicht einmal anklicken, weil ein <div> kein Verweis ist.
  *
- * $mi_tab wurde serverseitig laengst ermittelt und nur ans JavaScript
- * weitergereicht. Diese Liste, die Positivliste weiter oben und die id der
- * Flaechen muessen deckungsgleich bleiben - alle drei.
- */
-$mi_reiter = array(
-    'tab-settings' => mi_t('COMMON.LABEL_SETTINGS'),
-    'tab-mqtt'     => mi_t('COMMON.LABEL_MQTT'),
-    'tab-loxone'   => mi_t('COMMON.LABEL_LOXONE'),
-    'tab-test'     => mi_t('COMMON.LABEL_TEST'),
-    'tab-log'      => mi_t('COMMON.LABEL_LOG'),
-);
-?>
+ * AUSGESCHRIEBEN, nicht aus einem Feld erzeugt. Eine erzeugte Leiste macht
+ * hausstandard_pruefen.py blind: die Spalte "tab" stand fuer dieses Plugin
+ * seit jeher auf einem Strich. Dass die drei Stellen dabei auseinanderlaufen
+ * koennen, faengt die Selbstpruefung im Reiter Test ab (mi_smactive_probe).
+ * Genau dieser Fehler - Schleife statt Ausschreiben - steht zweimal in
+ * REGELN_1 unter "eigene Fehler"; die Aufloesung ist nicht "Schleife oder
+ * Hand", sondern ausschreiben UND pruefen lassen.
+-->
 <div class="sm-tabs">
-<?php foreach ($mi_reiter as $mi_id => $mi_bez) { ?>
-  <a class="sm-tab<?php echo $mi_tab === $mi_id ? ' sm-active' : ''; ?>" data-ziel="<?php echo mi_e($mi_id); ?>"
-     href="index.php?form=<?php echo mi_e(substr($mi_id, 4)); ?>"><?php echo mi_e($mi_bez); ?></a>
-<?php } ?>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-settings' ? ' sm-active' : ''; ?>" data-ziel="tab-settings"
+     href="index.php?form=settings"><?php echo mi_te('COMMON.LABEL_SETTINGS'); ?></a>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-mqtt' ? ' sm-active' : ''; ?>" data-ziel="tab-mqtt"
+     href="index.php?form=mqtt"><?php echo mi_te('COMMON.LABEL_MQTT'); ?></a>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-loxone' ? ' sm-active' : ''; ?>" data-ziel="tab-loxone"
+     href="index.php?form=loxone"><?php echo mi_te('COMMON.LABEL_LOXONE'); ?></a>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-test' ? ' sm-active' : ''; ?>" data-ziel="tab-test"
+     href="index.php?form=test"><?php echo mi_te('COMMON.LABEL_TEST'); ?></a>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-log' ? ' sm-active' : ''; ?>" data-ziel="tab-log"
+     href="index.php?form=log"><?php echo mi_te('COMMON.LABEL_LOG'); ?></a>
 </div>
 
 <!-- ============================ Einstellungen ============================ -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-settings' ? ' sm-active' : ''; ?>" id="tab-settings">
 
-<h2><?php echo mi_e(mi_t('SETTINGS.HEAD_SERVICE')); ?></h2>
+<h2><?php echo mi_te('SETTINGS.HEAD_SERVICE'); ?></h2>
 <p><span class="sm-scheibe <?php echo $mi_pid !== null ? 'sm-gruen' : 'sm-rot'; ?>"></span>
-<?php echo $mi_pid !== null
-    ? mi_e(mi_t('SETTINGS.HEAD_SERVICE')) . ' ' . mi_e(mi_t('SETTINGS.STATE_RUNNING'))
-      . ' (PID ' . mi_e($mi_pid) . ').'
-    : mi_e(mi_t('SETTINGS.HEAD_SERVICE')) . ' ' . mi_e(mi_t('SETTINGS.STATE_STOPPED'))
-      . ' &ndash; siehe Reiter <i>' . mi_e(mi_t('COMMON.LABEL_LOG')) . '</i>.'; ?></p>
+<?php
+if ($mi_pid !== null) {
+    echo sprintf(mi_t('UI.DIENST_LAEUFT_PID'), mi_e($mi_pid));
+} else {
+    echo sprintf(mi_t('UI.DIENST_GESTOPPT_SIEHE'), mi_te('COMMON.LABEL_LOG'));
+}
+?></p>
 <p class="sm-small"><?php echo mi_t('UI.MSMART_NG'); ?> <span class="sm-mono"><?php
-  echo mi_e(mi_msmart_version() ?: 'unbekannt'); ?></span> <?php echo mi_t('UI.PYTHON'); ?> <span class="sm-mono"><?php
-  echo mi_e(mi_python_version() ?: 'unbekannt'); ?></span></p>
+  echo mi_e(mi_msmart_version() ?: mi_t('UI.UNBEKANNT')); ?></span> <?php echo mi_t('UI.PYTHON'); ?> <span class="sm-mono"><?php
+  echo mi_e(mi_python_version() ?: mi_t('UI.UNBEKANNT')); ?></span></p>
 
-<div class="sm-knopfreihe sm-b-lesen">
-  <form method="post" action="index.php">
-    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-    <button data-role="none" type="submit" name="dienst" value="start"><?php echo mi_t('UI.DIENST_STARTEN'); ?></button>
-  </form>
-</div>
-<div class="sm-knopfreihe sm-b-aktion">
-  <form method="post" action="index.php">
-    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-    <button data-role="none" type="submit" name="dienst" value="restart"><?php echo mi_t('UI.DIENST_NEU_STARTEN'); ?></button>
-  </form>
-  <form method="post" action="index.php">
-    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-    <button data-role="none" type="submit" name="dienst" value="stop"><?php echo mi_t('UI.DIENST_ANHALTEN'); ?></button>
-  </form>
-</div>
 <div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?php echo mi_t('UI.HARMLOS_EIN_START_L_SST'); ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.GREIFT_IN_DEN_LAUFENDEN_BETRIEB'); ?></span>
+<span><i class="sm-punkt sm-b-lesen"></i> <?php echo mi_t('UI.LEG_LESEN'); ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?php echo mi_t('UI.LEG_TECHNIK'); ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
+</div>
+<div class="sm-knopfreihe">
+  <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="dienst" value="start"><?php echo mi_t('UI.DIENST_STARTEN'); ?></button>
+  </form>
+</div>
+<div class="sm-knopfreihe">
+  <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="dienst" value="restart"><?php echo mi_t('UI.DIENST_NEU_STARTEN'); ?></button>
+  </form>
+  <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="dienst" value="stop"><?php echo mi_t('UI.DIENST_ANHALTEN'); ?></button>
+  </form>
 </div>
 
 <form method="post" action="index.php" autocomplete="off">
+<?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
 
-<h2><?php echo mi_e(mi_t('SETTINGS.HEAD_LOXONE')); ?></h2>
+<h2><?php echo mi_te('SETTINGS.HEAD_LOXONE'); ?></h2>
 <div class="sm-row">
   <label for="MINISERVER"><?php echo mi_t('UI.MINISERVER'); ?></label>
   <select data-role="none" id="MINISERVER" name="MINISERVER">
@@ -368,288 +560,455 @@ if (!$mi_liste) {
   <label for="UDP_PORT"><?php echo mi_t('UI.UDP_PORT'); ?></label>
   <input data-role="none" type="text" id="UDP_PORT" name="UDP_PORT"
          value="<?php echo mi_e($mi_cfg['UDP_PORT']); ?>">
-  <p class="sm-small"><?php echo mi_t('UI.AUF_DIESEM_PORT_NIMMT_DAS'); ?> <i><?php echo mi_t('UI.EINBINDUNG_IN_LOXONE'); ?></i>.</p>
+  <p class="sm-small"><?php echo mi_t('UI.UDP_PORT_HILFE'); ?></p>
+</div>
+<div class="sm-row">
+  <label for="lox_timeout"><?php echo mi_t('UI.LOX_TIMEOUT'); ?></label>
+  <input data-role="none" type="text" id="lox_timeout" name="lox_timeout"
+         value="<?php echo mi_e($mi_cfg['lox_timeout']); ?>">
+  <p class="sm-small"><?php echo mi_t('UI.LOX_TIMEOUT_HILFE'); ?></p>
 </div>
 
-<h2><?php echo mi_e(mi_t('SETTINGS.HEAD_MIDEA')); ?></h2>
-<p class="sm-small"><?php echo mi_t('UI.DIESELBEN_ZUGANGSDATEN_WIE_IN_DER'); ?> <b><?php echo mi_t('UI.GER_TESUCHE'); ?></b>
-<?php echo mi_t('UI.GEBRAUCHT_DANACH_L_UFT_ALLES'); ?></p>
+<h2><?php echo mi_te('SETTINGS.HEAD_MIDEA'); ?></h2>
+<div class="sm-hinweis"><?php echo mi_t('UI.KONTO_ERKLAERUNG'); ?></div>
 <div class="sm-row">
-  <label for="MideaUser"><?php echo mi_t('UI.BENUTZER_E_MAIL_ADRESSE'); ?></label>
+  <label for="MideaUser"><?php echo mi_t('UI.BENUTZER'); ?></label>
   <input data-role="none" type="text" id="MideaUser" name="MideaUser"
          value="<?php echo mi_e($mi_cfg['MideaUser']); ?>">
 </div>
 <div class="sm-row">
   <label for="MideaPassword"><?php echo mi_t('UI.PASSWORT'); ?></label>
   <input data-role="none" type="password" id="MideaPassword" name="MideaPassword" value=""
-         placeholder="<?php echo $mi_cfg['MideaPassword'] !== ''
-             ? 'gespeichert &ndash; leer lassen, um es zu behalten'
-             : 'noch nicht gesetzt'; ?>">
+         placeholder="<?php
+             if ($mi_cfg['MideaPassword'] !== '') { echo mi_te('UI.PASSWORT_GESETZT'); }
+             else { echo mi_te('UI.PASSWORT_LEER'); } ?>">
+  <p class="sm-small">
+    <label style="font-weight:normal; display:inline;">
+      <input data-role="none" type="checkbox" name="MideaPassword_loeschen" value="1"
+             style="width:auto; display:inline;">
+      <?php echo mi_t('UI.PASSWORT_LOESCHEN'); ?>
+    </label>
+  </p>
 </div>
 <div class="sm-row">
-  <label for="region"><?php echo mi_t('UI.REGION_DES_KONTOS'); ?></label>
+  <label for="region"><?php echo mi_t('UI.REGION'); ?></label>
   <select data-role="none" id="region" name="region">
 <?php foreach (mi_regionen() as $k => $v) { ?>
-    <option value="<?php echo $k; ?>"<?php
-      echo $mi_cfg['region'] === $k ? ' selected' : ''; ?>><?php echo $v; ?></option>
+    <option value="<?php echo mi_e($k); ?>"<?php
+      echo $mi_cfg['region'] === $k ? ' selected' : ''; ?>><?php
+      echo mi_e($v[0]) . ' &ndash; ' . mi_e(sprintf(mi_t('UI.REGION_SERVER'), $v[1])); ?></option>
 <?php } ?>
   </select>
+  <p class="sm-small"><?php echo mi_t('UI.REGION_HILFE'); ?></p>
 </div>
 
-<h2><?php echo mi_e(mi_t('SETTINGS.HEAD_ADVANCED')); ?></h2>
+<h2><?php echo mi_te('SETTINGS.HEAD_ADVANCED'); ?></h2>
 <div class="sm-row">
-  <label for="maxConnectionLifetime"><?php echo mi_t('UI.VERBINDUNGSDAUER_JE_GER_T_SEKUNDEN'); ?></label>
+  <label for="abfragetakt"><?php echo mi_t('UI.ABFRAGETAKT'); ?></label>
+  <input data-role="none" type="text" id="abfragetakt" name="abfragetakt"
+         value="<?php echo mi_e($mi_cfg['abfragetakt']); ?>">
+  <p class="sm-small"><?php echo mi_t('UI.ABFRAGETAKT_HILFE'); ?></p>
+</div>
+<div class="sm-row">
+  <label for="maxConnectionLifetime"><?php echo mi_t('UI.LEBENSDAUER'); ?></label>
   <input data-role="none" type="text" id="maxConnectionLifetime" name="maxConnectionLifetime"
          value="<?php echo mi_e($mi_cfg['maxConnectionLifetime']); ?>">
-  <p class="sm-small"><?php echo mi_t('UI.NACH_DIESER_ZEIT_BAUT_DER'); ?></p>
+  <p class="sm-small"><?php echo mi_t('UI.LEBENSDAUER_HILFE'); ?></p>
 </div>
 <div class="sm-row">
-  <label for="DEBUG"><?php echo mi_t('UI.AUSF_HRLICHES_PROTOKOLL'); ?></label>
+  <label for="DEBUG"><?php echo mi_t('UI.DEBUG'); ?></label>
   <select data-role="none" id="DEBUG" name="DEBUG">
-    <option value="0"<?php echo $mi_cfg['DEBUG'] !== '1' ? ' selected' : ''; ?>><?php echo mi_t('UI.AUS'); ?></option>
-    <option value="1"<?php echo $mi_cfg['DEBUG'] === '1' ? ' selected' : ''; ?>><?php echo mi_t('UI.EIN'); ?></option>
+    <option value="0"<?php echo $mi_cfg['DEBUG'] !== '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.AUS'); ?></option>
+    <option value="1"<?php echo $mi_cfg['DEBUG'] === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.EIN'); ?></option>
   </select>
-  <p class="sm-small"><?php echo mi_t('UI.NUR_ZUR_FEHLERSUCHE_EINSCHALTEN_DIE'); ?></p>
+  <p class="sm-small"><?php echo mi_t('UI.DEBUG_HILFE'); ?></p>
 </div>
 
-<div class="sm-knopfreihe sm-b-aktion">
-  <button data-role="none" type="submit" name="speichern" value="1"><?php echo mi_t('UI.SPEICHERN_UND_DIENST_NEU_STARTEN'); ?></button>
-  <button data-role="none" type="submit" name="speichern_suchen" value="1"><?php echo mi_t('UI.SPEICHERN_UND_GER_TE_SUCHEN'); ?></button>
-</div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.STARTET_DEN_DIENST_NEU_BZW'); ?></span>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="speichern" value="1"><?php echo mi_t('UI.SPEICHERN_NEUSTART'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="speichern_suchen" value="1"><?php echo mi_t('UI.SPEICHERN_SUCHEN'); ?></button>
 </div>
 </form>
 
-<h2><?php echo mi_e(mi_t('SETTINGS.HEAD_DEVICES')); ?></h2>
+<h2><?php echo mi_te('SETTINGS.HEAD_DEVICES'); ?></h2>
 <?php if (!$mi_geraete) { ?>
-<div class="sm-alert sm-info"><?php echo mi_t('UI.ES_SIND_NOCH_KEINE_GER'); ?> <i><?php echo mi_t('UI.SPEICHERN_UND_GER_TE_SUCHEN_2'); ?></i> <?php echo mi_t('UI.DR_CKEN'); ?></div>
+<div class="sm-alert sm-info"><?php echo mi_t('UI.KEINE_GERAETE'); ?></div>
 <?php } else { ?>
+<form method="post" action="index.php">
+<?php echo mi_fmt(); ?>
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:26%"><?php echo mi_t('UI.GER_TE_ID'); ?></th><th style="width:26%"><?php echo mi_t('UI.IP_ADRESSE'); ?></th><th><?php echo mi_t('UI.BEZEICHNUNG'); ?></th></tr>
+<tr><th style="width:24%"><?php echo mi_te('UI.GERAETE_ID'); ?></th>
+    <th style="width:22%"><?php echo mi_te('UI.IP_ADRESSE'); ?></th>
+    <th style="width:14%"><?php echo mi_te('UI.PROTOKOLL'); ?></th>
+    <th><?php echo mi_te('UI.BEZEICHNUNG'); ?></th></tr>
 <?php foreach ($mi_geraete as $d) { ?>
 <tr><td class="sm-mono"><?php echo mi_e($d['id']); ?></td>
     <td class="sm-mono"><?php echo mi_e($d['ip']); ?></td>
-    <td><?php echo $d['name']; ?></td></tr>
+    <td><?php
+        if ($d['token'] !== '' && $d['key'] !== '') { echo mi_te('UI.PROTOKOLL_V3'); }
+        else { echo mi_te('UI.PROTOKOLL_V2'); } ?></td>
+    <td><input data-role="none" type="text" style="max-width:100%"
+        name="bezeichnung[<?php echo mi_e($d['id']); ?>]"
+        value="<?php echo mi_e($d['bezeichnung']); ?>"
+        placeholder="<?php echo mi_e(mi_geraetename($d)); ?>"></td></tr>
 <?php } ?>
 </table>
-<p class="sm-small"><?php echo mi_t('UI.DIE_LISTE_STEHT_IN'); ?>
-<span class="sm-mono"><?php echo mi_e($mi_p['devices']); ?></span> <?php echo mi_t('UI.UND_BERLEBT_UPDATES'); ?></p>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="bez_speichern" value="1"><?php echo mi_t('UI.BEZ_SPEICHERN'); ?></button>
+</div>
+</form>
+<p class="sm-small"><?php echo mi_t('UI.GERAETE_DATEI'); ?>
+<span class="sm-mono"><?php echo mi_e($mi_p['devices']); ?></span> <?php echo mi_t('UI.GERAETE_UEBERLEBT'); ?></p>
 <?php } ?>
+
+<h2><?php echo mi_te('UI.H_SICHERUNG'); ?></h2>
+<div class="sm-hinweis"><?php echo mi_t('UI.SICH_ERKLAERUNG'); ?></div>
+<div class="sm-warnung"><?php echo mi_t('UI.SICH_WARNUNG'); ?></div>
+<div class="sm-knopfreihe">
+  <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
+       exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
+       Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
+       einen Download, der das Speichern verschluckt. -->
+  <form action="index.php" method="post">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="mi_sichern" value="1"><?php echo mi_t('UI.K_SICHERN'); ?></button>
+  </form>
+  <form action="index.php" method="post" enctype="multipart/form-data">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <input data-role="none" type="file" name="mi_sicherung" accept=".json">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mi_zurueck" value="1"><?php echo mi_t('UI.K_ZURUECK'); ?></button>
+  </form>
+</div>
+<p class="sm-hilfe"><?php echo mi_t('UI.SICH_HILFE'); ?></p>
 </div>
 
 <!-- ================================= MQTT ================================= -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-mqtt' ? ' sm-active' : ''; ?>" id="tab-mqtt">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
+</div>
 
-<h2><?php echo mi_t('UI.ZUSTAND_DES_MQTT_GATEWAYS'); ?></h2>
-<p class="sm-small"><?php echo mi_t('UI.DAS_MQTT_GATEWAY_IST_SEIT'); ?> <b><?php echo mi_t('UI.BESTANDTEIL_DES_SYSTEMS'); ?></b> <?php echo mi_t('UI.UND_KEIN_PLUGIN_ES_WIRD'); ?> <i><?php echo mi_t('UI.SYSTEM_MQTT_GATEWAY'); ?></i>
-<?php echo mi_t('UI.EINGERICHTET'); ?><span class="sm-mono"><?php echo mi_t('UI.ADMIN_SYSTEM_MQTT_CGI'); ?></span>).</p>
+<h2><?php echo mi_te('UI.H_MQTT_ZUSTAND'); ?></h2>
+<p class="sm-small"><?php echo mi_t('UI.MQTT_SYSTEMBESTANDTEIL'); ?></p>
 
 <?php if (!$mi_mq) { ?>
-<div class="sm-alert sm-warn"><?php echo mi_t('UI.DIE_SYSTEMKONFIGURATION'); ?><span class="sm-mono"><?php echo mi_t('UI.CONFIG_SYSTEM_GENERAL_JSON'); ?></span><?php echo mi_t('UI.IST_NICHT_LESBAR_DER_UDP'); ?></div>
+<div class="sm-alert sm-warn"><?php echo mi_t('UI.MQTT_UNLESBAR'); ?></div>
 <?php } else { ?>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:34%"><?php echo mi_t('UI.GR_E'); ?></th><th><?php echo mi_t('UI.WERT'); ?></th></tr>
-<tr><td><?php echo mi_t('UI.BROKER'); ?></td><td class="sm-mono"><?php
+<tr><th style="width:34%"><?php echo mi_te('UI.GROESSE'); ?></th><th><?php echo mi_te('UI.WERT'); ?></th></tr>
+<tr><td><?php echo mi_te('UI.BROKER'); ?></td><td class="sm-mono"><?php
   echo mi_e($mi_mq['host'] . ':' . $mi_mq['port']); ?></td></tr>
-<tr><td><?php echo mi_t('UI.EIGENER_BROKER_AUF_DEM_LOXBERRY'); ?></td><td><?php
-  echo $mi_mq['local'] ? 'ja' : 'nein &ndash; es wird ein fremder Broker verwendet'; ?></td></tr>
-<tr><td><?php echo mi_t('UI.GATEWAY_STARTET_AUTOMATISCH'); ?></td><td><?php
-  echo $mi_mq['autostart'] ? 'ja' : 'nein &ndash; nach einem Neustart kommt nichts an'; ?></td></tr>
-<tr><td><?php echo mi_t('UI.BENUTZER'); ?></td><td class="sm-mono"><?php
-  echo $mi_mq['user'] !== '' ? mi_e($mi_mq['user']) : '(ohne)'; ?></td></tr>
+<tr><td><?php echo mi_te('UI.EIGENER_BROKER'); ?></td><td><?php
+  if ($mi_mq['local']) { echo mi_te('UI.JA'); } else { echo mi_t('UI.BROKER_FREMD'); } ?></td></tr>
+<tr><td><?php echo mi_te('UI.GATEWAY_AUTOSTART'); ?></td><td><?php
+  if ($mi_mq['autostart']) { echo mi_te('UI.JA'); } else { echo mi_t('UI.AUTOSTART_AUS'); } ?></td></tr>
+<tr><td><?php echo mi_te('UI.BENUTZER'); ?></td><td class="sm-mono"><?php
+  if ($mi_mq['user'] !== '') { echo mi_e($mi_mq['user']); } else { echo mi_te('UI.OHNE'); } ?></td></tr>
 </table>
+</div>
 <?php } ?>
 
-<h2><?php echo mi_t('UI.DAS_EINZUTRAGENDE_ABO'); ?></h2>
-<p class="sm-small"><b><?php echo mi_abo_text(); ?></b>
-<?php echo mi_t('UI.EINZUTRAGEN_UNTER'); ?> <i><?php echo mi_t('UI.SYSTEM_MQTT_GATEWAY_ABONNEMENTS'); ?></i>:</p>
+<h2><?php echo mi_te('UI.H_MQTT_EINSTELLUNGEN'); ?></h2>
+<form method="post" action="index.php">
+<?php echo mi_fmt(); ?>
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<div class="sm-row">
+  <label for="mqtt_praefix"><?php echo mi_t('UI.MQTT_PRAEFIX'); ?></label>
+  <input data-role="none" type="text" id="mqtt_praefix" name="mqtt_praefix"
+         value="<?php echo mi_e($mi_cfg['mqtt_praefix']); ?>">
+  <p class="sm-small"><?php echo mi_t('UI.MQTT_PRAEFIX_HILFE'); ?></p>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mqtt_speichern" value="1"><?php echo mi_t('UI.MQTT_SPEICHERN'); ?></button>
+</div>
+</form>
+
+<h2><?php echo mi_te('UI.H_ABO'); ?></h2>
+<div class="sm-hinweis"><?php echo mi_abo_text(); ?></div>
 <pre class="sm-pre"><?php echo mi_e($mi_topic); ?>/#</pre>
-
-<h2><?php echo mi_t('UI.VER_FFENTLICHTE_THEMEN'); ?></h2>
-<?php if (!$mi_geraete) { ?>
-<p class="sm-small"><?php echo mi_t('UI.SOBALD_GER_TE_HINTERLEGT_SIND'); ?>
-<span class="sm-mono"><?php echo mi_e($mi_topic); ?>/&lt;Ger&auml;te-ID&gt;/&lt;Wert&gt;</span></p>
+<?php
+list($mi_abo_lage, $mi_abo_ist, $mi_abo_soll) = mi_abo_datei($mi_cfg);
+if ($mi_abo_lage !== 'ok') { ?>
+<div class="sm-alert sm-warn"><?php
+  if ($mi_abo_lage === 'fehlt') {
+      echo mi_t('UI.ABO_DATEI_FEHLT');
+  } else {
+      echo sprintf(mi_t('UI.ABO_DATEI_ABWEICHEND'), mi_e($mi_abo_ist), mi_e($mi_abo_soll));
+  } ?></div>
 <?php } ?>
+
+<h2><?php echo mi_te('UI.H_THEMEN'); ?></h2>
+<?php if (!$mi_geraete) { ?>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.THEMEN_OHNE_GERAETE'), mi_e($mi_topic)); ?></p>
+<?php } ?>
+<?php
+$mi_gruppen = array('grund' => 'UI.GRUPPE_GRUND', 'komfort' => 'UI.GRUPPE_KOMFORT',
+                    'energie' => 'UI.GRUPPE_ENERGIE');
+foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
+<h3><?php echo mi_te($mi_gt); ?></h3>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:46%"><?php echo mi_t('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_t('UI.EINHEIT'); ?></th><th><?php echo mi_t('UI.BEDEUTUNG'); ?></th></tr>
-<?php foreach (mi_werte() as $wert => $info) { ?>
+<tr><th style="width:46%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
+<?php foreach (mi_werte() as $wert => $info) {
+        if ($info[2] !== $mi_g) { continue; } ?>
 <tr><td class="sm-mono"><?php echo mi_e($mi_topic . '/' . $mi_bsp . '/' . $wert); ?></td>
-    <td><?php echo $info[0]; ?></td><td><?php echo $info[1]; ?></td></tr>
+    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
 </table>
+</div>
+<?php } ?>
 
-<p class="sm-small"><b><?php echo mi_t('UI.MQTT_IST_DER_REGELWEG'); ?></b> <?php echo mi_t('UI.UDP_STEHT_ALS_AUSWEICHWEG_BEREIT'); ?></p>
+<h3><?php echo mi_te('UI.GRUPPE_STATUS'); ?></h3>
+<div class="sm-hinweis"><?php echo mi_t('UI.STATUS_ERKLAERUNG'); ?></div>
+<div class="sm-rollen">
+<table class="sm-tbl">
+<tr><th style="width:46%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
+<?php foreach (mi_status_werte() as $wert => $info) { ?>
+<tr><td class="sm-mono"><?php echo mi_e($mi_topic . '/' . $wert); ?></td>
+    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
+<?php } ?>
+</table>
+</div>
+
+<p class="sm-small"><b><?php echo mi_t('UI.MQTT_REGELWEG'); ?></b> <?php echo mi_t('UI.UDP_AUSWEICHWEG'); ?></p>
 </div>
 
 <!-- ========================= Einbindung in Loxone ========================= -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-loxone' ? ' sm-active' : ''; ?>" id="tab-loxone">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?php echo mi_t('UI.LEG_TECHNIK'); ?></span>
+</div>
 
-<h2><?php echo mi_t('UI.EINBINDUNG_IN_LOXONE_SCHRITT_F'); ?></h2>
-<p class="sm-small"><?php echo mi_t('UI.MIDEA2LOX_ARBEITET_IN'); ?> <b><?php echo mi_t('UI.BEIDE_RICHTUNGEN'); ?></b><?php echo mi_t('UI.ES_MELDET_DEN_ZUSTAND_DER'); ?></p>
+<h2><?php echo mi_te('UI.H_EINBINDUNG'); ?></h2>
+<p class="sm-small"><?php echo mi_t('UI.EINBINDUNG_EINLEITUNG'); ?></p>
 
 <?php if (!$mi_geraete) { ?>
-<div class="sm-alert sm-warn"><b><?php echo mi_t('UI.ES_SIND_NOCH_KEINE_GER_2'); ?></b>
-<?php echo mi_t('UI.DIE_BEISPIELE_UNTEN_BENUTZEN_DESHALB'); ?>
-<span class="sm-mono">123456789</span><?php echo mi_t('UI.SUCHEN_SIE_ZUERST_IM_REITER'); ?>
-<i><?php echo mi_t('UI.EINSTELLUNGEN'); ?></i> <?php echo mi_t('UI.NACH_IHREN_GER_TEN_DANACH'); ?></div>
+<div class="sm-alert sm-warn"><?php echo sprintf(mi_t('UI.EINBINDUNG_OHNE_GERAETE'), '123456789'); ?></div>
 <?php } ?>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_1_WEG_FESTLEGEN_MQTT'); ?></b><br><br>
-<b><?php echo mi_t('UI.MQTT'); ?></b> <?php echo mi_t('UI.IST_DER_BEQUEMERE_WEG_DAS'); ?> <b><?php echo mi_t('UI.SEIT_LOXBERRY_3_BESTANDTEIL_DES'); ?></b> <?php echo mi_t('UI.UND_MUSS_NICHT_NACHINSTALLIERT_WERDEN'); ?> <i><?php echo mi_t('UI.SYSTEM_MQTT_GATEWAY_2'); ?></i>
-(<span class="sm-mono"><?php echo mi_t('UI.ADMIN_SYSTEM_MQTT_CGI_2'); ?></span>).<br><br>
-<b><?php echo mi_t('UI.UDP'); ?></b> <?php echo mi_t('UI.KOMMT_OHNE_DEN_GATEWAY_AUS'); ?><br><br>
-<b><?php echo mi_t('UI.DAS_PLUGIN_SENDET_IMMER_BEIDES'); ?></b> <?php echo mi_t('UI.DIE_ENTSCHEIDUNG_F_LLT_ALLEIN'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT1'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT1_TEXT'); ?>
 </div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_2_ABO_IM_MQTT'); ?></b><br><br>
-<?php echo mi_t('UI.NUR_F_R_DEN_MQTT'); ?> <i><?php echo mi_t('UI.SYSTEM_EINSTELLUNGEN_MQTT_GATEWAY_ABONNEMENT'); ?></i> <?php echo mi_t('UI.EINTRAGEN'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT2'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT2_TEXT'); ?>
 <pre class="sm-pre"><?php echo mi_e($mi_topic); ?>/#</pre>
-<b><?php echo mi_abo_text(); ?></b> <?php echo mi_t('UI.DANACH_ZEIGT_DAS_GATEWAY_UNTER'); ?>
-<i><?php echo mi_t('UI.EINGEHENDE_DATEN'); ?></i> <?php echo mi_t('UI.DIE_ERZEUGTEN_NAMEN_DIE_DORT'); ?>
+<?php echo mi_abo_text(); ?>
 </div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_3_VIRTUELLE_EING_NGE'); ?></b><br><br>
-In <b><?php echo mi_t('UI.LOXONE_CONFIG'); ?></b><?php echo mi_t('UI.MINISERVER_ANKLICKEN'); ?> <i><?php echo mi_t('UI.VIRTUELLE_EING_NGE'); ?></i> <?php echo mi_t('UI.JE_WERT_EINEN_EINGANG'); ?> <b><?php echo mi_t('UI.DER_TITEL_MUSS_EXAKT_STIMMEN'); ?></b> &mdash; das Gateway ordnet ausschlie&szlig;lich &uuml;ber den Namen
-zu.
-<?php foreach (($mi_geraete ?: array(array('id' => $mi_bsp, 'name' => 'Klimager&auml;t'))) as $d) { ?>
-<p class="sm-small"><?php echo mi_t('UI.KLIMAGER_T'); ?> <b><?php echo $d['name']; ?></b>
-(ID <span class="sm-mono"><?php echo mi_e($d['id']); ?></span>):</p>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT3'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT3_TEXT'); ?>
+<?php foreach (($mi_geraete ?: array(array('id' => $mi_bsp, 'typ' => '', 'bezeichnung' => '', 'name' => mi_e(mi_t('UI.KLIMAGERAET'))))) as $d) { ?>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.GERAET_UEBERSCHRIFT'), $d['name'], mi_e($d['id'])); ?></p>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th><?php echo mi_t('UI.TITEL_DES_VIRTUELLEN_EINGANGS'); ?></th><th style="width:12%"><?php echo mi_t('UI.EINHEIT_2'); ?></th><th style="width:34%"><?php echo mi_t('UI.BEDEUTUNG_2'); ?></th></tr>
+<tr><th><?php echo mi_te('UI.TITEL_EINGANG'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th style="width:34%"><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
 <?php foreach (mi_werte() as $wert => $info) { ?>
 <tr><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $d['id'] . '_' . $wert); ?></td>
-    <td><?php echo $info[0]; ?></td><td><?php echo $info[1]; ?></td></tr>
+    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
 </table>
+</div>
 <?php } ?>
-<p class="sm-small"><b><?php echo mi_t('UI.DER_UDP_WEG'); ?></b> <?php echo mi_t('UI.STATTDESSEN_EINEN'); ?> <i><?php echo mi_t('UI.VIRTUELLEN_UDP_EINGANG'); ?></i> <?php echo mi_t('UI.AUF_PORT'); ?> <b><?php echo mi_e($mi_port); ?></b> <?php echo mi_t('UI.ANLEGEN_JE_WERT_EINEN_BEFEHL'); ?></p>
-<pre class="sm-pre">\iMidea/<?php echo mi_e($mi_bsp); ?>/indoor_temperature,\i\v</pre>
-<p class="sm-small"><?php echo mi_t('UI.DAS_MUSTER_HEI_T_SUCHE'); ?> <span class="sm-mono">\i</span> <?php echo mi_t('UI.UND_NIMM_DIE_ZAHL_DIE'); ?><span class="sm-mono">\v</span><?php echo mi_t('UI.TEXT'); ?></p>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.UDP_WEG'), mi_e($mi_port)); ?></p>
+<pre class="sm-pre">\i<?php echo mi_e($mi_topic); ?>/<?php echo mi_e($mi_bsp); ?>/indoor_temperature,\i\v</pre>
+<p class="sm-small"><?php echo mi_t('UI.UDP_MUSTER_ERKLAERUNG'); ?></p>
+</div>
 
 <?php if ($mi_geraete) { ?>
-<h2><?php echo mi_t('UI.H_VORLAGE'); ?></h2>
-<div class="sm-hinweis"><?php echo mi_t('UI.H_VORLAGE_TEXT'); ?> <?php echo mi_t('UI.H_VORLAGE_TEXT2'); ?></div>
-<form action="index.php" method="post" style="margin-bottom:14px;">
-  <input data-role="none" type="hidden" name="vorlage" value="1">
-  <button data-role="none" class="sm-btn" type="submit" style="background:#546e7a;"><?php echo mi_t('UI.K_VORLAGE'); ?></button>
-</form>
+<div class="sm-step"><b><?php echo mi_te('UI.H_VORLAGE'); ?></b><br><br>
+<div class="sm-hinweis"><?php echo mi_t('UI.H_VORLAGE_TEXT'); ?></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="eingang"><?php echo mi_t('UI.K_VORLAGE'); ?></button>
+  </form>
+  <form action="index.php" method="post">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="ausgang"><?php echo mi_t('UI.K_VORLAGE_AUS'); ?></button>
+  </form>
+</div>
+<p class="sm-hilfe"><?php echo mi_t('UI.VORLAGE_WARNUNG'); ?></p>
+</div>
 <?php } ?>
-</div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_4_BEFEHLE_AN_DAS'); ?></b><br><br>
-<?php echo mi_t('UI.ZUM_SCHALTEN_LEGT_MAN_EINEN'); ?> <i><?php echo mi_t('UI.VIRTUELLEN_AUSGANG'); ?></i> <?php echo mi_t('UI.AN_ADRESSE'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT4'); ?></b><br><br>
+<?php echo sprintf(mi_t('UI.SCHRITT4_TEXT'), mi_e($mi_ip), mi_e($mi_port)); ?>
 <pre class="sm-pre">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></pre>
-<?php echo mi_t('UI.DARUNTER_JE_BEFEHL_EINEN'); ?> <i><?php echo mi_t('UI.VIRTUELLEN_AUSGANG_BEFEHL'); ?></i><?php echo mi_t('UI.DER_BEFEHLSTEXT_BESTEHT_AUS_DER'); ?>
+<?php echo mi_t('UI.SCHRITT4_TEXT2'); ?>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:34%"><?php echo mi_t('UI.WAS'); ?></th><th><?php echo mi_t('UI.BEFEHL_BEI_EIN'); ?></th></tr>
-<tr><td><?php echo mi_t('UI.EINSCHALTEN'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,True</td></tr>
-<tr><td><?php echo mi_t('UI.AUSSCHALTEN'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,False</td></tr>
-<tr><td><?php echo mi_t('UI.K_HLEN_22_C'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,True,ac.operational_mode_enum.cool,22</td></tr>
-<tr><td><?php echo mi_t('UI.HEIZEN_21_C'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,True,ac.operational_mode_enum.heat,21</td></tr>
-<tr><td><?php echo mi_t('UI.L_FTERSTUFE_LEISE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,ac.fan_speed_enum.Silent</td></tr>
-<tr><td><?php echo mi_t('UI.SCHWENKEN_SENKRECHT'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp); ?>,ac.swing_mode_enum.Vertical</td></tr>
+<tr><th style="width:34%"><?php echo mi_te('UI.WAS'); ?></th><th><?php echo mi_te('UI.BEFEHL_EIN'); ?></th><th><?php echo mi_te('UI.BEFEHL_AUS'); ?></th></tr>
+<?php foreach (mi_befehle() as $b) { ?>
+<tr><td><?php echo mi_e(mi_t($b[0])); ?></td>
+    <td class="sm-mono"><?php echo mi_e($mi_bsp . ',' . $b[1]); ?></td>
+    <td class="sm-mono"><?php echo $b[2] !== null ? mi_e($mi_bsp . ',' . $b[2]) : '&mdash;'; ?></td></tr>
+<?php } ?>
 </table>
-<b><?php echo mi_t('UI.SOLLTEMPERATUR_STUFENLOS'); ?></b> <?php echo mi_t('UI.IM_BEFEHLSTEXT'); ?> <span class="sm-mono">&lt;v&gt;</span>
-<?php echo mi_t('UI.ALS_PLATZHALTER_BENUTZEN_ZUM_BEISPIEL'); ?>
-<span class="sm-mono"><?php echo mi_e($mi_bsp); ?>,True,ac.operational_mode_enum.cool,&lt;v&gt;</span>
-<?php echo mi_t('UI.DANN_SETZT_DER_ANGESCHLOSSENE_ANALOGWERT'); ?>
+</div>
+<?php echo mi_t('UI.SCHRITT4_TEMP'); ?>
 </div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_5_MERKEN_WENN_EIN'); ?></b><br><br>
-<?php echo mi_t('UI.F_LLT_EIN_KLIMAGER_T'); ?> <b><?php echo mi_t('UI.LETZTEN_WERT'); ?></b><?php echo mi_t('UI.IN_DER_APP_SIEHT_DANN'); ?> <span class="sm-mono"><?php echo mi_t('UI.ONLINE'); ?></span><?php echo mi_t('UI.SOLANGE_ES'); ?>
-<span class="sm-mono"><?php echo mi_t('UI.WERT_TRUE'); ?></span> <?php echo mi_t('UI.MELDET_IST_DAS_GER_T'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT5'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT5_TEXT'); ?>
 </div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_6_KOMPLETTE_BAUSTEIN_LISTE'); ?></b><br><br>
-<?php echo mi_t('UI.SO_SIEHT_DIE_VOLLST_NDIGE'); ?> <b><?php echo mi_t('UI.EIN_2'); ?></b> <?php echo mi_t('UI.KLIMAGER_T_AUF_DER_PROGRAMMIERSEITE'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT6'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT6_TEXT'); ?>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th>#</th><th><?php echo mi_t('UI.BAUSTEIN_TYP'); ?></th><th><?php echo mi_t('UI.NAME_VORSCHLAG'); ?></th><th><?php echo mi_t('UI.PARAMETER'); ?></th><th><?php echo mi_t('UI.EING_NGE_VERBINDEN_MIT'); ?></th></tr>
-<tr><td>1</td><td><?php echo mi_t('UI.VIRTUELLER_EINGANG'); ?></td><td class="sm-mono"><?php echo mi_t('UI.INDOOR_TEMPERATURE'); ?></td><td><?php echo mi_t('UI.EINHEIT_C_1_NACHKOMMASTELLE'); ?></td><td><?php echo mi_t('UI.KOMMT_BER_DAS_GATEWAY'); ?></td></tr>
-<tr><td>2</td><td><?php echo mi_t('UI.VIRTUELLER_EINGANG_2'); ?></td><td class="sm-mono"><?php echo mi_t('UI.OUTDOOR_TEMPERATURE'); ?></td><td><?php echo mi_t('UI.EINHEIT_C'); ?></td><td><?php echo mi_t('UI.TEXT_2'); ?></td></tr>
-<tr><td>3</td><td><?php echo mi_t('UI.VIRTUELLER_EINGANG_3'); ?></td><td class="sm-mono"><?php echo mi_t('UI.TARGET_TEMPERATURE'); ?></td><td><?php echo mi_t('UI.EINHEIT_C_2'); ?></td><td><?php echo mi_t('UI.TEXT_3'); ?></td></tr>
-<tr><td>4</td><td><?php echo mi_t('UI.VIRTUELLER_EINGANG_4'); ?></td><td class="sm-mono"><?php echo mi_t('UI.POWER_STATE'); ?></td><td><?php echo mi_t('UI.DIGITAL_TRUE_FALSE'); ?></td><td><?php echo mi_t('UI.TEXT_4'); ?></td></tr>
-<tr><td>5</td><td><?php echo mi_t('UI.VIRTUELLER_EINGANG_5'); ?></td><td class="sm-mono"><?php echo mi_t('UI.ONLINE_2'); ?></td><td><?php echo mi_t('UI.DIGITAL'); ?></td><td><?php echo mi_t('UI.TEXT_5'); ?></td></tr>
-<tr><td>6</td><td><?php echo mi_t('UI.VIRTUELLER_AUSGANG'); ?></td><td><?php echo mi_t('UI.MIDEA2LOX'); ?></td><td><?php echo mi_t('UI.ADRESSE'); ?> <span class="sm-mono">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></span></td><td><?php echo mi_t('UI.TEXT_6'); ?></td></tr>
-<tr><td>7</td><td><?php echo mi_t('UI.VIRT_AUSGANG_BEFEHL'); ?></td><td><?php echo mi_t('UI.KLIMA_EIN_AUS'); ?></td><td><?php echo mi_t('UI.EIN_3'); ?> <span class="sm-mono"><?php echo mi_e($mi_bsp); ?>,True</span> <?php echo mi_t('UI.AUS_2'); ?> <span class="sm-mono"><?php echo mi_e($mi_bsp); ?>,False</span></td><td><?php echo mi_t('UI.VOM_SCHALTER_BAUSTEIN'); ?></td></tr>
-<tr><td>8</td><td><?php echo mi_t('UI.NICHT_NOT'); ?></td><td><?php echo mi_t('UI.GER_T_OFFLINE'); ?></td><td><?php echo mi_t('UI.TEXT_7'); ?></td><td><?php echo mi_t('UI.EINGANG_5'); ?></td></tr>
-<tr><td>9</td><td><?php echo mi_t('UI.EINSCHALTVERZ_GERUNG'); ?></td><td><?php echo mi_t('UI.AUSFALL_BEST_TIGT'); ?></td><td><?php echo mi_t('UI.VERZ_GERUNG'); ?> <b>600</b> s</td><td><?php echo mi_t('UI.EINGANG_8'); ?></td></tr>
-<tr><td>10</td><td><?php echo mi_t('UI.BENACHRICHTIGUNG'); ?></td><td><?php echo mi_t('UI.KLIMAGER_T_PR_FEN'); ?></td><td><?php echo mi_t('UI.TEXT_Z_B_DAS_KLIMAGER'); ?></td><td><?php echo mi_t('UI.T9'); ?></td></tr>
-<tr><td>11</td><td><?php echo mi_t('UI.STATUS'); ?></td><td><?php echo mi_t('UI.KLIMA_WOHNZIMMER'); ?></td><td><?php echo mi_t('UI.STATUSTEXT_SIEHE_UNTEN_VISUALISIERUNG_EIN'); ?></td><td>v1 = #1, v2 = #3, v3 = #4</td></tr>
-<tr><td>12 <i><?php echo mi_t('UI.OPTIONAL'); ?></i></td><td><?php echo mi_t('UI.INTELLIGENTE_RAUMREGELUNG'); ?></td><td><?php echo mi_t('UI.KLIMA_WOHNZIMMER_2'); ?></td><td><?php echo mi_t('UI.BETRIEBSART_K_HLEN'); ?></td><td><?php echo mi_t('UI.IST_TEMPERATUR_1_STELLGR_E'); ?></td></tr>
-<tr><td>13 <i><?php echo mi_t('UI.OPTIONAL_2'); ?></i></td><td><?php echo mi_t('UI.MERKER'); ?></td><td><?php echo mi_t('UI.KLIMA_FREIGABE'); ?></td><td><?php echo mi_t('UI.TEXT_8'); ?></td><td><?php echo mi_t('UI.SPERRT_7_BEI_OFFENEM_FENSTER'); ?></td></tr>
-<tr><td>14 <i><?php echo mi_t('UI.OPTIONAL_3'); ?></i></td><td><?php echo mi_t('UI.FORMEL'); ?></td><td><?php echo mi_t('UI.TEMPERATURSPREIZUNG'); ?></td><td><?php echo mi_t('UI.FORMEL_2'); ?> <span class="sm-mono">I1-I2</span></td><td>I1 = #1, I2 = #2</td></tr>
+<tr><th>#</th><th><?php echo mi_te('UI.BAUSTEIN_TYP'); ?></th><th><?php echo mi_te('UI.NAME_VORSCHLAG'); ?></th><th><?php echo mi_te('UI.PARAMETER'); ?></th><th><?php echo mi_te('UI.EINGAENGE'); ?></th></tr>
+<tr><td>1</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_indoor_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>2</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_outdoor_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>3</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_target_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>4</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_power_state'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>5</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_online'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>6</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ok'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>7</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ts'); ?></td><td><?php echo mi_te('UI.BL_P_SEKUNDEN'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
+<tr><td>8</td><td><?php echo mi_te('UI.BL_VA'); ?></td><td>Midea2Lox</td><td><?php echo mi_te('UI.BL_P_ADRESSE'); ?> <span class="sm-mono">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></span></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td></tr>
+<tr><td>9</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_EINAUS'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ',power.True'); ?> / <?php echo mi_e($mi_bsp . ',power.False'); ?></td><td><?php echo mi_te('UI.BL_VOM_SCHALTER'); ?></td></tr>
+<tr><td>10</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_SOLL'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ',<v>'); ?></td><td><?php echo mi_te('UI.BL_VON_12'); ?></td></tr>
+<tr><td>11</td><td><?php echo mi_te('UI.BL_NICHT'); ?></td><td><?php echo mi_te('UI.BL_N_OFFLINE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_EINGANG5'); ?></td></tr>
+<tr><td>12</td><td><?php echo mi_te('UI.BL_EINVERZ'); ?></td><td><?php echo mi_te('UI.BL_N_AUSFALL'); ?></td><td><?php echo mi_te('UI.BL_P_VERZ'); ?> <b>600</b> s</td><td><?php echo mi_te('UI.BL_EINGANG11'); ?></td></tr>
+<tr><td>13</td><td><?php echo mi_te('UI.BL_FORMEL'); ?></td><td><?php echo mi_te('UI.BL_N_ALTER'); ?></td><td class="sm-mono">(T-1230768000)-I1</td><td><?php echo mi_te('UI.BL_ALTER_EIN'); ?></td></tr>
+<tr><td>14</td><td><?php echo mi_te('UI.BL_STATUS'); ?></td><td><?php echo mi_te('UI.BL_N_STATUS'); ?></td><td><?php echo mi_te('UI.BL_P_STATUS'); ?></td><td>v1 = #1, v2 = #3, v3 = #4</td></tr>
+<tr><td>15</td><td><?php echo mi_te('UI.BL_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_N_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_P_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_ODER'); ?></td></tr>
+<tr><td>16 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_N_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_P_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_RAUMREG_EIN'); ?></td></tr>
+<tr><td>17 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_MERKER'); ?></td><td><?php echo mi_te('UI.BL_N_FREIGABE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_FREIGABE_EIN'); ?></td></tr>
+<tr><td>18 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_real_time_power_usage'); ?></td><td><?php echo mi_te('UI.BL_P_WATT'); ?></td><td><?php echo mi_te('UI.BL_ENERGIE_EIN'); ?></td></tr>
 </table>
+</div>
 <br>
-<b><?php echo mi_t('UI.STATUSTEXT_F_R_11'); ?></b>
-<pre class="sm-pre"><?php echo mi_t('UI.RAUM_V1_1_C_SOLL'); ?></pre>
-<b>Zu #9:</b> <?php echo mi_t('UI.DIE_VERZ_GERUNG_MUSS_DEUTLICH'); ?><br>
-<b>Zu #10:</b> <?php echo mi_t('UI.DER_BENACHRICHTIGUNGS_BAUSTEIN_SENDET_NUR'); ?><br>
-<b>Zu #12:</b> <?php echo mi_t('UI.DIE_RAUMREGELUNG_IST_DER_ELEGANTE'); ?><br>
-<b>Zu #13:</b> <?php echo mi_t('UI.EIN_OFFENES_FENSTER_SOLLTE_DAS'); ?>
+<b><?php echo mi_te('UI.BL_STATUSTEXT'); ?></b>
+<pre class="sm-pre"><?php echo mi_e(mi_t('UI.BL_STATUSTEXT_MUSTER')); ?></pre>
+<?php echo mi_t('UI.BL_ERLAEUTERUNGEN'); ?>
 </div>
 
-<div class="sm-step"><b><?php echo mi_t('UI.SCHRITT_7_GEGENPROBE'); ?></b><br><br>
-<?php echo mi_t('UI.NACH_DEM_SPEICHERN_IN_LOXONE'); ?> <i><?php echo mi_t('UI.TEST'); ?></i> <?php echo mi_t('UI.AUF'); ?> <i><?php echo mi_t('UI.ZUSTAND_ALLER_GER_TE_ABFRAGEN'); ?></i> <?php echo mi_t('UI.KLICKEN_ERSCHEINEN_DORT_WERTE_SENDET'); ?>
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT7'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT7_TEXT'); ?>
 </div>
 </div>
 
 <!-- ================================= Test ================================= -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-test' ? ' sm-active' : ''; ?>" id="tab-test">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?php echo mi_t('UI.LEG_LESEN'); ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
+</div>
 
 <?php if ($mi_test_titel !== '') { ?>
 <div class="sm-alert sm-ok"><b><?php echo $mi_test_titel; ?></b></div>
 <?php echo $mi_test_text; ?>
 <?php } ?>
 
-<h2><?php echo mi_e(mi_t('TEST.HEAD_SELFCHECK')); ?></h2>
+<h2><?php echo mi_te('TEST.HEAD_SELFCHECK'); ?></h2>
+<div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:44%"><?php echo mi_t('UI.FRAGE'); ?></th><th><?php echo mi_t('UI.ANTWORT'); ?></th></tr>
+<tr><th style="width:44%"><?php echo mi_te('UI.FRAGE'); ?></th><th><?php echo mi_te('UI.ANTWORT'); ?></th></tr>
 <?php
 require_once __DIR__ . '/mi_test.php';
-foreach (mi_pruefungen($mi_cfg) as $c) { ?>
-<tr><td><?php echo $c[0]; ?></td>
-    <td><?php echo ($c[1] ? '&#10004; ' : '&#10008; ') . $c[2]; ?></td></tr>
+foreach (mi_pruefungen($mi_cfg) as $c) {
+    // Drei Ausgaenge: Haken, Kreuz, Strich. Ein Strich ist ausdruecklich
+    // KEIN Haken - was nicht gemessen werden konnte, sagt das.
+    $zeichen = ($c[1] === 1) ? '&#10004; ' : (($c[1] === 0) ? '&#10008; ' : '&ndash; ');
+?>
+<tr><td><?php echo $c[0]; ?></td><td><?php echo $zeichen . $c[2]; ?></td></tr>
 <?php } ?>
 </table>
+</div>
 
-<h2><?php echo mi_t('UI.NACHSEHEN'); ?></h2>
-<div class="sm-knopfreihe sm-b-lesen">
-<?php foreach (array('umgebung' => 'Umgebung pr&uuml;fen',
-                     'status'   => 'Zustand aller Ger&auml;te abfragen') as $wert => $text) { ?>
+<h2><?php echo mi_te('UI.H_NACHSEHEN'); ?></h2>
+<div class="sm-knopfreihe">
   <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
-    <button data-role="none" type="submit" name="test" value="<?php echo mi_e($wert); ?>"><?php
-      echo $text; ?></button>
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="umgebung"><?php echo mi_t('UI.K_UMGEBUNG'); ?></button>
   </form>
+  <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="status"><?php echo mi_t('UI.K_STATUS'); ?></button>
+  </form>
+  <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="themen"><?php echo mi_t('UI.K_THEMEN'); ?></button>
+  </form>
+</div>
+
+<h2><?php echo mi_te('UI.H_SCHALTEN'); ?></h2>
+<div class="sm-warnung"><?php echo mi_t('UI.SCHALTEN_WARNUNG'); ?></div>
+<?php if (!$mi_geraete) { ?>
+<div class="sm-alert sm-info"><?php echo mi_t('UI.KEINE_GERAETE'); ?></div>
+<?php } else { ?>
+<form method="post" action="index.php">
+<?php echo mi_fmt(); ?>
+<input data-role="none" type="hidden" name="activetab" value="tab-test">
+<div class="sm-row">
+  <label for="schalt_id"><?php echo mi_t('UI.SCHALT_GERAET'); ?></label>
+  <select data-role="none" id="schalt_id" name="schalt_id">
+<?php foreach ($mi_geraete as $d) { ?>
+    <option value="<?php echo mi_e($d['id']); ?>"><?php echo $d['name']; ?> (<?php echo mi_e($d['id']); ?>)</option>
 <?php } ?>
+  </select>
 </div>
+<div class="sm-row">
+  <label for="schalt_bef"><?php echo mi_t('UI.SCHALT_BEFEHL'); ?></label>
+  <select data-role="none" id="schalt_bef" name="schalt_bef">
+<?php foreach (mi_befehle() as $b) {
+        if ($b[1] === '<v>') { continue; } ?>
+    <option value="<?php echo mi_e($b[1]); ?>"><?php echo mi_e(mi_t($b[0]) . ' - ' . $b[1]); ?></option>
+<?php   if ($b[2] !== null) { ?>
+    <option value="<?php echo mi_e($b[2]); ?>"><?php echo mi_e(mi_t($b[0]) . ' - ' . $b[2]); ?></option>
+<?php   }
+      } ?>
+  </select>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="schalten" value="trocken"><?php echo mi_t('UI.K_TROCKEN'); ?></button>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="schalten" value="senden"><?php echo mi_t('UI.K_SENDEN'); ?></button>
+</div>
+</form>
+<?php } ?>
 
-<h2><?php echo mi_t('UI.GER_TESUCHE_2'); ?></h2>
-<p class="sm-small"><?php echo mi_t('UI.SPRICHT_MIT_DEM_MIDEA_KONTO'); ?> <span class="sm-mono"><?php echo mi_t('UI.DEVICES_CFG'); ?></span>.</p>
-<div class="sm-knopfreihe sm-b-aktion">
+<h2><?php echo mi_te('UI.H_GERAETESUCHE'); ?></h2>
+<p class="sm-small"><?php echo mi_t('UI.GERAETESUCHE_TEXT'); ?></p>
+<div class="sm-knopfreihe">
   <form method="post" action="index.php">
+    <?php echo mi_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-test">
-    <button data-role="none" type="submit" name="test" value="discover"><?php echo mi_t('UI.JETZT_NACH_GER_TEN_SUCHEN'); ?></button>
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="discover"><?php echo mi_t('UI.K_SUCHEN'); ?></button>
   </form>
-</div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?php echo mi_t('UI.ANSEHEN_FRAGT_NUR_AB_VER'); ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.L_ST_ETWAS_AUS_SPRICHT'); ?></span>
 </div>
 </div>
 
 <!-- ============================== Logdateien ============================== -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-log' ? ' sm-active' : ''; ?>" id="tab-log">
-<h2><?php echo mi_t('UI.LOGDATEIEN'); ?></h2>
+<h2><?php echo mi_te('UI.H_LOGDATEIEN'); ?></h2>
 <?php
 if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
     echo LBWeb::loglist_html();
-} else { ?>
-<p class="sm-small"><?php echo mi_t('UI.NEUESTE_ZEILE_OBEN_DATEI'); ?>
+} else {
+    /* Rueckfall. mi_log_tail() steht HIER und nicht oben bei den uebrigen
+     * Vorbereitungen: bis 4.2.12 wurden bei jedem Seitenaufruf bis zu 200
+     * Protokollzeilen gelesen, die nur dieser Zweig benutzt - und den gibt
+     * es auf dem Geraet gar nicht. */
+    $mi_zeilen = mi_log_tail();
+?>
+<p class="sm-small"><?php echo mi_t('UI.LOG_RUECKFALL'); ?>
 <span class="sm-mono"><?php echo mi_e($mi_p['log']); ?></span></p>
 <?php if (!$mi_zeilen) { ?>
-<div class="sm-alert sm-info"><?php echo mi_t('UI.DIE_PROTOKOLLDATEI_IST_LEER_ODER'); ?></div>
+<div class="sm-alert sm-info"><?php echo mi_t('UI.LOG_LEER'); ?></div>
 <?php } else { ?>
 <div class="sm-log"><?php
   foreach ($mi_zeilen as $z) { echo mi_e($z) . "\n"; }
@@ -658,25 +1017,6 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 <?php } ?>
 </div>
 
-
-<h2><?= mi_t('UI.H_SICHERUNG') ?></h2>
-<div class="sm-hinweis"><?= mi_t('UI.SICH_ERKLAERUNG') ?></div>
-<div class="sm-warnung"><?= mi_t('UI.SICH_WARNUNG') ?></div>
-<div class="sm-knopfreihe">
-  <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
-       exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
-       Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
-       einen Download, der das Speichern verschluckt. -->
-  <form action="index.php" method="post">
-    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="mi_sichern" value="1"><?= mi_t('UI.K_SICHERN') ?></button>
-  </form>
-  <form action="index.php" method="post" enctype="multipart/form-data">
-    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
-    <input data-role="none" type="file" name="mi_sicherung" accept=".json">
-    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mi_zurueck" value="1"><?= mi_t('UI.K_ZURUECK') ?></button>
-  </form>
-</div>
 </div><!-- /sm-wrap -->
 
 <script>

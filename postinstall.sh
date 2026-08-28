@@ -34,6 +34,10 @@ echo "<INFO> Konfigurationsordner:  $PCONFIG"
 
 chmod +x "$PDATA/midea2lox.py" 2>/dev/null
 chmod +x "$PDATA/discover.py" 2>/dev/null
+# Ab 4.3.0: der minuetliche Waechter ruft dieses Stueck auf, um das
+# Lebenszeichen zu senden. Ohne Ausfuehrungsrecht schweigt es - und zwar
+# stillschweigend, weil der Cron seine Ausgabe verwirft.
+chmod +x "$PDATA/lebenszeichen.py" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 # 1. Virtuelle Python-Umgebung anlegen
@@ -123,8 +127,14 @@ echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
 NETZ_BASE="${5:-$LBHOMEDIR}"
 NETZ_PDIR="${3:-Midea2Lox}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
+# Ab 4.3.0 nimmt netz_zurueck MEHRERE Sollsummen entgegen, durch Leerzeichen
+# getrennt: die der mitgelieferten Vorgabe DIESER Fassung und die der
+# Vorgaengerfassungen. Grund ist der Aktualisierungsfall - wer nie gespeichert
+# hat, dessen Datei ist zeichengenau die Vorgabe der ALTEN Fassung, und mit
+# nur einer Summe wuerde sie nicht als "verloren" erkannt. Eine Zahl, die nur
+# fuer die neueste Fassung stimmt, ist eine Pruefung auf Zeit.
 netz_zurueck() {
-    datei=$1; soll=$2
+    datei=$1; shift
     ziel="$NETZ_CFG/$datei"
     zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"
     [ -f "$zweit" ] || return 0
@@ -133,7 +143,9 @@ netz_zurueck() {
         verloren=1
     else
         ist=$(sha256sum "$ziel" 2>/dev/null | cut -d" " -f1)
-        [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
+        for soll in "$@"; do
+            [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
+        done
     fi
     if [ "$verloren" = "1" ]; then
         if cp -p "$zweit" "$ziel" 2>/dev/null; then
@@ -144,8 +156,9 @@ netz_zurueck() {
         fi
     fi
 }
-netz_zurueck "devices.cfg" "db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-netz_zurueck "midea2lox.cfg" "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
-netz_zurueck "mqtt_subscriptions.cfg" "a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
+# Sollsummen: erst die Vorgabe dieser Fassung, dann die der Vorgaenger.
+netz_zurueck "devices.cfg"     "db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
+netz_zurueck "midea2lox.cfg"     "1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460"     "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+netz_zurueck "mqtt_subscriptions.cfg"     "a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 
 exit 0
