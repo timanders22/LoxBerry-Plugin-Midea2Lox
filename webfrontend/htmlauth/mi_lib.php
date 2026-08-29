@@ -60,6 +60,11 @@ function mi_paths()
         'config'  => $home . '/config/plugins/' . $ordner . '/midea2lox.cfg',
         'devices' => $home . '/config/plugins/' . $ordner . '/devices.cfg',
         'abo'     => $home . '/config/plugins/' . $ordner . '/mqtt_subscriptions.cfg',
+        // Die Abonnements des Gateways. Der Ort ist GEMESSEN (29.08.2026,
+        // LoxBerry 4): config/system/subscriptions.json, NICHT unter
+        // config/system/mqtt/. Aufbau:
+        //   {"Subscriptions":[{"Id":"heimkino/beamer/an","Toms":[], ...}, ...]}
+        'abos'    => $home . '/config/system/subscriptions.json',
         'log'     => $home . '/log/plugins/' . $ordner . '/midea2lox.log',
         'datadir'    => $home . '/data/plugins/' . $ordner,
         'leben'   => $home . '/data/plugins/' . $ordner . '/lebenszeichen.json',
@@ -960,7 +965,11 @@ function mi_werte()
 function mi_status_werte()
 {
     return array(
-        'status/ok'      => array('&mdash;', 'WERT.ST_OK',      array('false', '0', '1',        '<v.0>')),
+        // Signed und MinVal -1: der Wert kennt drei Zustaende, und -1
+        // ("noch nichts gemessen") muss durch den virtuellen Eingang
+        // hindurchpassen. Mit MinVal 0 wuerde Loxone ihn auf 0 kappen -
+        // und aus "noch nichts gemessen" wuerde "gescheitert".
+        'status/ok'      => array('&mdash;', 'WERT.ST_OK',      array('true',  '-1', '1',       '<v.0>')),
         'status/ts'      => array('s',       'WERT.ST_TS',      array('false', '0', '4000000000', '<v.0>')),
         'status/zaehler' => array('&mdash;', 'WERT.ST_ZAEHLER', array('false', '0', '999',      '<v.0>')),
         'status/dienst'  => array('&mdash;', 'WERT.ST_DIENST',  array('false', '0', '1',        '<v.0>')),
@@ -1313,6 +1322,12 @@ function mi_gateway_fassung()
 function mi_abo_text()
 {
     $f = mi_gateway_fassung();
+    /* Bis 4.3.1 stand hier unbedingt "Das Plugin bringt den Eintrag mit - in
+     * aller Regel ist hier also nichts von Hand zu tun". Der zweite Halbsatz
+     * ist am Geraet widerlegt (29.08.2026, Gateway V1): das Gateway liest die
+     * mitgelieferte Datei im Betrieb nicht. Der Satz sagt jetzt, was gemessen
+     * ist - und die Selbstpruefung im Reiter Test sagt fuer DIESE Anlage, ob
+     * das Thema abonniert ist. */
     $mit = ' ' . mi_t('UI.ABO_MITGELIEFERT');
     if ($f <= 0) {
         return mi_t('UI.ABO_UNBEKANNT') . $mit;
@@ -1324,6 +1339,53 @@ function mi_abo_text()
         return mi_t('UI.ABO_V2') . $gemessen . $mit;
     }
     return mi_t('UI.OHNE_DIESEN_EINTRAG_KOMMT_AM') . $gemessen . $mit;
+}
+
+/**
+ * Steht unser Themenzweig wirklich in den Abonnements des Gateways?
+ *
+ * DAS IST DIE FRAGE, DIE ZAEHLT - und sie ist am Geraet zu beantworten,
+ * nicht aus einer README. Gelesen wird config/system/subscriptions.json,
+ * also das, was das Gateway wirklich abonniert hat.
+ *
+ * Rueckgabe: array(ja|nein|unlesbar, Liste der passenden Eintraege,
+ *                  Zahl aller Abonnements).
+ * Die Zahl gehoert dazu: 0 Abonnements heisst "nichts gemessen", nicht
+ * "nichts gefunden".
+ */
+function mi_abo_eingetragen($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    $datei = mi_paths()['abos'];
+    if (!is_readable($datei)) {
+        return array('unlesbar', array(), 0);
+    }
+    $d = json_decode((string) @file_get_contents($datei), true);
+    if (!is_array($d)) {
+        return array('unlesbar', array(), 0);
+    }
+    $liste = array();
+    foreach (array('Subscriptions', 'subscriptions') as $s) {
+        if (isset($d[$s]) && is_array($d[$s])) { $liste = $d[$s]; break; }
+    }
+    $praefix = mi_mqtt_topic($cfg);
+    $treffer = array();
+    foreach ($liste as $e) {
+        $id = '';
+        if (is_array($e)) {
+            foreach (array('Id', 'id', 'topic', 'Topic') as $k) {
+                if (isset($e[$k]) && is_string($e[$k])) { $id = $e[$k]; break; }
+            }
+        } elseif (is_string($e)) {
+            $id = $e;
+        }
+        if ($id === '') { continue; }
+        if ($id === $praefix . '/#' || $id === $praefix . '/+'
+            || strpos($id, $praefix . '/') === 0) {
+            $treffer[] = $id;
+        }
+    }
+    return array($treffer ? 'ja' : 'nein', $treffer, count($liste));
 }
 
 /**

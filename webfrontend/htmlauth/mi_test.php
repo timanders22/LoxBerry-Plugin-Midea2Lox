@@ -72,10 +72,18 @@ function mi_pruefungen($cfg)
         // Der Dienst schlaegt jede Minute. Bis zum dreifachen Takt ist alles
         // in Ordnung; darueber ist es eine Auskunft, kein Urteil.
         $gut = ($alter >= -60 && $alter <= 180);
-        $z[] = array(mi_e(mi_t('PRUEF.HERZSCHLAG')), $gut ? 1 : 0,
-            sprintf(mi_t('UI.HERZSCHLAG_ALTER'), (int) $alter,
-                    $zaehler === null ? '?' : (int) $zaehler,
-                    $ok === null ? '?' : (int) $ok));
+        /* Der dritte Zustand bekommt seinen eigenen Satz. "ok=0" las sich
+         * wie ein Fehlschlag, auch wenn noch gar kein Durchgang stattgefunden
+         * hatte - am Geraet genau so aufgetreten. */
+        if ((int) $ok === -1) {
+            $text = sprintf(mi_t('UI.HERZSCHLAG_OHNE_DURCHGANG'), (int) $alter,
+                            $zaehler === null ? '?' : (int) $zaehler);
+        } else {
+            $text = sprintf(mi_t('UI.HERZSCHLAG_ALTER'), (int) $alter,
+                            $zaehler === null ? '?' : (int) $zaehler,
+                            $ok === null ? '?' : (int) $ok);
+        }
+        $z[] = array(mi_e(mi_t('PRUEF.HERZSCHLAG')), $gut ? 1 : 0, $text);
     }
 
     // ---- Konfiguration ----
@@ -143,6 +151,27 @@ function mi_pruefungen($cfg)
         $abolage === 'ok' ? mi_e($abosoll)
             : ($abolage === 'fehlt' ? mi_t('UI.ABO_DATEI_FEHLT')
                : sprintf(mi_t('UI.ABO_DATEI_ABWEICHEND'), mi_e($aboist), mi_e($abosoll))));
+
+    /* Die Frage, die wirklich zaehlt - und die erst seit 4.3.2 gestellt wird.
+     *
+     * Gemessen am Geraet (29.08.2026, Gateway V1): das Gateway liest
+     * config/plugins/<Ordner>/mqtt_subscriptions.cfg im Betrieb NICHT. Zwei
+     * Probedateien, eine davon in einem wirklich installierten Plugin, sind
+     * nach einem Neustart des Gateways in keinem Abonnement gelandet. Die
+     * Zeile darueber sagt also nur, dass die mitgelieferte DATEI stimmt -
+     * diese hier sagt, ob das Thema auch abonniert IST. */
+    list($eingetragen, $treffer, $gesamt) = mi_abo_eingetragen($cfg);
+    if ($eingetragen === 'unlesbar') {
+        $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 2, mi_t('UI.ABO_LISTE_UNLESBAR'));
+    } elseif ($gesamt === 0) {
+        $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 2, mi_t('UI.ABO_LISTE_LEER'));
+    } elseif ($eingetragen === 'ja') {
+        $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 1,
+            sprintf(mi_t('UI.ABO_EINGETRAGEN_JA'), mi_e(implode(', ', $treffer)), $gesamt));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 0,
+            sprintf(mi_t('UI.ABO_EINGETRAGEN_NEIN'), mi_e(mi_mqtt_topic($cfg)), $gesamt));
+    }
 
     // ---- Die eigene Datei gegen sich selbst ----
     list($tok, $tl, $tv, $tf, $laenge) = mi_smactive_probe();
@@ -224,10 +253,16 @@ function mi_status()
     }
     list($alter, $zaehler, $ok) = mi_lebenszeichen();
     $aus .= "\n" . mi_t('UI.STATUS_LEBENSZEICHEN') . ' ';
-    $aus .= ($alter === null) ? mi_t('UI.KEIN_LEBENSZEICHEN')
-          : sprintf(mi_t('UI.HERZSCHLAG_ALTER_ROH'), (int) $alter,
-                    $zaehler === null ? '?' : (int) $zaehler,
-                    $ok === null ? '?' : (int) $ok);
+    if ($alter === null) {
+        $aus .= mi_t('UI.KEIN_LEBENSZEICHEN');
+    } elseif ((int) $ok === -1) {
+        $aus .= sprintf(mi_t('UI.HERZSCHLAG_OHNE_DURCHGANG_ROH'), (int) $alter,
+                        $zaehler === null ? '?' : (int) $zaehler);
+    } else {
+        $aus .= sprintf(mi_t('UI.HERZSCHLAG_ALTER_ROH'), (int) $alter,
+                        $zaehler === null ? '?' : (int) $zaehler,
+                        $ok === null ? '?' : (int) $ok);
+    }
     $aus .= "\n\n" . mi_t('UI.STATUS_LETZTE_ZEILEN') . "\n";
     $aus .= "--------------------------------------------------------------\n";
     if (!is_readable($p['log'])) {

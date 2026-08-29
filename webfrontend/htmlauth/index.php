@@ -996,15 +996,40 @@ foreach (mi_pruefungen($mi_cfg) as $c) {
 <div class="sm-pane<?php echo $mi_tab === 'tab-log' ? ' sm-active' : ''; ?>" id="tab-log">
 <h2><?php echo mi_te('UI.H_LOGDATEIEN'); ?></h2>
 <?php
+/* ==================================================================
+ * DER EIGENE PROTOKOLLINHALT WIRD IMMER GEZEIGT - BEFUND VOM GERAET
+ * ==================================================================
+ *
+ * Bis 4.3.1 stand hier ein ENTWEDER-ODER: gibt es LBWeb::loglist_html(),
+ * wird nur die benutzt, sonst der Rueckfall. Am Geraet gemessen
+ * (29.08.2026, LoxBerry 4, Gateway V1): der Reiter zeigte ausser der Ueberschrift
+ * NICHTS.
+ *
+ * Der Grund ist keine kaputte Funktion. loglist_html() listet die
+ * Protokolle, die ueber LoxBerry::Log angemeldet sind - der Python-Dienst
+ * dieses Plugins schreibt seine Datei aber selbst, mit einem
+ * RotatingFileHandler, und meldet nichts an. LoxBerry kennt also kein
+ * Protokoll und liefert korrekt eine leere Liste.
+ *
+ * Warum die Pruefkette das nicht gefunden hat: die SDK-Attrappe liefert bei
+ * loglist_html() eine feste Zeichenkette ("Protokoll-Attrappe"), also immer
+ * etwas. Der Zweig wurde betreten und sah gefuellt aus. Das ist dieselbe zu
+ * milde Attrappe wie beim Sprachpfad.
+ *
+ * Jetzt UND statt ENTWEDER-ODER: die Liste von LoxBerry, falls sie etwas
+ * hergibt, und darunter immer das eigene Protokoll - das ist die Datei, in
+ * der wirklich etwas steht.
+ * ================================================================== */
+$mi_lbliste = '';
 if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
-    echo LBWeb::loglist_html();
-} else {
-    /* Rueckfall. mi_log_tail() steht HIER und nicht oben bei den uebrigen
-     * Vorbereitungen: bis 4.2.12 wurden bei jedem Seitenaufruf bis zu 200
-     * Protokollzeilen gelesen, die nur dieser Zweig benutzt - und den gibt
-     * es auf dem Geraet gar nicht. */
-    $mi_zeilen = mi_log_tail();
+    $mi_lbliste = trim((string) LBWeb::loglist_html());
+}
+if ($mi_lbliste !== '') {
+    echo $mi_lbliste;
+}
+$mi_zeilen = mi_log_tail();
 ?>
+<h3><?php echo mi_te('UI.H_LOG_EIGEN'); ?></h3>
 <p class="sm-small"><?php echo mi_t('UI.LOG_RUECKFALL'); ?>
 <span class="sm-mono"><?php echo mi_e($mi_p['log']); ?></span></p>
 <?php if (!$mi_zeilen) { ?>
@@ -1013,7 +1038,6 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 <div class="sm-log"><?php
   foreach ($mi_zeilen as $z) { echo mi_e($z) . "\n"; }
 ?></div>
-<?php } ?>
 <?php } ?>
 </div>
 

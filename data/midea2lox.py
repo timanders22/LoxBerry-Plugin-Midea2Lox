@@ -283,7 +283,25 @@ async def arbeiter(warteschlange):
 
 HERZTAKT = 60
 _zaehler = 0
-_letzter_erfolg = 0
+
+# -1 heisst "noch kein Durchgang", nicht "Durchgang fehlgeschlagen".
+#
+# Bis 4.3.1 stand hier 0. Am Geraet gemessen (29.08.2026): eine frisch
+# eingerichtete Anlage ohne hinterlegtes Klimageraet meldete dauerhaft
+# status/ok = 0 - bei kerngesundem Dienst. Dasselbe gilt bei
+# abfragetakt = 0, solange Loxone noch nichts geschickt hat: der Wert wird
+# nur von einem echten Geraetedurchgang gesetzt.
+#
+# Wer status/ok in Loxone auf eine Stoermeldung legt, hat damit eine
+# Dauerstoerung ohne Stoerung. Das ist die Klasse "ein Kreuz an der ersten
+# Stelle einer Pruefkette, das nichts bedeutet".
+#
+# Drei Zustaende, wie beim dritten Ausgang im Zendure-Plugin:
+#   -1  noch nichts gemessen   (weder Haken noch Kreuz)
+#    0  der letzte Durchgang ist gescheitert
+#    1  der letzte Durchgang hat gemessen
+# Die Loxone-Vorlage traegt dafuer Signed="true" und MinVal="-1".
+_letzter_erfolg = -1
 
 
 async def herzschlag():
