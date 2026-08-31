@@ -10,6 +10,71 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Was 4.4.0 bringt
+
+Diese Fassung behebt Befunde einer vollständigen Durchsicht. Zwei davon
+haben beim Anwender wirklich etwas kaputtgemacht.
+
+### Die erzeugte Befehlsvorlage schaltete nichts
+
+Die Vorlage für den virtuellen Ausgang und die ganze Anleitung schrieben den
+Befehlstext als `<Nummer>,<Befehl>` — mit **Komma**. Der Dienst zerlegt das
+Datagramm aber an **Leerzeichen** und sucht die Gerätenummer argumentweise;
+ein Komma dazwischen macht daraus ein einziges Argument, das keine reine
+Ziffernfolge ist. Am laufenden Dienst gemessen: `missing device_id`, und
+keiner der 27 Befehle je Gerät hat je etwas geschaltet. Der Knopf *Senden* im
+Reiter Test arbeitete die ganze Zeit richtig — er benutzt das Leerzeichen.
+
+**Wer die alte Vorlage importiert hat, muss sie neu erzeugen und neu
+importieren.** Wer die virtuellen Ausgänge von Hand mit einem Leerzeichen
+angelegt hat, ist nicht betroffen.
+
+### Der Dienst galt als tot, während er lief
+
+`daemon/daemon` schrieb im root-Zweig die falsche Prozessnummer in die
+PID-Datei: das `&` beendete die ganze UND-Liste statt nur den `nohup`-Aufruf,
+und `$!` lieferte damit die Hüllschale statt `python3`. Gemessen unter bash
+5.3: in der Datei stand 4077, das arbeitende `python3` war 4080. Folge:
+*Dienst gestoppt* bei laufendem Dienst, ein Neustartversuch pro Minute,
+Aufgabe nach fünf — und `stop`, Update und Deinstallation erreichten den
+Prozess nie mehr.
+
+### Weiter behoben
+
+* **Die Baustein-Liste war nicht 1:1 nachbaubar.** Der ODER-Baustein, auf den
+  die Benachrichtigungszeile verwies, fehlte als eigene Zeile; und das Alter
+  des Lebenszeichens ist ein analoger Sekundenwert, der ohne
+  Schwellwertschalter gar nicht an ein ODER passt. Beide Zeilen sind jetzt da.
+* **Eine Sicherung ohne alle Schlüssel setzte den Rest still auf die
+  Werksvorgabe** — das hinterlegte Midea-Kennwort war danach weg. Jetzt bleibt
+  unverändert, was nicht in der Datei steht, und die Seite sagt, welche
+  Schlüssel das waren.
+* **Das Deinstallieren ließ die Zweitschriften liegen**, in denen Kennwort und
+  Gerätetoken stehen: abgeräumt wurde ein Dateiname, den niemand schreibt.
+* **Ein Aktualisierungsversuch ohne Internet machte ein laufendes Plugin
+  tot.** Die virtuelle Umgebung wird jetzt beiseitegelegt statt weggeworfen
+  und bei einem Fehlschlag zurückgerollt.
+* **MQTT wurde genau einmal verbunden.** Kam der Dienst nach einem Neustart
+  vor dem Broker hoch, sendete er bis zum nächsten Dienstneustart über HTTP —
+  mit anderen Zielnamen, also stumm in Loxone. Jetzt baut der Netzwerkfaden
+  die Verbindung selbst wieder auf.
+* **Der Sendeweg blockierte die Ereignisschleife.** Schwieg der Miniserver,
+  stand der Empfang, und der Herzschlag alterte über seine Grenze hinaus —
+  roter Herzschlag bei kerngesundem Dienst.
+* **Ein einziges großes UDP-Paket konnte das Protokoll wegrotieren.** Es gibt
+  jetzt eine Längengrenze, und ein zu langes Paket wird gemeldet, nicht
+  stillschweigend verarbeitet.
+* **„Der Dienst wurde neu gestartet“ war eine Behauptung**, kein Befund: der
+  Rückgabewert des Startskripts wurde geholt und weggeworfen.
+* **Die Gerätenummer** darf jetzt überall 10 bis 19 Ziffern haben — dieselbe
+  Grenze wie im Dienst. Die Oberfläche nahm vorher 6 bis 20 an, und die
+  Beispielnummer hatte neun.
+* Dazu: ein `#`-Abonnement im Gateway wird als Treffer erkannt; Zugangsdaten
+  gehen durch dieselbe Positivliste wie alles andere; zwei Vorgänge in einer
+  Anfrage werden abgewiesen statt beide ausgeführt; ungültiges UTF-8 in der
+  Gerätedatei lässt den Namen nicht mehr verschwinden; Protokollzeitstempel
+  tragen Jahr und Sekunden.
+
 ## Was 4.3.0 bringt
 
 Diese Fassung behebt fünf Stellen, an denen das Plugin still das Falsche tat,
@@ -85,7 +150,8 @@ bei mitgesendeter IP ohne Token angesprochen wurde.
 
 Dazu: eigene Bezeichnung je Gerät, einstellbares MQTT-Themenpräfix,
 einstellbare Wartezeit auf den Miniserver, eine Aufgabegrenze für den
-Wächter, und eine Selbstprüfung mit 19 statt 8 Zeilen.
+Wächter, und eine Selbstprüfung, die statt acht Zeilen den ganzen
+Einrichtungsweg abfragt.
 
 ### Die Region — warum die Liste kürzer geworden ist
 
@@ -108,34 +174,43 @@ Nebenbei ist damit ein möglicher Grund für ausbleibende Token beseitigt: ohne
 Regionsangabe nahm `msmart-ng` seine Vorgabe **US** — für ein europäisches
 Konto der falsche Server.
 
-### Offene Punkte
+### Am Gerät gemessen (29.08.2026)
 
-Drei Fragen ließen sich ohne Gerät nicht beantworten. Sie sind im Code und in
-der Selbstprüfung als solche gekennzeichnet, statt behauptet zu werden:
+Drei Fragen standen hier bis 4.3.2 als offen. Sie sind inzwischen an einem
+Raspberry mit LoxBerry 4.0.0.15 beantwortet — gemessen, nicht gelesen:
 
-1. **Liest LoxBerry die mitgelieferte Abo-Datei wirklich?** Der Satz stammt
-   aus dieser README (Abschnitt weiter unten) und ist nicht am Gerät
-   gemessen. Die Zeile im Reiter Test beantwortet deshalb nur, was sie
-   beantworten kann: ob die Datei da ist und zum eingestellten Präfix passt.
-2. **Welche Fassung hat das MQTT-Gateway?** Steht `Mqtt.Gatewayversion` nicht
-   in der `general.json`, nennt die Oberfläche **beide** Fälle, statt einen
-   zu behaupten.
-3. **Welche Fassung hat `paho-mqtt`?** Unter 2.x ist das Anlegen des Clients
-   ohne Angabe der Rückruf-Fassung ein Fehler, der still auf HTTP
-   zurückfällt. Der Dienst übergibt sie jetzt, wenn die Bibliothek sie kennt;
-   die Selbstprüfung zeigt die Fassung an. `postinstall.sh` klemmt paho
-   weiterhin auf kleiner 2.0.0.
+1. **Liest das MQTT-Gateway die mitgelieferte Abo-Datei?** **Nein.** Zwei
+   Probedateien, eine davon in einem wirklich installierten Plugin als
+   Kontrollfall, sind nach einem Neustart des Gateways in keinem Abonnement
+   gelandet. Die Abonnements stehen in
+   `config/system/subscriptions.json`, nicht unter `config/system/mqtt/`.
+   Der Reiter Test hat deshalb seit 4.3.2 **zwei** Zeilen dazu: eine sagt, ob
+   die mitgelieferte Datei da ist und zum Präfix passt, die andere, ob das
+   Thema wirklich abonniert **ist**.
+2. **Welche Fassung hat das MQTT-Gateway?** Gemessen: `Mqtt.Gatewayversion`
+   steht als **Zahl** in der `general.json`. Ist sie nicht lesbar, nennt die
+   Oberfläche weiterhin **beide** Fälle, statt einen zu behaupten.
+3. **Welche Fassung hat `paho-mqtt`?** Gemessen: im venv dieses Plugins
+   **1.6.1**, im System-Python 2.1.0. Der Dienst übergibt die Rückruf-Fassung,
+   wenn die Bibliothek sie kennt; `postinstall.sh` klemmt paho auf kleiner
+   2.0.0, und die Selbstprüfung zeigt die Fassung an.
 
-### Was am Gerät nicht gemessen werden konnte
+### Was weiterhin offen ist
 
-Kein LoxBerry, kein Miniserver, kein Klimagerät, kein laufendes MQTT-Gateway;
-`msmart-ng` und `paho` sind auf dem Entwicklungsrechner nicht installiert.
-Gemessen wurde gegen Attrappen und über einen echten Webserver: die
-Oberfläche in allen Zuständen und beiden Sprachen, jeder Knopf, die Sicherung
-in sieben Fällen, der Dienst mit Attrappen für msmart, paho und requests.
-Alles, was ein echtes Gerät braucht — Anmeldung, Auffrischen, Anwenden, die
-Fähigkeitsabfrage und die tatsächlichen Messwerte —, ist gelesen, nicht
-gemessen.
+* **Liest der Installateur `plugininstall.pl` die Abo-Datei einmalig beim
+  Installieren?** Gemessen ist nur, dass das *Gateway* sie im laufenden
+  Betrieb nicht liest. Bis das geklärt ist, sagt die Oberfläche genau das —
+  und die Zeile *Ist unser Thema im Gateway abonniert?* beantwortet die Frage,
+  auf die es ankommt, ohne diese Antwort zu brauchen.
+* **Die drei Energiewerte** (`total_energy_usage`, `current_energy_usage`,
+  `real_time_power_usage`) stehen in der Themenliste und in der Loxone-Vorlage,
+  sind aber an keinem Gerät nachgemessen.
+* **Alles, was ein echtes Klimagerät braucht** — Anmeldung, Auffrischen,
+  Anwenden, die Fähigkeitsabfrage und die tatsächlichen Messwerte. Gemessen
+  wurde stattdessen gegen Attrappen und über einen echten Webserver: die
+  Oberfläche in allen Zuständen und beiden Sprachen, jeder Knopf, die
+  Sicherung in sieben Fällen, der Dienst mit Attrappen für msmart, paho und
+  requests.
 
 **Die Energiewerte sind ausdrücklich ungemessen.** `msmart-ng` schreibt
 selbst, viele Geräte meldeten Energiewerte, ohne sie anzukündigen. Wer sie
@@ -328,8 +403,9 @@ Suchen der Geräte Token und Schlüssel abzuholen. Danach läuft alles lokal.
 2. Reiter **Einstellungen**: Miniserver, UDP-Port und die Zugangsdaten des
    Midea-Kontos eintragen, Region wählen.
 3. **Speichern und Geräte suchen** — das dauert bis zu einer Minute.
-4. Reiter **Test**: Selbstprüfung ansehen. Erst wenn dort alles grün ist, lohnt
-   der Weg nach Loxone.
+4. Reiter **Test**: Selbstprüfung ansehen. Erst wenn dort kein **Kreuz** mehr
+   steht, lohnt der Weg nach Loxone. Ein **Strich** ist kein Kreuz - er heißt
+   nur, dass sich die Frage nicht messen ließ.
 5. Reiter **Einbindung in Loxone**: Schritt für Schritt, mit vollständiger
    Baustein-Liste zum Nachbauen.
 
@@ -441,15 +517,25 @@ Ein Kopfkommentar in beiden Dateien hält das fest.
 - **`.gitignore`** ergänzt — sie schließt vor allem `venv/` aus: die virtuelle
   Python-Umgebung entsteht bei der Installation und belegt 60 bis 100 MB.
 
-### Beinahe gelöscht: `config/mqtt_subscriptions.cfg`
+### `config/mqtt_subscriptions.cfg` — was sie tut und was nicht
 
-Die Datei enthält eine einzige Zeile (`Midea2Lox/#`) und wird von **keiner Zeile
-Code des Plugins** angesprochen — nach allen bisherigen Maßstäben eine
-Altlast. Sie ist aber keine: LoxBerry liest
-`config/plugins/<Ordner>/mqtt_subscriptions.cfg` im **MQTT-Gateway** aus und
-abonniert die dort genannten Themen. Genau darüber gelangen die Werte in den
-Miniserver. Ein Löschen hätte das Plugin stumm gemacht, ohne dass irgendwo ein
-Fehler erschienen wäre.
+Die Datei enthält eine einzige Zeile (`Midea2Lox/#`, ohne Zeilenumbruch am
+Ende). Bis 4.3.2 stand hier, das MQTT-Gateway lese sie aus und abonniere die
+darin genannten Themen. **Das ist am Gerät gemessen worden und trifft nicht
+zu:** zwei Probedateien, eine davon in einem wirklich installierten Plugin,
+sind nach einem Neustart des Gateways in keinem Abonnement gelandet.
+
+Was die Datei damit noch ist: eine Dokumentation dessen, was einzutragen
+wäre, und möglicherweise die Vorlage, die der Installateur einmalig einliest
+— das ist die eine Hälfte der Frage, die noch offen ist. Das Plugin schreibt
+sie beim Ändern des Themen-Präfix mit, damit sie nicht auf einen Zweig zeigt,
+in den niemand mehr schreibt.
+
+**Verlassen Sie sich nicht darauf.** Ob Ihr Thema wirklich abonniert ist,
+beantwortet der Reiter Test in der Zeile *Ist unser Thema im Gateway
+abonniert?* — die liest `config/system/subscriptions.json` und sagt es Ihnen
+schwarz auf weiß. Steht dort ein Kreuz, tragen Sie das Thema im Reiter MQTT
+von Hand ein.
 
 Deshalb steht in der Datei auch **kein** erklärender Kommentar: `#` ist im
 MQTT-Thema der Platzhalter für „alles darunter". Eine Zeile, die mit `#`

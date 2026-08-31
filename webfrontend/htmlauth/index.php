@@ -68,6 +68,35 @@ $mi_tab = preg_match($mi_muster, $mi_wunsch) ? $mi_wunsch : 'tab-settings';
 $mi_test_titel = '';
 $mi_test_text  = '';
 
+/* GENAU EINE Aktion je Anfrage.
+ *
+ * Bis 4.3.2 stand jeder Handler fuer sich, und ein POST, das zwei
+ * Aktionsfelder trug, loeste BEIDE aus. Gemessen mit "speichern" und
+ * "dienst=stop" zugleich: der UDP-Port wurde geschrieben, angezeigt wurde
+ * aber ausschliesslich der rote Kasten "Es wurde nichts gespeichert" - die
+ * Ueberschrift log. Ein Sicherheitsloch war es nicht (ohne gueltiges
+ * Formularmerkmal kommt nichts durch), eine falsche Auskunft schon.
+ *
+ * Fail closed: bei mehr als einer Aktion wird KEINE ausgefuehrt. */
+$mi_aktionen = array('speichern', 'speichern_suchen', 'mqtt_speichern',
+                     'bez_speichern', 'dienst', 'test', 'schalten', 'vorlage',
+                     'mi_sichern', 'mi_zurueck');
+$mi_gesetzt = array();
+foreach ($mi_aktionen as $mi_a) {
+    if (isset($_POST[$mi_a])) { $mi_gesetzt[] = $mi_a; }
+}
+if (count($mi_gesetzt) > 1) {
+    $mi_fehler[] = sprintf(mi_t('UI.MEHRERE_AKTIONEN'),
+                           mi_e(implode(', ', $mi_gesetzt)));
+    $_POST = array();
+}
+
+/* Ohne ablegbares Formularmerkmal ist die Oberflaeche nicht bedienbar - das
+ * gehoert gesagt, bevor der erste Knopf ins Leere greift. */
+if (mi_formtoken() === '') {
+    $mi_hinweise[] = sprintf(mi_t('UI.WACHE_UNABLEGBAR'), mi_e($mi_p['datadir']));
+}
+
 /* Fehlende Schluessel werden AUFGESCHRIEBEN, nicht bei jedem Lauf neu
  * angenommen. Ein stiller Vorgabewert ist eine Annahme, keine Auskunft. */
 if ($mi_fehlten && $mi_wache === '') {
@@ -109,16 +138,33 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
      * unveraendert" bis 4.2.12 wirkungslos: ein Feld ist nicht '', der Wert
      * ging durch, und in der Datei stand danach MideaPassword=Array - das
      * gespeicherte Kennwort war zerstoert. Gemessen. */
+    /* Auch diese beiden durch mi_wert_pruefen().
+     *
+     * Bis 4.3.2 wurde hier nur is_string() geprueft. Ein Kennwort mit einem
+     * Zeilenumbruch darin fiel dann erst in mi_config_write() ueber
+     * mi_wert_taugt() - richtig abgewiesen, aber gemeldet als "Die Datei
+     * midea2lox.cfg liess sich nicht schreiben. Bitte die Rechte im
+     * Konfigurationsordner pruefen." Der Anwender suchte damit im
+     * Rechteordner nach einem Fehler, der in seinem Eingabefeld stand.
+     * Gemessen. */
     if (isset($_POST['MideaUser'])) {
-        if (is_string($_POST['MideaUser'])) {
-            $neu['MideaUser'] = trim($_POST['MideaUser']);
-        } else {
+        if (!is_string($_POST['MideaUser'])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaUser');
+        } else {
+            $f = mi_wert_pruefen('MideaUser', trim($_POST['MideaUser']));
+            if ($f !== '') {
+                $mi_fehler[] = $f;
+            } else {
+                $neu['MideaUser'] = trim($_POST['MideaUser']);
+            }
         }
     }
     if (isset($_POST['MideaPassword'])) {
         if (!is_string($_POST['MideaPassword'])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaPassword');
+        } elseif ($_POST['MideaPassword'] !== ''
+                  && ($f = mi_wert_pruefen('MideaPassword', $_POST['MideaPassword'])) !== '') {
+            $mi_fehler[] = $f;
         } elseif ($_POST['MideaPassword'] !== '') {
             // Leeres Passwortfeld heisst "unveraendert lassen", nicht
             // "loeschen" - geloescht wird ueber den ausdruecklichen Haken.
@@ -129,15 +175,39 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
         $neu['MideaPassword'] = '';
     }
 
-    $neu['LoxberryIP'] = mi_localip();
+    /* Auch der selbst ermittelte Wert wird geprueft.
+     *
+     * mi_localip() faellt auf gethostbyname(gethostname()) zurueck, und das
+     * liefert bei Misserfolg den HOSTNAMEN zurueck, nicht etwa nichts. In
+     * der Datei stand dann "LoxberryIP=loxberry" - ein Wert, den die eigene
+     * Positivliste abweist, und der Dienst endete beim Binden mit
+     * "Bind failed". Ist der Wert unbrauchbar, bleibt der bisherige stehen
+     * und die Seite sagt es. */
+    $mi_ipneu = mi_localip();
+    if (mi_wert_pruefen('LoxberryIP', $mi_ipneu) === '') {
+        $neu['LoxberryIP'] = $mi_ipneu;
+    } else {
+        $mi_hinweise[] = sprintf(mi_t('UI.LOCALIP_UNBRAUCHBAR'), mi_e($mi_ipneu));
+    }
 
     if (!$mi_fehler) {
         if (mi_config_write($neu)) {
             $mi_cfg = mi_config_read();
             if (isset($_POST['speichern_suchen'])) {
                 require_once __DIR__ . '/mi_test.php';
+                /* Auch dieser Zweig zieht den Dienst nach.
+                 *
+                 * Bis 4.3.2 fehlte der Neustart hier als einzigem
+                 * Speicherweg. Wer den UDP-Port aenderte und diesen Knopf
+                 * nahm, hatte danach eine Datei mit dem neuen Port, einen
+                 * Dienst auf dem alten - der Python-Teil liest den Port nur
+                 * beim Start - und einen Reiter Loxone, der ab sofort den
+                 * neuen dokumentierte. */
+                $was = mi_dienst('restart');
                 list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren('discover', $mi_cfg);
-                $mi_meldung = mi_t('UI.GESPEICHERT_SUCHE');
+                $mi_meldung = ($was === '')
+                    ? mi_t('UI.GESPEICHERT_SUCHE')
+                    : mi_t('UI.GESPEICHERT_SUCHE_OHNE_DIENST');
                 $mi_tab = 'tab-test';
             } else {
                 $was = mi_dienst('restart');
@@ -174,8 +244,17 @@ if (isset($_POST['mqtt_speichern'])) {
                 $mi_cfg = mi_config_read();
                 /* Das Abo wandert mit. Wer das Praefix aendert und die
                  * mqtt_subscriptions.cfg stehen laesst, abonniert danach
-                 * einen Zweig, in den niemand mehr schreibt. */
-                mi_abo_datei_schreiben($mi_cfg);
+                 * einen Zweig, in den niemand mehr schreibt.
+                 *
+                 * Der Rueckgabewert wird ANGESEHEN. Bis 4.3.2 wurde er
+                 * verworfen, und die Seite meldete gruen "Das Abo wurde
+                 * mitgeschrieben", waehrend im selben Seitenaufbau darunter
+                 * stand, die Datei fehle. Zwei einander widersprechende
+                 * Saetze auf einer Seite - gemessen. */
+                if (!mi_abo_datei_schreiben($mi_cfg)) {
+                    $mi_hinweise[] = sprintf(mi_t('UI.ABO_SCHREIBFEHLER'),
+                                             mi_e($mi_p['abo']));
+                }
                 $was = mi_dienst('restart');
                 if ($was === '') {
                     $mi_meldung = mi_t('UI.MQTT_GESPEICHERT');
@@ -199,7 +278,12 @@ if (isset($_POST['bez_speichern'])) {
     } else {
         foreach ($roh as $id => $wert) {
             $id = trim((string) $id);
-            if (!preg_match('/^\d{6,20}$/', $id)) {
+            // 10 bis 19 Ziffern - dieselbe Grenze wie im Dienst.
+            // data/midea2lox.py sucht die Geraetenummer mit
+            // "len(eachArg) in range(10,20) and eachArg.isdigit()". Eine
+            // neun- oder zwanzigstellige Nummer nahm die Oberflaeche bis
+            // 4.3.2 an, der Dienst erkannte sie nie als Geraetenummer.
+            if (!preg_match('/^\d{10,19}$/', $id)) {
                 $mi_fehler[] = sprintf(mi_t('UI.PRUEF_GERAETE_ID'), mi_e($id));
                 continue;
             }
@@ -238,6 +322,11 @@ if (isset($_POST['dienst'])) {
         // Bis 4.2.12 meldeten BEIDE Faelle "Startskript fehlt" - auch der,
         // in dem gar keine gueltige Aktion angefordert war.
         $mi_fehler[] = sprintf(mi_t('UI.DIENST_SKRIPT_FEHLT'), mi_e($mi_p['daemon']));
+    } elseif ($ergebnis === 'fehlgeschlagen') {
+        // Seit 4.4.0 unterscheidbar: das Startskript LIEF, hat aber mit
+        // einem Fehler geendet. Bis dahin meldete die Oberflaeche in diesem
+        // Fall gruen "Der Dienst wurde gestartet".
+        $mi_fehler[] = mi_t('UI.DIENST_FEHLGESCHLAGEN');
     } else {
         $mi_fehler[] = mi_t('UI.DIENST_UNBEKANNT');
     }
@@ -290,8 +379,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
  * Rueckgabewert 255 und 0 Byte Ausgabe - auf jeder Anlage eine leere Seite.
  * Es ist mi_config_read(), das die volle Konfiguration liefert. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
+    /* JSON_INVALID_UTF8_SUBSTITUTE: eine von Hand in Latin-1 bearbeitete
+     * devices.cfg liess json_encode() bis 4.3.2 mit false enden, und der
+     * Knopf "Einstellungen sichern" meldete daraufhin, es liesse sich nichts
+     * SCHREIBEN - dabei wird beim Herunterladen gar nichts geschrieben. */
     $mi_js = json_encode(mi_sicherung_bauen($mi_cfg),
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($mi_js !== false) {
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="midea2lox_einstellungen_'
@@ -299,7 +393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
         echo $mi_js;
         exit;
     }
-    $mi_fehler[] = mi_t('UI.SICH_SCHREIBFEHLER');
+    $mi_fehler[] = mi_t('UI.SICH_DL_FEHLER');
 }
 
 /* ---------------- Einstellungen zurueckspielen ----------------
@@ -308,7 +402,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
  * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
  * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
-    if (!isset($_FILES['mi_sicherung']) || !is_array($_FILES['mi_sicherung'])
+    /* Den Fehlercode ZUERST. Eine Datei, die an upload_max_filesize
+     * gescheitert ist, kommt mit leerem tmp_name an und wurde bis 4.3.2 als
+     * "Es wurde keine Datei ausgewaehlt" gemeldet - der Anwender hatte aber
+     * eine ausgewaehlt, sie war nur zu gross fuer den Server. */
+    $mi_uf = isset($_FILES['mi_sicherung']['error']) ? (int) $_FILES['mi_sicherung']['error'] : -1;
+    if ($mi_uf !== UPLOAD_ERR_OK && $mi_uf !== -1 && $mi_uf !== UPLOAD_ERR_NO_FILE) {
+        $mi_fehler[] = sprintf(mi_t('UI.SICH_UPLOAD_FEHLER'), $mi_uf);
+    } elseif (!isset($_FILES['mi_sicherung']) || !is_array($_FILES['mi_sicherung'])
         || !isset($_FILES['mi_sicherung']['tmp_name'])
         || !is_string($_FILES['mi_sicherung']['tmp_name'])
         || !@is_uploaded_file($_FILES['mi_sicherung']['tmp_name'])) {
@@ -316,17 +417,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
     } elseif ((int) $_FILES['mi_sicherung']['size'] > 262144) {
         $mi_fehler[] = mi_t('UI.SICH_ZU_GROSS');
     } else {
-        list($mi_neu, $mi_mangel, $mi_n, $mi_ng) = mi_sicherung_lesen(
+        $mi_erg = mi_sicherung_lesen(
             (string) @file_get_contents($_FILES['mi_sicherung']['tmp_name']));
+        list($mi_neu, $mi_mangel, $mi_n, $mi_ng) = $mi_erg;
+        $mi_unberuehrt = isset($mi_erg[4]) && is_array($mi_erg[4]) ? $mi_erg[4] : array();
         if ($mi_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
              * nichts. Eine zur Haelfte uebernommene Konfiguration ist
              * schlimmer als die alte, und man sieht es ihr nicht an. */
             $mi_fehler[] = mi_t('UI.SICH_ABGELEHNT') . ' ' . implode(' ', $mi_mangel);
-        } elseif (!mi_config_write($mi_neu[0])) {
-            $mi_fehler[] = mi_t('UI.SICH_SCHREIBFEHLER');
         } elseif (!mi_devices_write($mi_neu[1])) {
+            /* Die GERAETEDATEI ZUERST.
+             *
+             * Bis 4.3.2 stand hier midea2lox.cfg zuerst. Gemessen:
+             * config_write gelingt, devices_write scheitert - und danach
+             * steht die halbe Sicherung auf der Platte, waehrend die Seite
+             * "Es wurde nichts gespeichert" ueberschreibt. Genau der
+             * Zustand, den mi_sicherung_lesen() mit seinem "entweder den
+             * ganzen Stand oder gar keinen" ausschliessen soll.
+             *
+             * Die Reihenfolge allein macht es nicht unteilbar, aber sie
+             * dreht den Schaden um: scheitert der erste Schritt, ist NICHTS
+             * geschrieben. Scheitert der zweite, steht die Konfiguration
+             * neu und die Geraete alt - und genau das sagt die Meldung
+             * dann auch. */
             $mi_fehler[] = mi_t('UI.SICH_GERAETE_SCHREIBFEHLER');
+        } elseif (!mi_config_write($mi_neu[0])) {
+            $mi_fehler[] = mi_t('UI.SICH_HALB');
         } else {
             /* DIE KONFIGURATION NEU LESEN. Ohne diese Zeile zeigte das
              * Formular darunter weiter den alten Stand; zusammen mit der
@@ -336,7 +453,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
              * halb zurueckgespielte Konfiguration, die mi_sicherung_lesen()
              * verhindern soll. Gemessen. */
             $mi_cfg = mi_config_read();
-            mi_abo_datei_schreiben($mi_cfg);
+            if (!mi_abo_datei_schreiben($mi_cfg)) {
+                $mi_hinweise[] = sprintf(mi_t('UI.ABO_SCHREIBFEHLER'),
+                                         mi_e($mi_p['abo']));
+            }
+            if ($mi_unberuehrt) {
+                // Was die Datei nicht enthielt, ist unveraendert geblieben -
+                // und das gehoert gesagt, nicht verschwiegen.
+                $mi_hinweise[] = sprintf(mi_t('UI.SICH_UNBERUEHRT'),
+                                         mi_e(implode(', ', $mi_unberuehrt)));
+            }
             /* Punkt 7 der sieben: den Dienst nachziehen UND sagen, was mit
              * ihm geschehen ist.
              *
@@ -849,8 +975,8 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <tr><th style="width:34%"><?php echo mi_te('UI.WAS'); ?></th><th><?php echo mi_te('UI.BEFEHL_EIN'); ?></th><th><?php echo mi_te('UI.BEFEHL_AUS'); ?></th></tr>
 <?php foreach (mi_befehle() as $b) { ?>
 <tr><td><?php echo mi_e(mi_t($b[0])); ?></td>
-    <td class="sm-mono"><?php echo mi_e($mi_bsp . ',' . $b[1]); ?></td>
-    <td class="sm-mono"><?php echo $b[2] !== null ? mi_e($mi_bsp . ',' . $b[2]) : '&mdash;'; ?></td></tr>
+    <td class="sm-mono"><?php echo mi_e($mi_bsp . ' ' . $b[1]); ?></td>
+    <td class="sm-mono"><?php echo $b[2] !== null ? mi_e($mi_bsp . ' ' . $b[2]) : '&mdash;'; ?></td></tr>
 <?php } ?>
 </table>
 </div>
@@ -874,16 +1000,18 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <tr><td>6</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ok'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
 <tr><td>7</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ts'); ?></td><td><?php echo mi_te('UI.BL_P_SEKUNDEN'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
 <tr><td>8</td><td><?php echo mi_te('UI.BL_VA'); ?></td><td>Midea2Lox</td><td><?php echo mi_te('UI.BL_P_ADRESSE'); ?> <span class="sm-mono">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></span></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td></tr>
-<tr><td>9</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_EINAUS'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ',power.True'); ?> / <?php echo mi_e($mi_bsp . ',power.False'); ?></td><td><?php echo mi_te('UI.BL_VOM_SCHALTER'); ?></td></tr>
-<tr><td>10</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_SOLL'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ',<v>'); ?></td><td><?php echo mi_te('UI.BL_VON_12'); ?></td></tr>
+<tr><td>9</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_EINAUS'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ' power.True'); ?> / <?php echo mi_e($mi_bsp . ' power.False'); ?></td><td><?php echo mi_te('UI.BL_VOM_SCHALTER'); ?></td></tr>
+<tr><td>10</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_SOLL'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ' <v>'); ?></td><td><?php echo mi_te('UI.BL_VON_18'); ?></td></tr>
 <tr><td>11</td><td><?php echo mi_te('UI.BL_NICHT'); ?></td><td><?php echo mi_te('UI.BL_N_OFFLINE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_EINGANG5'); ?></td></tr>
 <tr><td>12</td><td><?php echo mi_te('UI.BL_EINVERZ'); ?></td><td><?php echo mi_te('UI.BL_N_AUSFALL'); ?></td><td><?php echo mi_te('UI.BL_P_VERZ'); ?> <b>600</b> s</td><td><?php echo mi_te('UI.BL_EINGANG11'); ?></td></tr>
 <tr><td>13</td><td><?php echo mi_te('UI.BL_FORMEL'); ?></td><td><?php echo mi_te('UI.BL_N_ALTER'); ?></td><td class="sm-mono">(T-1230768000)-I1</td><td><?php echo mi_te('UI.BL_ALTER_EIN'); ?></td></tr>
-<tr><td>14</td><td><?php echo mi_te('UI.BL_STATUS'); ?></td><td><?php echo mi_te('UI.BL_N_STATUS'); ?></td><td><?php echo mi_te('UI.BL_P_STATUS'); ?></td><td>v1 = #1, v2 = #3, v3 = #4</td></tr>
-<tr><td>15</td><td><?php echo mi_te('UI.BL_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_N_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_P_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_ODER'); ?></td></tr>
-<tr><td>16 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_N_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_P_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_RAUMREG_EIN'); ?></td></tr>
-<tr><td>17 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_MERKER'); ?></td><td><?php echo mi_te('UI.BL_N_FREIGABE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_FREIGABE_EIN'); ?></td></tr>
-<tr><td>18 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_real_time_power_usage'); ?></td><td><?php echo mi_te('UI.BL_P_WATT'); ?></td><td><?php echo mi_te('UI.BL_ENERGIE_EIN'); ?></td></tr>
+<tr><td>14</td><td><?php echo mi_te('UI.BL_SCHWELLE'); ?></td><td><?php echo mi_te('UI.BL_N_ZUALT'); ?></td><td><?php echo mi_te('UI.BL_P_SCHWELLE'); ?></td><td><?php echo mi_te('UI.BL_ALTER_AUS'); ?></td></tr>
+<tr><td>15</td><td><?php echo mi_te('UI.BL_ODER_TYP'); ?></td><td><?php echo mi_te('UI.BL_N_SAMMEL'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_ODER'); ?></td></tr>
+<tr><td>16</td><td><?php echo mi_te('UI.BL_STATUS'); ?></td><td><?php echo mi_te('UI.BL_N_STATUS'); ?></td><td><?php echo mi_te('UI.BL_P_STATUS'); ?></td><td>v1 = #1, v2 = #3</td></tr>
+<tr><td>17</td><td><?php echo mi_te('UI.BL_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_N_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_P_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_VOM_ODER'); ?></td></tr>
+<tr><td>18 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_N_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_P_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_RAUMREG_EIN'); ?></td></tr>
+<tr><td>19 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_MERKER'); ?></td><td><?php echo mi_te('UI.BL_N_FREIGABE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_FREIGABE_EIN'); ?></td></tr>
+<tr><td>20 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_real_time_power_usage'); ?></td><td><?php echo mi_te('UI.BL_P_WATT'); ?></td><td><?php echo mi_te('UI.BL_ENERGIE_EIN'); ?></td></tr>
 </table>
 </div>
 <br>

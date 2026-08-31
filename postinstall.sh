@@ -16,6 +16,23 @@
 PDIR=$3
 PVERSION=$4
 
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
+# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
+# preupgrade.sh und postupgrade.sh haben diese Absicherung seit jeher;
+# hier fehlte sie als einziger der fuenf Schalen. Ohne sie wird aus
+# "$LBPBIN/$PDIR" der Pfad "/Midea2Lox", und das rm -rf weiter unten
+# laeuft darauf los.
+LBHOMEDIR="${LBHOMEDIR:-$5}"
+LBPDATA="${LBPDATA:-$LBHOMEDIR/data/plugins}"
+LBPBIN="${LBPBIN:-$LBHOMEDIR/bin/plugins}"
+LBPCONFIG="${LBPCONFIG:-$LBHOMEDIR/config/plugins}"
+
+if [ -z "$PDIR" ] || [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR" ]; then
+	echo "<FAIL> Weder die Umgebungsvariablen noch die Argumente nennen ein"
+	echo "<FAIL> brauchbares LoxBerry-Verzeichnis. Es wird nichts angefasst."
+	exit 2
+fi
+
 PDATA=$LBPDATA/$PDIR
 PBIN=$LBPBIN/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
@@ -45,7 +62,33 @@ chmod +x "$PDATA/lebenszeichen.py" 2>/dev/null
 
 echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
 
-rm -rf "$VENV"
+# Die bisherige Umgebung wird BEISEITEGELEGT, nicht weggeworfen.
+#
+# Bis 4.3.2 stand hier "rm -rf $VENV" vor jeder Pruefung. Ein
+# Aktualisierungsversuch ohne Internet - pip_install bricht dann mit
+# Rueckgabewert 2 ab - liess damit eine leere Umgebung zurueck und machte
+# aus einem laufenden Plugin ein totes. Jetzt wird zurueckgerollt, und der
+# Anwender behaelt den Stand, mit dem er vorher gearbeitet hat.
+#
+# Verschoben statt kopiert, und zwar an den Ort und wieder zurueck: in einem
+# venv stehen absolute Pfade (pyvenv.cfg und jede Shebang-Zeile unter bin/).
+# Eine an einem anderen Namen gebaute Umgebung waere nach dem Umbenennen
+# kaputt - deshalb entsteht die neue immer unter dem endgueltigen Namen.
+VENV_VORHER="$PBIN/venv.vorher"
+rm -rf "$VENV_VORHER"
+if [ -d "$VENV" ]; then
+	mv "$VENV" "$VENV_VORHER" 2>/dev/null || rm -rf "$VENV"
+fi
+
+zurueckrollen() {
+	if [ -d "$VENV_VORHER" ]; then
+		rm -rf "$VENV"
+		if mv "$VENV_VORHER" "$VENV" 2>/dev/null; then
+			echo "<WARNING> Die bisherige Umgebung wurde wiederhergestellt."
+			echo "<WARNING> Das Plugin arbeitet mit dem Stand von vorher weiter."
+		fi
+	fi
+}
 
 if ! python3 -m venv "$VENV"; then
 	echo "<FAIL> Die virtuelle Python-Umgebung konnte nicht angelegt werden."
@@ -57,6 +100,7 @@ fi
 
 if [ ! -x "$PIP" ]; then
 	echo "<FAIL> In der neuen Umgebung ist kein pip3 vorhanden ($PIP)."
+	zurueckrollen
 	exit 2
 fi
 
@@ -73,17 +117,19 @@ PIPOPTS="--extra-index-url https://www.piwheels.org/simple --prefer-binary"
 pip_install() {
 	local paket="$1"
 	echo "<INFO> Installiere $paket ..."
-	if ! $PIP install $PIPOPTS "$paket"; then
+	# "$PIP" in Anfuehrungszeichen - $PIPOPTS soll zerfallen, der Pfad nicht.
+	if ! "$PIP" install $PIPOPTS "$paket"; then
 		echo "<FAIL> Die Installation von '$paket' ist fehlgeschlagen."
 		echo "<FAIL> Ohne dieses Modul kann Midea2Lox nicht arbeiten."
 		echo "<FAIL> Haeufigste Ursache: keine Internetverbindung waehrend der Installation."
+		zurueckrollen
 		exit 2
 	fi
 	echo "<OK> $paket installiert."
 }
 
 echo "<INFO> Aktualisiere pip in der Umgebung..."
-$PIP install --upgrade pip setuptools wheel >/dev/null 2>&1 || \
+"$PIP" install --upgrade pip setuptools wheel >/dev/null 2>&1 || \
 	echo "<WARNING> pip liess sich nicht aktualisieren - wird fortgesetzt."
 
 pip_install "requests"
@@ -98,11 +144,15 @@ pip_install "msmart-ng==${MSMART_VERSION}"
 echo "<INFO> Pruefe die Umgebung gegen..."
 if ! "$VENV/bin/python3" -c "from msmart.device import AirConditioner; import paho.mqtt.client" 2>&1; then
 	echo "<FAIL> Die Module liessen sich zwar installieren, aber nicht laden."
+	zurueckrollen
 	exit 2
 fi
 
 INSTALLED=$("$VENV/bin/python3" -c "import msmart; print(msmart.__version__)" 2>/dev/null)
 echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
+
+# Erst JETZT ist die alte Umgebung entbehrlich.
+rm -rf "$VENV_VORHER"
 
 # ---------------------------------------------------------------------------
 
@@ -134,6 +184,7 @@ NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 # nur einer Summe wuerde sie nicht als "verloren" erkannt. Eine Zahl, die nur
 # fuer die neueste Fassung stimmt, ist eine Pruefung auf Zeit.
 netz_zurueck() {
+    local datei ziel zweit verloren ist soll
     datei=$1; shift
     ziel="$NETZ_CFG/$datei"
     zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"

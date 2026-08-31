@@ -76,7 +76,23 @@ start_dienst() {
     touch "$sollmarke" 2>/dev/null
     cd "$datadir" || return 1
     if [ "$(id -u)" -eq 0 ]; then
-        su loxberry -c "cd '$datadir' && nohup ./midea2lox.py >/dev/null 2>&1 & echo \$! > '$piddatei'"
+        # Die geschweiften Klammern sind der ganze Unterschied.
+        #
+        # Ohne sie beendet das "&" die GANZE UND-Liste, nicht nur den
+        # nohup-Aufruf: in den Hintergrund geht dann "cd ... && nohup ...",
+        # und $! ist die Nummer der Huellschale, nicht die von python3.
+        # Gemessen unter bash 5.3: in der PID-Datei stand 4077, das echte
+        # python3 lief als 4080. gehoert_uns() sucht "midea2lox.py"
+        # argumentweise in /proc/<pid>/cmdline und findet in der Huellschale
+        # nur "bash", "-c" und den Befehlstext - also nie einen Treffer.
+        #
+        # Die Folge betraf nur den root-Zweig, dafuer vollstaendig: "status"
+        # meldete dauerhaft "gestoppt", waehrend der Dienst arbeitete; der
+        # minuetliche Waechter startete jede Minute neu und gab nach fuenf
+        # Versuchen auf; und "stop", preupgrade.sh und uninstall konnten den
+        # Prozess nie mehr erreichen - er ueberlebte Update und
+        # Deinstallation.
+        su loxberry -c "cd '$datadir' && { nohup ./midea2lox.py >/dev/null 2>&1 & echo \$! > '$piddatei'; }"
         chown loxberry:loxberry "$piddatei" 2>/dev/null
     else
         nohup ./midea2lox.py >/dev/null 2>&1 &

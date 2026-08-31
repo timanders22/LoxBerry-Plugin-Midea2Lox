@@ -35,14 +35,27 @@ function mi_pruefungen($cfg)
         $venv ? mi_e(mi_t('UI.VORHANDEN'))
               : sprintf(mi_t('UI.VENV_FEHLT'), mi_e($p['venv'])));
 
+    /* Ohne virtuelle Umgebung ist NICHTS messbar - dann gehoert hier ein
+     * Strich hin, kein Kreuz. Bis 4.3.2 setzte diese Zeile im selben Fall
+     * ein Kreuz ("nicht ladbar - bitte das Plugin neu installieren"), die
+     * Zeile darunter einen Strich: zwei verschiedene Urteile fuer EINE
+     * Ursache, und das Kreuz schickte den Anwender auf eine Neuinstallation
+     * wegen einer Frage, die gar nicht gestellt werden konnte. */
     $msmart = mi_msmart_version();
-    $z[] = array(mi_e(mi_t('PRUEF.MSMART')), $msmart !== '' ? 1 : 0,
+    $z[] = array(mi_e(mi_t('PRUEF.MSMART')),
+        $msmart !== '' ? 1 : ($venv ? 0 : 2),
         $msmart !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($msmart))
-                       : mi_t('UI.NICHT_LADBAR'));
+                       : ($venv ? mi_t('UI.NICHT_LADBAR') : mi_t('UI.OHNE_VENV')));
 
+    /* Ein Strich OHNE Text ist kein Strich, sondern eine Luecke. Bis 4.3.2
+     * stand in der Antwortspalte dieser beiden Zeilen im nicht messbaren
+     * Fall gar nichts - der Grundsatz im Kopf dieser Funktion ("was nicht
+     * gemessen werden konnte, sagt das") wurde ausgerechnet hier nicht
+     * eingehalten. */
     $py = mi_python_version();
     $z[] = array(mi_e(mi_t('PRUEF.PYTHON')), $py !== '' ? 1 : 2,
-        $py !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($py)) : '');
+        $py !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($py))
+                   : mi_t('UI.NICHT_FESTSTELLBAR'));
 
     /* OFFENER PUNKT bis zur Messung am Geraet: unter paho-mqtt 2.x ist
      * mqtt.Client(client_id=...) ohne CallbackAPIVersion ein Fehler beim
@@ -52,7 +65,8 @@ function mi_pruefungen($cfg)
      * offen zu bleiben. postinstall.sh klemmt paho auf < 2.0.0. */
     $paho = mi_paho_version();
     $z[] = array(mi_e(mi_t('PRUEF.PAHO')), $paho !== '' ? 1 : 2,
-        $paho !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($paho)) : '');
+        $paho !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($paho))
+                     : mi_t('UI.NICHT_FESTSTELLBAR'));
 
     // ---- Dienst ----
     $pid = mi_dienst_pid();
@@ -247,9 +261,13 @@ function mi_status()
     }
     $aus = mi_t('UI.STATUS_HINTERLEGT') . "\n";
     foreach ($geraete as $d) {
+        /* Kein html_entity_decode(). mi_geraetename() liefert laut eigener
+         * Zusage ROH; der Aufruf war im Normalfall wirkungslos und frass im
+         * Sonderfall Zeichen - eine Bezeichnung "Bad &amp; Flur" erschien
+         * hier als "Bad & Flur". */
         $aus .= sprintf("  %-16s %-16s %-4s %s\n", $d['id'], $d['ip'],
                         ($d['token'] !== '' ? 'V3' : 'V2'),
-                        html_entity_decode(mi_geraetename($d), ENT_QUOTES, 'UTF-8'));
+                        mi_geraetename($d));
     }
     list($alter, $zaehler, $ok) = mi_lebenszeichen();
     $aus .= "\n" . mi_t('UI.STATUS_LEBENSZEICHEN') . ' ';

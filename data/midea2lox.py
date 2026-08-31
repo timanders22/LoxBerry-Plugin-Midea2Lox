@@ -171,7 +171,11 @@ async def start_server():
         Midea2Lox_Version, __version__,
         sys.version_info.major, sys.version_info.minor, sys.version_info.micro))
 
-    schleife = asyncio.get_event_loop()
+    # get_running_loop(), nicht get_event_loop(): innerhalb einer laufenden
+    # Schleife ist das zweite seit 3.12 verfallen und ab 3.14 ein Fehler.
+    # Der LoxBerry faehrt heute 3.13.5 - die Zeile waere die naechste, die
+    # ohne Zutun kaputtgeht.
+    schleife = asyncio.get_running_loop()
 
     # Harte Obergrenze. Ein Absender, der schneller schickt, als die Geraete
     # antworten, darf nicht den Speicher fuellen - und ein verworfenes Paket
@@ -180,6 +184,19 @@ async def start_server():
 
     class Empfang(asyncio.DatagramProtocol):
         def datagram_received(self, daten, absender):
+            # Laengengrenze. Der laengste zulaessige Befehl ist eine
+            # Geraetenummer, ein Schluessel (64), ein Token (128), eine IP und
+            # acht Werte - zusammen weit unter 512 Byte. Ohne diese Grenze
+            # schreibt EIN Datagramm von 64 kB eine 64-kB-Protokollzeile
+            # (die Meldung "Incomming Message" steht vor jeder Auswertung),
+            # und acht davon rotieren den ganzen bisherigen Verlauf fort.
+            # Abgewiesen heisst gemeldet - aber nur mit den ersten 64 Byte.
+            if len(daten) > UDP_MAX:
+                _LOGGER.error(
+                    "Paket von %s ist %d Byte lang (Grenze %d) und wird "
+                    "verworfen: %r", absender[0] if absender else '?',
+                    len(daten), UDP_MAX, daten[:64])
+                return
             try:
                 warteschlange.put_nowait((daten, absender))
             except asyncio.QueueFull:
@@ -1032,6 +1049,20 @@ async def send_to_loxone(device, support_mode):
     _LOGGER.info("Device is Online! %d Werte fuer Midea.%s gesendet.", len(paare), geraet_id)
 
 
+async def _im_faden(arbeit):
+    """Blockierendes ausserhalb der Ereignisschleife laufen lassen.
+
+    Der Grund, gemessen: veroeffentlichen() war zwar als Koroutine
+    geschrieben, enthielt aber KEIN einziges await - nur
+    wait_for_publish() und requests.get(), die beide blockieren. Damit
+    stand die ganze Schleife, solange der Broker oder der Miniserver
+    schwieg: bis zu 28 Werte je Geraet mal lox_timeout. In dieser Zeit lief
+    weder der Empfang noch der Herzschlag, und der Reiter Test zeigte einen
+    roten Herzschlag bei kerngesundem Dienst.
+    """
+    return await asyncio.get_running_loop().run_in_executor(None, arbeit)
+
+
 async def veroeffentlichen(paare, support_mode=0):
     """Ueber MQTT, sonst per HTTP an virtuelle Eingaenge.
 
@@ -1049,10 +1080,11 @@ async def veroeffentlichen(paare, support_mode=0):
                 # lag, nahm der Dienst dann keine Pakete mehr an - und der
                 # Waechter griff nicht, weil der Prozess lebte.
                 try:
-                    publish.wait_for_publish(timeout=LOX_TIMEOUT)
+                    await _im_faden(
+                        lambda: publish.wait_for_publish(timeout=LOX_TIMEOUT))
                 except TypeError:
                     # paho vor 1.6 kennt das Argument nicht.
-                    publish.wait_for_publish()
+                    await _im_faden(publish.wait_for_publish)
                 _LOGGER.debug("Publishing: MsgNum:%s: %s = %s",
                               publish.mid, thema, wert)
             except Exception as fehler:
@@ -1072,7 +1104,7 @@ async def veroeffentlichen(paare, support_mode=0):
         try:
             # Ohne Zeitgrenze wartet requests unbegrenzt. Haengt der
             # Miniserver, steht der Dienst.
-            r = requests.get(ziel, timeout=LOX_TIMEOUT)
+            r = await _im_faden(lambda: requests.get(ziel, timeout=LOX_TIMEOUT))
             if r.status_code != 200:
                 _LOGGER.error("Error %s on set Loxone Input '%s', please check user, "
                               "password and IP of the Miniserver in the LoxBerry "
@@ -1155,7 +1187,7 @@ except Exception as fehler:
     # Ausgabe, nicht eine SystemExit-Spur.
     logging.basicConfig(level=logging.INFO, filename=log_path + '/midea2lox.log',
                         format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
-                        datefmt='%d.%m %H:%M')
+                        datefmt='%d.%m.%Y %H:%M:%S')
     logging.getLogger("Midea2Lox.py").error("Start nicht moeglich: %s", fehler, exc_info=True)
     print('Midea2Lox: Start nicht moeglich: %s' % fehler)
     sys.exit(1)
@@ -1208,7 +1240,11 @@ _stufe = logging.DEBUG if DEBUG == "1" else logging.INFO
 _handler = logging.handlers.RotatingFileHandler(
     log_path + '/midea2lox.log', maxBytes=500000, backupCount=1, encoding='utf-8')
 _handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s', datefmt='%d.%m %H:%M'))
+    '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s',
+    # Mit Jahr und Sekunden. Ohne Jahr ist ueber einen Jahreswechsel hinweg
+    # die Reihenfolge im Protokoll nicht mehr entscheidbar, und ohne
+    # Sekunden liegen bis zu sechzig Zeilen ununterscheidbar nebeneinander.
+    datefmt='%d.%m.%Y %H:%M:%S'))
 logging.basicConfig(level=_stufe, handlers=[_handler])
 if DEBUG == "1":
     print("Debug is True")
@@ -1239,6 +1275,10 @@ if _fehlt:
     sys.exit(1)
 
 UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
+# Groesste zulaessige Laenge eines Datagramms (siehe datagram_received).
+# Der laengste zulaessige Befehl - Nummer, Schluessel, Token, IP und acht
+# Werte - bleibt weit darunter.
+UDP_MAX = 512
 LoxberryIP = cfg.get('default', 'LoxberryIP').strip()
 if not LoxberryIP:
     # Auf allen Adressen horchen ist das, was bis 4.2.12 mit leerem Wert
@@ -1335,7 +1375,30 @@ try: # check if MQTTgateway is installed or not and set MQTT Client settings
         _LOGGER.info('found MQTT Gateway Plugin - publish over MQTT except on Midea2Lox support_mode')
     else:
         _LOGGER.info('got MQTT Settings - publish over MQTT except on Midea2Lox support_mode')
-    client.connect(MQTThost, int(MQTTport))
+    # connect_async() statt connect(): der Netzwerkfaden baut die Verbindung
+    # auf UND nach jedem Abriss neu auf.
+    #
+    # Mit dem bisherigen connect() gab es genau EINEN Versuch, und zwar im
+    # Modulrumpf. Kam der Dienst nach einem Neustart des Rechners vor dem
+    # oertlichen Broker hoch, blieb MQTT fuer die ganze Laufzeit auf 0 - und
+    # der Dienst sendete bis zum naechsten Dienstneustart ueber HTTP, mit
+    # ANDEREN Zielnamen als den MQTT-Themen. In Loxone blieb alles stumm,
+    # und im Protokoll stand eine einzige Warnzeile.
+    #
+    # Bis der Broker antwortet, steht mqtt_error auf 1 (Anfangswert oben),
+    # und veroeffentlichen() nimmt den HTTP-Weg. on_connect setzt es auf 0.
+    #
+    # Beide Aufrufe stehen hinter einer hasattr-Wache - dasselbe Muster, mit
+    # dem weiter oben CallbackAPIVersion behandelt wird. paho 1.6.1 (die
+    # Fassung im venv dieses Plugins, am Geraet gemessen) und paho 2.x
+    # kennen beide Namen; eine aeltere Fassung faellt auf das bisherige
+    # connect() zurueck, statt an einem AttributeError zu scheitern.
+    if hasattr(client, 'reconnect_delay_set'):
+        client.reconnect_delay_set(min_delay=1, max_delay=60)
+    if hasattr(client, 'connect_async'):
+        client.connect_async(MQTThost, int(MQTTport))
+    else:
+        client.connect(MQTThost, int(MQTTport))
     client.loop_start()
     MQTT = 1
 except Exception as fehler:

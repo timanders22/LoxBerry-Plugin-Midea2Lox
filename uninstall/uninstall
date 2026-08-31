@@ -72,13 +72,25 @@ if [ -d "$VENV" ]; then
 	rm -rf "$VENV"
 fi
 
-# Die Sicherung der Konfiguration liegt neben dem Konfigordner, damit sie
-# Update und Neuinstallation uebersteht. Beim Deinstallieren ist genau das
-# falsch: darin stehen Geraetetoken und -schluessel der Klimageraete.
-BK="$BASE/config/plugins/${PDIR:-midea2lox}.backup.json"
-if [ -f "$BK" ]; then
-	rm -f "$BK" && echo "<OK> Sicherung der Konfiguration entfernt."
-fi
+# Die Zweitschriften der Konfiguration liegen neben dem Konfigordner, damit
+# sie Update und Neuinstallation ueberstehen. Beim Deinstallieren ist genau
+# das falsch: darin stehen das Midea-Kennwort im Klartext sowie Token und
+# Schluessel der Klimageraete.
+#
+# Bis 4.3.2 stand hier EIN Name, ".backup.json" - und den schreibt niemand.
+# preupgrade.sh legt drei Dateien an, jede mit dem Namen der Konfigurations-
+# datei am Ende (.backup.devices.cfg, .backup.midea2lox.cfg,
+# .backup.mqtt_subscriptions.cfg). Nach dem Deinstallieren blieben sie
+# also alle drei liegen - genau das, was der Absatz darueber verhindern
+# soll. Der alte Name bleibt in der Liste: wer ihn von einer aelteren
+# Fassung noch herumliegen hat, wird ihn jetzt los.
+for BK_NAME in backup.json backup.devices.cfg backup.midea2lox.cfg \
+               backup.mqtt_subscriptions.cfg; do
+	BK="$BASE/config/plugins/${PDIR:-midea2lox}.$BK_NAME"
+	if [ -f "$BK" ]; then
+		rm -f "$BK" && echo "<OK> Zweitschrift $BK_NAME entfernt."
+	fi
+done
 
 echo "<INFO> Der minuetliche Waechter wird mit dem Cron-Eintrag von LoxBerry entfernt."
 

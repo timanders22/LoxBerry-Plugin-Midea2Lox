@@ -88,7 +88,18 @@ function mi_paths()
 
 function mi_e($s)
 {
-    return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8');
+    /* ENT_SUBSTITUTE ist kein Beiwerk.
+     *
+     * Ohne dieses Kennzeichen liefert htmlspecialchars() bei einer
+     * ungueltigen UTF-8-Folge eine LEERE Zeichenkette - nicht das Zeichen,
+     * an dem es scheitert, sondern den ganzen Wert. Gemessen unter 7.4 und
+     * 8.4 mit einer von Hand in Latin-1 bearbeiteten devices.cfg: die
+     * Bezeichnung verschwand spurlos aus der Geraeteauswahl, aus der
+     * Anleitung und aus der erzeugten Loxone-Vorlage.
+     *
+     * Mit ENT_SUBSTITUTE steht dort das Ersatzzeichen, und der Anwender
+     * sieht, DASS etwas nicht stimmt. */
+    return htmlspecialchars((string) $s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
 /* ==================================================================
@@ -210,15 +221,26 @@ function mi_merkwort()
     }
     // Rechte VOR dem Inhalt.
     $tmp = $datei . '.tmp';
+    $abgelegt = false;
     if (@file_put_contents($tmp, $neu) !== false) {
         @chmod($tmp, 0600);
         if (@rename($tmp, $datei)) {
             @chmod($datei, 0600);
+            $abgelegt = true;
         } else {
             @unlink($tmp);
         }
     }
-    $wort = $neu;
+    /* Laesst sich das Merkwort NICHT ablegen, gibt es nichts, woran ein
+     * spaeterer Aufruf es wiedererkennen koennte: jeder Seitenaufbau
+     * erzeugte bis 4.3.2 ein anderes, jeder POST scheiterte am Vergleich,
+     * und die Meldung riet zum Neuladen - was nie half. Die wirkliche
+     * Ursache (das Datenverzeichnis ist nicht beschreibbar) stand nirgends.
+     *
+     * Ein leerer Rueckgabewert ist der ehrliche Zustand. Der Wachposten
+     * nennt ihn beim Namen, und die Oberflaeche weist beim Aufbau darauf
+     * hin - siehe mi_wachposten() und index.php. */
+    $wort = $abgelegt ? $neu : '';
     return $wort;
 }
 
@@ -261,9 +283,16 @@ function mi_wachposten()
         return '';
     }
     $soll = mi_formtoken();
+    // Die Lage "wir koennen gar kein Merkmal hinterlegen" bekommt ihren
+    // eigenen Satz. Sie sieht fuer den Anwender genauso aus wie eine
+    // abgelaufene Sitzung, ist aber etwas ganz anderes - und Neuladen hilft
+    // nie.
+    if ($soll === '') {
+        return sprintf(mi_t('UI.WACHE_UNABLEGBAR'), mi_e(mi_paths()['datadir']));
+    }
     $ist = isset($_POST['fmt']) ? $_POST['fmt']
          : (isset($_GET['fmt']) ? $_GET['fmt'] : null);
-    if (!is_string($ist) || $ist === '' || $soll === '') {
+    if (!is_string($ist) || $ist === '') {
         return mi_t('UI.WACHE_FEHLT');
     }
     if (!hash_equals($soll, $ist)) {
@@ -337,10 +366,28 @@ function mi_wert_pruefen($schluessel, $wert)
     $w = trim((string) $wert);
     switch ($schluessel) {
         case 'MINISERVER':
-            return preg_match('/^MINISERVER\d{1,2}$/', $w) ? ''
-                 : mi_t('UI.PRUEF_MINISERVER');
+            if (!preg_match('/^MINISERVER\d{1,2}$/', $w)) {
+                return mi_t('UI.PRUEF_MINISERVER');
+            }
+            /* Gegen die WIRKLICH vorhandenen Miniserver, wenn sie lesbar
+             * sind. MINISERVER99 hat die richtige Gestalt, aber den
+             * Abschnitt gibt es in der general.cfg nicht - der Dienst
+             * beendet sich dann beim Start, und der Anwender sucht den
+             * Grund in der Oberflaeche, die ihn hat durchgehen lassen.
+             * Ist die Liste nicht lesbar, bleibt es bei der Gestalt: eine
+             * leere Liste darf nicht ALLES abweisen. */
+            $liste = mi_miniserver_liste();
+            if ($liste && !isset($liste[(int) substr($w, 10)])) {
+                return sprintf(mi_t('UI.PRUEF_MINISERVER_FEHLT'), mi_e($w));
+            }
+            return '';
         case 'UDP_PORT':
-            return (ctype_digit($w) && (int) $w >= 1 && (int) $w <= 65535) ? ''
+            /* Ohne fuehrende Nullen. "007013" ging bis 4.3.2 durch, wurde so
+             * gespeichert und stand danach genau so in der Adresse
+             * /dev/udp/<ip>/007013 der Loxone-Anleitung. Abweisen ist
+             * richtig - zurechtbiegen waere das, was diese Liste
+             * verhindern soll. */
+            return (preg_match('/^[1-9][0-9]{0,4}$/', $w) && (int) $w <= 65535) ? ''
                  : mi_t('UI.PRUEF_UDP_PORT');
         case 'maxConnectionLifetime':
             return (ctype_digit($w) && (int) $w >= 10 && (int) $w <= 3600) ? ''
@@ -439,6 +486,23 @@ function mi_config_read()
 function mi_cfg_lage()
 {
     $datei = mi_paths()['config'];
+    /* clearstatcache VOR dem Tor, mit dem zweiten Parameter auf genau diese
+     * Datei.
+     *
+     * PHP haelt die Antworten von stat() in einem Zwischenspeicher, und
+     * unter 7.4 - der Fassung, die LoxBerry 3.x bis 4.0 faehrt - sieht
+     * filesize() danach den ALTEN Wert. Gemessen: eine 0-Byte-Datei, im
+     * selben Prozess beschrieben, meldete unter 7.4 weiter 0 Byte, unter
+     * 8.4 die neue Groesse.
+     *
+     * Heute wirkt das hier NICHT: vor dieser Funktion fasst nur
+     * is_readable() die Datei an, und das fuellt den Zwischenspeicher
+     * nicht - in beide Richtungen gemessen. Die Zeile steht trotzdem, denn
+     * sie haengt allein an dieser Reihenfolge: wer irgendwo davor ein
+     * is_file() oder filesize() auf dieselbe Datei setzt, bekaeme hier
+     * stillschweigend "die Datei ist leer" fuer eine Datei, die gerade
+     * geschrieben wurde. */
+    clearstatcache(true, $datei);
     if (!is_file($datei)) {
         return array('fehlt', mi_t('UI.LAGE_FEHLT'));
     }
@@ -684,7 +748,11 @@ function mi_devices_bezeichnung_schreiben(array $zuordnung)
 function mi_beispiel_id()
 {
     $d = mi_devices();
-    return $d ? $d[0]['id'] : '123456789';
+    // Zwoelf Ziffern. Die bisherige Beispielnummer hatte neun und lag damit
+    // UNTER der Grenze des Dienstes (10 bis 19) - wer das Muster aus dem
+    // Reiter Loxone abschrieb, bekam eine Nummer, die der Dienst nie als
+    // Geraetenummer erkannt haette.
+    return $d ? $d[0]['id'] : '123456789012';
 }
 
 /* ==================================================================
@@ -737,8 +805,21 @@ function mi_dienst($was)
     if (!is_executable($d)) {
         return 'fehlt';
     }
-    @exec(escapeshellarg($d) . ' ' . $was . ' >/dev/null 2>&1');
-    return '';
+    /* Den Rueckgabewert HOLEN und ansehen.
+     *
+     * Bis 4.3.2 stand hier ein exec() ohne $output und ohne $return_var,
+     * und die Funktion lieferte danach immer ''. Die Oberflaeche schloss
+     * daraus auf "Der Dienst wurde neu gestartet" - eine Behauptung, kein
+     * Befund. daemon/daemon prueft seinerseits die WIRKUNG (es wartet zwei
+     * Sekunden und sieht nach, ob der Prozess noch lebt) und endet mit 1,
+     * wenn nicht. Genau diese Auskunft wurde weggeworfen.
+     *
+     * Die Ausgabe wird mit aufgefangen, damit sie nicht in die Seite
+     * laeuft; gebraucht wird sie nicht. */
+    $aus = array();
+    $code = 0;
+    @exec(escapeshellarg($d) . ' ' . escapeshellarg($was) . ' 2>&1', $aus, $code);
+    return ((int) $code === 0) ? '' : 'fehlgeschlagen';
 }
 
 /**
@@ -1243,8 +1324,23 @@ function mi_vorlage_ausgang($cfg = null)
         $name = mi_geraetename($d);
         foreach (mi_befehle() as $b) {
             $titel = 'Midea2Lox ' . $d['id'] . ' ' . mi_t($b[0]);
-            $ein  = $d['id'] . ',' . $b[1];
-            $aus  = ($b[2] !== null) ? ($d['id'] . ',' . $b[2]) : '';
+            /* LEERZEICHEN, nicht Komma.
+             *
+             * Am laufenden Dienst gemessen (31.08.2026): der Empfaenger
+             * zerlegt das Datagramm mit split(' ') und sucht die
+             * Geraetenummer argumentweise ueber isdigit(). Ein Paket
+             * "<ID>,power.True" ist damit EIN Argument, das keine reine
+             * Ziffernfolge ist - der Dienst antwortet mit
+             * "missing device_id" und schaltet nichts. Nirgends im Dienst
+             * wird an einem Komma zerlegt.
+             *
+             * Bis 4.3.2 schrieb diese Vorlage das Komma, und damit war
+             * JEDER der 27 Befehle je Geraet wirkungslos - waehrend der
+             * Knopf "Senden" im Reiter Test, der das Leerzeichen benutzt,
+             * einwandfrei arbeitete. Genau die Zusage "was hier
+             * funktioniert, funktioniert dort" traf also nicht zu. */
+            $ein  = $d['id'] . ' ' . $b[1];
+            $aus  = ($b[2] !== null) ? ($d['id'] . ' ' . $b[2]) : '';
             $o .= "\t" . '<VirtualOutCmd Title="' . $x($titel) . '" ';
             $o .= 'Comment="' . $x($name) . '" ';
             $o .= 'CmdOn="' . $x($ein) . '" CmdOnMethod="UDP" ';
@@ -1380,7 +1476,11 @@ function mi_abo_eingetragen($cfg = null)
             $id = $e;
         }
         if ($id === '') { continue; }
-        if ($id === $praefix . '/#' || $id === $praefix . '/+'
+        /* Ein blankes "#" ist das Abonnement auf ALLES und deckt unsere
+         * Themen damit ebenfalls ab. Bis 4.3.2 fiel es durch, und die Zeile
+         * forderte den Anwender auf, etwas von Hand einzutragen, das schon
+         * da war. */
+        if ($id === '#' || $id === $praefix . '/#' || $id === $praefix . '/+'
             || strpos($id, $praefix . '/') === 0) {
             $treffer[] = $id;
         }
@@ -1713,8 +1813,24 @@ function mi_sicherung_lesen($roh)
         $roh_ger = array();
     }
 
-    $neu = mi_vorgaben();
-    $bekannt = array_keys($neu);
+    /* Die Grundlage ist die AKTUELLE Konfiguration, nicht die Werksvorgabe.
+     *
+     * Bis 4.3.2 stand hier mi_vorgaben(). Eine Sicherung, die einen
+     * Schluessel nicht enthaelt - jede flache Sicherung aus 4.2.x tut das,
+     * und die soll ausdruecklich weiter angenommen werden -, setzte diesen
+     * Wert damit stillschweigend auf die Werksvorgabe zurueck. Gemessen mit
+     * {"einstellungen":{"UDP_PORT":"7014"}}: angenommen, und danach war das
+     * hinterlegte Midea-Kennwort leer, ohne dass ein Wort darueber fiel.
+     *
+     * Zurueckgespielt wird jetzt, was in der Datei steht; was nicht darin
+     * steht, bleibt unveraendert. WELCHE Schluessel unberuehrt blieben,
+     * gibt diese Funktion als fuenften Rueckgabewert heraus, und die
+     * Oberflaeche sagt es hinterher - unveraendert lassen ist richtig,
+     * unveraendert lassen OHNE es zu sagen waere die naechste stille
+     * Ueberraschung. */
+    $neu = mi_config_read();
+    $bekannt = array_keys(mi_vorgaben());
+    $gesehen = array();
     $anzahl = 0;
     foreach ($roh_einst as $k => $w) {
         // Der lesbare Kopf wird UEBERGANGEN, nicht beanstandet.
@@ -1732,8 +1848,10 @@ function mi_sicherung_lesen($roh)
             continue;
         }
         $neu[$k] = trim((string) $w);
+        $gesehen[] = $k;
         $anzahl++;
     }
+    $unberuehrt = array_values(array_diff($bekannt, $gesehen));
     if ($anzahl === 0) {
         $mangel[] = mi_t('UI.SICH_LEER');
     }
@@ -1750,7 +1868,9 @@ function mi_sicherung_lesen($roh)
             continue;
         }
         $id = isset($g['id']) ? trim((string) $g['id']) : '';
-        if (!preg_match('/^\d{6,20}$/', $id)) {
+        // 10 bis 19 Ziffern - dieselbe Grenze wie im Dienst, siehe
+        // index.php bei den Bezeichnungen.
+        if (!preg_match('/^\d{10,19}$/', $id)) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_ID'), $nr);
             continue;
         }
@@ -1797,9 +1917,13 @@ function mi_sicherung_lesen($roh)
     }
 
     if ($mangel) {
-        return array(null, $mangel, $anzahl, count($geraete));
+        return array(null, $mangel, $anzahl, count($geraete), $unberuehrt);
     }
-    return array(array($neu, $geraete), array(), $anzahl, count($geraete));
+    // Fuenftes Element: die Schluessel, die in der Datei NICHT standen und
+    // deshalb unveraendert geblieben sind. Aeltere Aufrufer, die nur vier
+    // Elemente auslesen, stoert das nicht - list() nimmt weniger entgegen,
+    // als das Feld hergibt.
+    return array(array($neu, $geraete), array(), $anzahl, count($geraete), $unberuehrt);
 }
 
 /**
