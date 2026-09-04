@@ -68,6 +68,9 @@ function mi_paths()
         'log'     => $home . '/log/plugins/' . $ordner . '/midea2lox.log',
         'datadir'    => $home . '/data/plugins/' . $ordner,
         'leben'   => $home . '/data/plugins/' . $ordner . '/lebenszeichen.json',
+        // Ab 4.5.0: derselbe Zustand, den die Automatik veroeffentlicht, als
+        // Datei - die Oberflaeche kann kein MQTT lesen.
+        'automatik' => $home . '/data/plugins/' . $ordner . '/automatik.json',
         'bin'     => $home . '/bin/plugins/' . $ordner,
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
         'daemon'  => $home . '/system/daemons/plugins/' . $ordner,
@@ -322,6 +325,30 @@ function mi_vorgaben()
         'mqtt_praefix'          => 'Midea2Lox',
         'abfragetakt'           => '0',
         'lox_timeout'           => '5',
+        /* Ab 4.5.0: die Automatik. Auch diese Schluessel stehen HINTEN.
+         *
+         * auto_ein steht auf '0'. Eine Funktion, die von sich aus in ein
+         * Klimageraet greift, wird nicht durch ein Update eingeschaltet -
+         * der Anwender schaltet sie ein, nachdem er die Themen eingetragen
+         * und im Reiter Test gesehen hat, dass wirklich etwas ankommt.
+         *
+         * auto_verschiebung steht in ZEHNTELKELVIN, damit die Datei ohne
+         * Kommazahl auskommt: 20 sind 2,0 K. Eine Kommazahl in einer .cfg
+         * ist je nach Gebietsschema mal '2.0' und mal '2,0' - das ist die
+         * naechste stille Ueberraschung. */
+        'auto_ein'              => '0',
+        'auto_thema_regel'      => '',
+        'auto_thema_pv'         => '',
+        'auto_pv_ab'            => '1500',
+        'auto_verschiebung'     => '20',
+        'auto_soll_min'         => '16',
+        'auto_soll_max'         => '30',
+        'auto_max_alter'        => '900',
+        'auto_sperrzeit'        => '120',
+        'auto_takt'             => '300',
+        'auto_turbo'            => '0',
+        'auto_schalten'         => '0',
+        'auto_geraete'          => '',
     );
 }
 
@@ -416,6 +443,52 @@ function mi_wert_pruefen($schluessel, $wert)
         case 'LoxberryIP':
             return ($w === '' || filter_var($w, FILTER_VALIDATE_IP) !== false) ? ''
                  : mi_t('UI.PRUEF_IP');
+        /* Die Automatik. Jeder Schluessel bekommt seine eigene Zeile - eine
+         * Sammelregel "alles was mit auto_ anfaengt ist eine Zahl" waere
+         * genau die Nachlaessigkeit, die diese Liste vermeiden soll. */
+        case 'auto_ein':
+        case 'auto_turbo':
+        case 'auto_schalten':
+            return ($w === '0' || $w === '1') ? '' : mi_t('UI.PRUEF_JANEIN');
+        case 'auto_thema_regel':
+        case 'auto_thema_pv':
+            /* Ein Thema, das ABONNIERT wird - anders als das eigene Praefix
+             * darf es tiefer verschachtelt sein, aber weiterhin keinen
+             * Platzhalter tragen: wer "#" abonniert, bekommt den halben
+             * Broker in die Regel. Leer heisst "diese Quelle nicht nutzen". */
+            if ($w === '') { return ''; }
+            return preg_match('/^[A-Za-z0-9_.\-]{1,48}(\/[A-Za-z0-9_.\-]{1,48}){0,7}$/', $w)
+                 ? '' : mi_t('UI.PRUEF_ABOTHEMA');
+        case 'auto_pv_ab':
+            return (ctype_digit($w) && (int) $w >= 0 && (int) $w <= 100000) ? ''
+                 : mi_t('UI.PRUEF_PV_AB');
+        case 'auto_verschiebung':
+            // In Zehntelkelvin: 0 bis 100 sind 0,0 bis 10,0 K.
+            return (ctype_digit($w) && (int) $w >= 0 && (int) $w <= 100) ? ''
+                 : mi_t('UI.PRUEF_VERSCHIEBUNG');
+        case 'auto_soll_min':
+        case 'auto_soll_max':
+            return (ctype_digit($w) && (int) $w >= 5 && (int) $w <= 35) ? ''
+                 : mi_t('UI.PRUEF_SOLLGRENZE');
+        case 'auto_max_alter':
+            return (ctype_digit($w) && (int) $w >= 60 && (int) $w <= 86400) ? ''
+                 : mi_t('UI.PRUEF_MAX_ALTER');
+        case 'auto_sperrzeit':
+            return (ctype_digit($w) && (int) $w >= 0 && (int) $w <= 1440) ? ''
+                 : mi_t('UI.PRUEF_SPERRZEIT');
+        case 'auto_takt':
+            return (ctype_digit($w) && (int) $w >= 60 && (int) $w <= 3600) ? ''
+                 : mi_t('UI.PRUEF_AUTO_TAKT');
+        case 'auto_geraete':
+            // Leer heisst ALLE. Sonst Geraetenummern durch Komma getrennt -
+            // dieselbe Grenze wie im Dienst.
+            if ($w === '') { return ''; }
+            foreach (explode(',', $w) as $teil) {
+                if (!preg_match('/^\d{10,19}$/', trim($teil))) {
+                    return sprintf(mi_t('UI.PRUEF_AUTO_GERAETE'), mi_e(trim($teil)));
+                }
+            }
+            return '';
         case 'MideaUser':
         case 'MideaPassword':
             // Freitext. Geprueft wird nur, was mi_wert_taugt() ohnehin
@@ -1057,6 +1130,26 @@ function mi_status_werte()
     );
 }
 
+/**
+ * Die vier Themen der Automatik - eine Quelle fuer Tabelle und Vorlage.
+ *
+ * 'automatik/grund' ist ABSICHTLICH ein Text und bekommt deshalb keine
+ * Vorlagenangabe: ein virtueller Eingang traegt eine Zahl, keinen Satz.
+ * Dieselbe Behandlung wie operational_mode und fan_speed.
+ */
+function mi_automatik_werte()
+{
+    return array(
+        'automatik/aktiv'    => array('&mdash;', 'WERT.AU_AKTIV',
+                                      array('false', '0', '1', '<v.0>')),
+        'automatik/gesperrt' => array('s',       'WERT.AU_GESPERRT',
+                                      array('false', '0', '86400', '<v.0>')),
+        'automatik/geraete'  => array('&mdash;', 'WERT.AU_GERAETE',
+                                      array('false', '0', '99', '<v.0>')),
+        'automatik/grund'    => array('Text',    'WERT.AU_GRUND', null),
+    );
+}
+
 /* ==================================================================
  * Miniserver
  * ================================================================== */
@@ -1236,7 +1329,7 @@ function mi_vorlage($cfg = null)
         }
     }
     // Das Lebenszeichen gilt fuer das Plugin, nicht je Geraet.
-    foreach (mi_status_werte() as $wert => $w) {
+    foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $wert => $w) {
         $titel = $topic . '_' . str_replace('/', '_', $wert);
         $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
         $o .= 'Comment="' . $x(mi_t($w[1])) . '" Check=" " ';
@@ -1597,7 +1690,8 @@ function mi_themen_probe()
 {
     $datei = mi_paths()['dienst'];
     if (!is_readable($datei)) {
-        return array(null, 0, count(mi_werte()) + count(mi_status_werte()), array());
+        return array(null, 0, count(mi_werte()) + count(mi_status_werte())
+                     + count(mi_automatik_werte()), array());
     }
     $q = (string) @file_get_contents($datei);
     $leben = mi_paths()['leben_py'];
@@ -1627,7 +1721,15 @@ function mi_themen_probe()
     preg_match_all("/['\\/](status\\/[a-z]+)'/", $q, $ms);
     $gesendet = array_merge($gesendet, array_values(array_unique($ms[1])));
 
-    $genannt = array_merge(array_keys(mi_werte()), array_keys(mi_status_werte()));
+    /* Die Themen der Automatik. Der Dienst baut sie als Paare auf
+     * ('automatik/aktiv', ...) - das Muster oben findet sie nicht, und ohne
+     * diese Zeile stuenden sie dauerhaft als "genannt, aber nicht gesendet"
+     * in der Zeile. Geeicht in beide Richtungen. */
+    preg_match_all("/'(automatik\\/[a-z]+)'/", $q, $ma);
+    $gesendet = array_merge($gesendet, array_values(array_unique($ma[1])));
+
+    $genannt = array_merge(array_keys(mi_werte()), array_keys(mi_status_werte()),
+                           array_keys(mi_automatik_werte()));
     $fehlt = array_values(array_diff($gesendet, $genannt));
     $zuviel = array_values(array_diff($genannt, $gesendet));
     return array(count($gesendet) > 0 && !$fehlt && !$zuviel,
@@ -1660,7 +1762,7 @@ function mi_sprache_probe()
         $anzahl++;
         if (mi_t($w[1]) === $w[1]) { $fehlt[] = $w[1]; }
     }
-    foreach (mi_status_werte() as $w) {
+    foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $w) {
         $anzahl++;
         if (mi_t($w[1]) === $w[1]) { $fehlt[] = $w[1]; }
     }
@@ -1719,6 +1821,42 @@ function mi_vorlagen_probe($cfg = null)
  * sie, statt sie zu beanstanden - sonst lehnte das Plugin die Datei ab, die
  * dieselbe Bibliothek zwei Zeilen vorher erzeugt hat.
  */
+/**
+ * Der Zustand der Automatik, so wie der Dienst ihn zuletzt abgelegt hat.
+ *
+ * Liefert (lage, feld, alter):
+ *   'aus'      die Automatik ist nicht eingeschaltet
+ *   'fehlt'    eingeschaltet, aber es gibt noch keine Standdatei -
+ *              der Dienst hat seit dem Einschalten keinen Durchgang gehabt
+ *   'unlesbar' Datei da, aber kein brauchbares JSON
+ *   'alt'      Datei da, aber aelter als drei Takte
+ *   'ok'       frisch
+ *
+ * Die Faelle sind ABSICHTLICH unterscheidbar: "noch nie gelaufen" ist ein
+ * anderer Zustand als "laeuft nicht mehr", und der Anwender muss anderes
+ * tun.
+ */
+function mi_automatik_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    if (mi_cfg($cfg, 'auto_ein', '0') !== '1') {
+        return array('aus', array(), null);
+    }
+    $datei = mi_paths()['automatik'];
+    clearstatcache(true, $datei);
+    if (!is_readable($datei)) {
+        return array('fehlt', array(), null);
+    }
+    $d = json_decode((string) @file_get_contents($datei), true);
+    if (!is_array($d) || !isset($d['ts'])) {
+        return array('unlesbar', array(), null);
+    }
+    $alter = time() - (int) $d['ts'];
+    $takt = (int) mi_cfg($cfg, 'auto_takt', '300');
+    if ($takt < 60) { $takt = 300; }
+    return array($alter > 3 * $takt ? 'alt' : 'ok', $d, $alter);
+}
+
 function mi_sicherung_bauen($cfg = null)
 {
     if ($cfg === null) { $cfg = mi_config_read(); }

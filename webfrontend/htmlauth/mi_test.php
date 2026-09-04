@@ -217,6 +217,48 @@ function mi_pruefungen($cfg)
             : ($vok ? sprintf(mi_t('UI.VORLAGEN_OK'), $vanz)
                     : sprintf(mi_t('UI.VORLAGEN_KAPUTT'), mi_e($vname))));
 
+    // ---- Automatik (ab 4.5.0) ----
+    //
+    // Drei Zeilen, und die beiden letzten sind die wichtigen: ob die
+    // Automatik LAEUFT, sagt noch nicht, ob sie etwas HOERT. Ob das
+    // MQTT-Gateway die Themen der Nachbarplugins an den Broker weitergibt,
+    // laesst sich nur an der Anlage feststellen - deshalb steht hier der
+    // zuletzt empfangene Wert samt Alter und keine Behauptung.
+    list($al, $ad, $aalter) = mi_automatik_lage($cfg);
+    if ($al === 'aus') {
+        $z[] = array(mi_e(mi_t('PRUEF.AUTO_LAEUFT')), 2, mi_t('UI.AUTO_LAGE_AUS'));
+    } elseif ($al === 'ok') {
+        $z[] = array(mi_e(mi_t('PRUEF.AUTO_LAEUFT')), 1,
+            sprintf(mi_t('UI.AUTO_LAEUFT_SEIT'), (int) $aalter,
+                    mi_e((string) $ad['grund'])));
+    } elseif ($al === 'fehlt') {
+        $z[] = array(mi_e(mi_t('PRUEF.AUTO_LAEUFT')), 0, mi_t('UI.AUTO_LAGE_FEHLT'));
+    } elseif ($al === 'alt') {
+        $z[] = array(mi_e(mi_t('PRUEF.AUTO_LAEUFT')), 0,
+            sprintf(mi_t('UI.AUTO_LAGE_ALT'), (int) $aalter));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.AUTO_LAEUFT')), 0, mi_t('UI.AUTO_LAGE_UNLESBAR'));
+    }
+
+    foreach (array(
+        array('auto_thema_regel', 'PRUEF.AUTO_REGEL'),
+        array('auto_thema_pv',    'PRUEF.AUTO_PV')) as $paar) {
+        $thema = mi_cfg($cfg, $paar[0], '');
+        if ($thema === '') {
+            $z[] = array(mi_e(mi_t($paar[1])), 2, mi_t('UI.AUTO_KEIN_THEMA'));
+        } elseif ($al !== 'ok' || !isset($ad['abo']) || !is_array($ad['abo'])) {
+            $z[] = array(mi_e(mi_t($paar[1])), 2,
+                sprintf(mi_t('UI.AUTO_NICHT_MESSBAR'), mi_e($thema)));
+        } elseif (!array_key_exists($thema, $ad['abo'])) {
+            $z[] = array(mi_e(mi_t($paar[1])), 0,
+                sprintf(mi_t('UI.AUTO_NICHTS_EMPFANGEN'), mi_e($thema)));
+        } else {
+            $z[] = array(mi_e(mi_t($paar[1])), 1,
+                sprintf(mi_t('UI.AUTO_EMPFANGEN'), mi_e($thema),
+                        mi_e((string) $ad['abo'][$thema])));
+        }
+    }
+
     return $z;
 }
 

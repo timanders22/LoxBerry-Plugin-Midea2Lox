@@ -209,7 +209,7 @@ netz_zurueck() {
 }
 # Sollsummen: erst die Vorgabe dieser Fassung, dann die der Vorgaenger.
 netz_zurueck "devices.cfg"     "db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-netz_zurueck "midea2lox.cfg"     "1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460"     "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+netz_zurueck "midea2lox.cfg"     "fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9"     "1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460"     "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
 netz_zurueck "mqtt_subscriptions.cfg"     "a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 
 exit 0

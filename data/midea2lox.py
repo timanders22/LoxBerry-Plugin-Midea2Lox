@@ -29,6 +29,8 @@ zwei gleichzeitige refresh() auf DEMSELBEN Geraet einander vertragen.
 import logging
 import sys
 import os
+import threading
+import time
 
 #set path
 cfg_path = 'REPLACELBPCONFIGDIR' #### REPLACE LBPCONFIGDIR ####
@@ -162,6 +164,72 @@ def mi_wort(gruppe, aufzaehlung):
 
 
 # ===========================================================================
+# Abonnierte Werte (ab 4.5.0)
+# ===========================================================================
+#
+# paho liefert on_message im NETZWERKFADEN aus, die Ereignisschleife laeuft
+# daneben. Zwischen beiden liegt genau dieser Speicher: je Thema ein Wert und
+# der Zeitpunkt, zu dem er ankam, unter einem Schloss.
+#
+# Bewusst KEIN run_coroutine_threadsafe. Es sind Zahlen, keine Ablaeufe; wer
+# aus einem fremden Faden eine Koroutine in die Schleife wirft, muss deren
+# Lebensdauer mitverwalten, und dafuer gibt es hier keinen Grund.
+#
+# Der Zeitpunkt ist kein Beiwerk. Ein Preissignal, das seit Stunden nicht
+# nachgekommen ist, ist kein Signal - es ist eine Leiche. Eine Automatik, die
+# darauf weiterlaeuft, waere schlimmer als gar keine.
+
+ABO_SCHLOSS = threading.Lock()
+ABO_WERTE = {}          # Thema -> (roher Text, Zeitpunkt des Eintreffens)
+
+
+def abo_merken(thema, text):
+    with ABO_SCHLOSS:
+        ABO_WERTE[thema] = (text, time.time())
+
+
+def abo_stand():
+    """Eine Abschrift des ganzen Speichers - fuer Anzeige und Protokoll."""
+    with ABO_SCHLOSS:
+        return dict(ABO_WERTE)
+
+
+def abo_holen(thema, hoechstalter):
+    """(Text, Alter) - oder (None, Alter) wenn zu alt, (None, None) wenn nie.
+
+    Die beiden Nein-Faelle sind ABSICHTLICH unterscheidbar: "nie etwas
+    bekommen" ist ein Einrichtungsfehler, "zu alt" ein Betriebsfehler, und
+    der Anwender muss verschiedene Dinge tun.
+    """
+    if not thema:
+        return None, None
+    with ABO_SCHLOSS:
+        eintrag = ABO_WERTE.get(thema)
+    if not eintrag:
+        return None, None
+    text, wann = eintrag
+    alter = time.time() - wann
+    if hoechstalter > 0 and alter > hoechstalter:
+        return None, alter
+    return text, alter
+
+
+def abo_zahl(text):
+    """Aus dem Rohtext eine Zahl - oder None. Wird NICHT zurechtgebogen.
+
+    "1", "1.0", "1,0" und " 1 " ergeben 1.0; "ja", "" und "an" ergeben None.
+    Ein Thema, das Text statt Zahl liefert, ist ein falsch eingerichtetes
+    Thema - und das gehoert gemeldet, nicht geraten.
+    """
+    if text is None:
+        return None
+    try:
+        return float(str(text).strip().replace(',', '.'))
+    except (TypeError, ValueError):
+        return None
+
+
+# ===========================================================================
 # Empfang
 # ===========================================================================
 
@@ -223,12 +291,19 @@ async def start_server():
         asyncio.ensure_future(arbeiter(warteschlange)),
         asyncio.ensure_future(herzschlag()),
     ]
+    if AUTO_EIN:
+        aufgaben.append(asyncio.ensure_future(automatik_schleife()))
+        _LOGGER.info("Automatik eingeschaltet: Takt %d s, Verschiebung %.1f K, "
+                     "Themen %r / %r", AUTO_TAKT, AUTO_VERSCHIEBUNG,
+                     AUTO_THEMA_REGEL, AUTO_THEMA_PV)
+    else:
+        _LOGGER.info("Automatik ist ausgeschaltet.")
     if Abfragetakt > 0:
         aufgaben.append(asyncio.ensure_future(abfragetakt_schleife()))
         _LOGGER.info("Abfragetakt eingeschaltet: alle %d s", Abfragetakt)
     else:
         _LOGGER.info("Abfragetakt ist ausgeschaltet - Werte kommen nur auf "
-                     "Anforderung aus Loxone (<ID>,status).")
+                     "Anforderung aus Loxone (<ID> status).")
 
     try:
         await asyncio.gather(*aufgaben)
@@ -267,6 +342,14 @@ async def arbeiter(warteschlange):
                 continue
             print("Incomming Message from Loxone: ", daten)
             _LOGGER.info("Incomming Message from Loxone: {}".format(daten))
+            # Ein Befehl von aussen sperrt die Automatik zeitweise.
+            #
+            # Die Sperre steht HIER und nicht in send_to_midea(): die
+            # Automatik benutzt dieselbe Funktion, und dort gesetzt wuerde
+            # sie sich bei jedem eigenen Griff selbst aussperren. Eine reine
+            # Statusabfrage sperrt nicht - sie aendert nichts.
+            if AUTO_EIN and len(daten) > 1 and 'status' not in daten:
+                hand_sperren()
             async with GERAETE_SCHLOSS:
                 await send_to_midea(daten)
         except Exception as fehler:
@@ -389,6 +472,292 @@ async def abfragetakt_schleife():
         except Exception as fehler:
             _LOGGER.error("Abfragetakt gescheitert: %s", fehler)
         await asyncio.sleep(Abfragetakt)
+
+
+# ===========================================================================
+# Automatik (ab 4.5.0)
+# ===========================================================================
+#
+# Der Grundsatz, an dem sich alles Weitere ausrichtet:
+#
+#     Die Automatik macht NUR das rueckgaengig, was sie selbst getan hat.
+#
+# Wer ein Geraet einschaltet, das der Anwender eingeschaltet hatte, und es
+# spaeter wieder ausschaltet, hat ihm das Geraet ausgeschaltet. Deshalb
+# merkt sich _AUTO_STAND je Geraet, was die Automatik VORGEFUNDEN hat, und
+# stellt genau das wieder her - nicht einen gerechneten Wert.
+
+_AUTO_STAND = {}        # Geraetenummer -> {'soll', 'ein', 'aktiv'}
+_AUTO_HAND_BIS = 0.0    # Zeitpunkt, bis zu dem der Handbetrieb sperrt
+_AUTO_LETZTE_MELDUNG = ''
+
+
+def automatik_stand_schreiben(traegt, klartext, gesperrt, wieviele):
+    """Denselben Zustand als Datei - fuer die Oberflaeche.
+
+    Unteilbar ueber eine Nebendatei: die Oberflaeche liest waehrenddessen,
+    und eine halb geschriebene JSON-Datei waere kein Zustand, sondern ein
+    Fehler. Derselbe Weg wie beim Lebenszeichen.
+    """
+    try:
+        os.makedirs(data_path, exist_ok=True)
+        ziel = os.path.join(data_path, 'automatik.json')
+        tmp = ziel + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'ts': int(time.time()),
+                       'aktiv': 1 if traegt else 0,
+                       'grund': klartext,
+                       'gesperrt': int(gesperrt),
+                       'geraete': int(wieviele),
+                       'thema_regel': AUTO_THEMA_REGEL,
+                       'thema_pv': AUTO_THEMA_PV,
+                       'abo': {k: v[0] for k, v in abo_stand().items()}}, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.debug("Automatikstand nicht schreibbar: %s", fehler)
+
+
+def hand_sperren():
+    """Ein Befehl von aussen setzt die Automatik zeitweise aus."""
+    global _AUTO_HAND_BIS
+    if AUTO_SPERRZEIT <= 0:
+        return
+    _AUTO_HAND_BIS = time.time() + AUTO_SPERRZEIT
+    _LOGGER.info("Handbetrieb: die Automatik ruht %d Minuten.",
+                 int(AUTO_SPERRZEIT / 60))
+
+
+def hand_sperre_rest():
+    rest = _AUTO_HAND_BIS - time.time()
+    return int(rest) if rest > 0 else 0
+
+
+def auto_signal():
+    """(traegt, Quelle, Klartext) - warum die Automatik greift oder nicht.
+
+    Die beiden Quellen sind ein ODER: guenstiger Strom ODER eigener
+    Ueberschuss. Beide sind einzeln abschaltbar, indem man ihr Thema
+    leer laesst.
+    """
+    gruende = []
+    traegt = False
+
+    if AUTO_THEMA_REGEL:
+        text, alter = abo_holen(AUTO_THEMA_REGEL, AUTO_MAX_ALTER)
+        zahl = abo_zahl(text)
+        if text is None and alter is None:
+            gruende.append('Regel: noch nichts empfangen')
+        elif text is None:
+            gruende.append('Regel: seit %d s nichts mehr (Grenze %d s)'
+                           % (int(alter or 0), AUTO_MAX_ALTER))
+        elif zahl is None:
+            gruende.append('Regel: %r ist keine Zahl' % text[:20])
+        elif zahl >= 1:
+            traegt = True
+            gruende.append('Regel aktiv')
+        else:
+            gruende.append('Regel aus')
+
+    if AUTO_THEMA_PV:
+        text, alter = abo_holen(AUTO_THEMA_PV, AUTO_MAX_ALTER)
+        zahl = abo_zahl(text)
+        if text is None and alter is None:
+            gruende.append('PV: noch nichts empfangen')
+        elif text is None:
+            gruende.append('PV: seit %d s nichts mehr (Grenze %d s)'
+                           % (int(alter or 0), AUTO_MAX_ALTER))
+        elif zahl is None:
+            gruende.append('PV: %r ist keine Zahl' % text[:20])
+        elif zahl >= AUTO_PV_AB:
+            traegt = True
+            gruende.append('PV %d W >= %d W' % (int(zahl), AUTO_PV_AB))
+        else:
+            gruende.append('PV %d W < %d W' % (int(zahl), AUTO_PV_AB))
+
+    return traegt, ', '.join(gruende) if gruende else 'kein Thema eingetragen'
+
+
+def auto_richtung(device):
+    """Welches Vorzeichen die Verschiebung in dieser Betriebsart hat.
+
+    Kuehlen heisst: guenstiger Strom -> TIEFER stellen, also vorkuehlen.
+    Heizen heisst:  guenstiger Strom -> HOEHER stellen, also vorwaermen.
+
+    Ein Vorzeichen, das fuer die Haelfte der Betriebsarten falsch ist, waere
+    genau die Sorte Fehler, die man erst im Winter merkt. Betriebsarten ohne
+    sinnvollen Sollwert liefern 0 und werden uebersprungen.
+    """
+    try:
+        name = getattr(device.operational_mode, 'name', str(device.operational_mode))
+    except Exception:
+        return 0
+    name = str(name).lower()
+    if name in ('cool', 'dry'):
+        return -1
+    if name == 'heat':
+        return +1
+    return 0
+
+
+def auto_geraete_liste():
+    ids = geraete_ids_aus_datei()
+    if AUTO_GERAETE:
+        ids = [x for x in ids if x in AUTO_GERAETE]
+    return ids
+
+
+def auto_device(gid):
+    for d in device_list:
+        try:
+            if int(gid) == d.id:
+                return d
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+async def auto_anlegen(gid, device):
+    """Greifen: Sollwert verschieben, auf Wunsch Turbo und Einschalten."""
+    stand = _AUTO_STAND.get(gid)
+    if stand and stand.get('aktiv'):
+        return False
+    # Den Ist-Zustand FRISCH holen, bevor wir ihn uns merken.
+    #
+    # Was hier gemerkt wird, stellt auto_loesen() spaeter genau so wieder
+    # her. Aus dem zwischengespeicherten Objekt gelesen waere das der Stand
+    # der letzten Abfrage - wer inzwischen an der Fernbedienung den Sollwert
+    # verstellt hat, bekaeme beim Loslassen den alten Wert zurueck.
+    #
+    # Der Durchgang faellt nur beim ZUGREIFEN an: steht schon eine
+    # Verschiebung, ist die Funktion oben bereits zurueckgekehrt.
+    try:
+        await send_to_midea([gid, 'status'])
+    except Exception as fehler:
+        _LOGGER.warning("Automatik: %s liess sich nicht abfragen (%s) - "
+                        "es wird nicht zugegriffen.", gid, fehler)
+        return False
+    frisch = auto_device(gid)
+    if frisch is not None:
+        device = frisch
+    richtung = auto_richtung(device)
+    if richtung == 0:
+        _LOGGER.debug("Automatik: %s ist in einer Betriebsart ohne Sollwert.", gid)
+        return False
+    try:
+        vorher_soll = float(device.target_temperature)
+    except (TypeError, ValueError):
+        _LOGGER.warning("Automatik: %s nennt keinen Sollwert - uebersprungen.", gid)
+        return False
+    vorher_ein = bool(getattr(device, 'power_state', False))
+
+    neu = vorher_soll + richtung * AUTO_VERSCHIEBUNG
+    if neu < AUTO_SOLL_MIN:
+        neu = float(AUTO_SOLL_MIN)
+    if neu > AUTO_SOLL_MAX:
+        neu = float(AUTO_SOLL_MAX)
+    if abs(neu - vorher_soll) < 0.05 and not (AUTO_SCHALTEN and not vorher_ein):
+        _LOGGER.debug("Automatik: %s liegt schon an der Grenze - nichts zu tun.", gid)
+        return False
+
+    _AUTO_STAND[gid] = {'soll': vorher_soll, 'ein': vorher_ein, 'aktiv': True}
+    _LOGGER.info("Automatik greift bei %s: Sollwert %.1f -> %.1f", gid,
+                 vorher_soll, neu)
+    if AUTO_SCHALTEN and not vorher_ein:
+        await send_to_midea([gid, 'power.True'])
+    await send_to_midea([gid, 'temp.%.1f' % neu])
+    if AUTO_TURBO:
+        await send_to_midea([gid, 'turbo.True'])
+    return True
+
+
+async def auto_loesen(gid, wegen_hand=False):
+    """Loslassen: den vorgefundenen Zustand wiederherstellen.
+
+    wegen_hand=True heisst: es laesst nicht das Signal nach, sondern der
+    ANWENDER hat gerade einen Befehl geschickt. Dann wird der Sollwert
+    zurueckgestellt - die Verschiebung war unsere -, aber NICHT geschaltet.
+
+    Warum diese Unterscheidung sein muss, ist am Pruefstand aufgefallen:
+    die Automatik hatte ein Geraet eingeschaltet, der Anwender schickte
+    power.True, das setzte die Handsperre, die Automatik liess los - und
+    schaltete das Geraet aus, Sekunden nachdem er es eingeschaltet hatte.
+    Sie arbeitete gegen den Menschen, der danebensteht. Bleibt das Signal
+    dagegen einfach aus, ist niemand da, der etwas anderes wollte; dann ist
+    das Ausschalten richtig.
+    """
+    stand = _AUTO_STAND.get(gid)
+    if not stand or not stand.get('aktiv'):
+        return False
+    _LOGGER.info("Automatik laesst %s los%s: Sollwert zurueck auf %.1f", gid,
+                 " (Handbetrieb - es wird nicht geschaltet)" if wegen_hand else "",
+                 stand['soll'])
+    if AUTO_TURBO:
+        await send_to_midea([gid, 'turbo.False'])
+    await send_to_midea([gid, 'temp.%.1f' % stand['soll']])
+    # AUSSCHALTEN NUR, WENN DIE AUTOMATIK SELBST EINGESCHALTET HAT - UND
+    # NIEMAND VON HAND DAZWISCHENGEGANGEN IST.
+    if AUTO_SCHALTEN and not stand.get('ein') and not wegen_hand:
+        await send_to_midea([gid, 'power.False'])
+    stand['aktiv'] = False
+    return True
+
+
+async def automatik_schleife():
+    """Der Takt der Automatik.
+
+    Sie faellt IMMER auf den vorgefundenen Zustand zurueck, wenn das Signal
+    ausbleibt, veraltet oder unlesbar ist - "im Zweifel loslassen" ist die
+    einzige Voreinstellung, die niemandem die Wohnung auskuehlt.
+    """
+    global _AUTO_LETZTE_MELDUNG
+    await asyncio.sleep(min(AUTO_TAKT, 30))
+    while True:
+        try:
+            traegt, klartext = auto_signal()
+            rest = hand_sperre_rest()
+            if rest > 0:
+                traegt = False
+                klartext = 'Handbetrieb, noch %d min' % int(rest / 60 + 0.5)
+            if klartext != _AUTO_LETZTE_MELDUNG:
+                _LOGGER.info("Automatik: %s", klartext)
+                _AUTO_LETZTE_MELDUNG = klartext
+
+            for gid in auto_geraete_liste():
+                stand = _AUTO_STAND.get(gid)
+                aktiv = bool(stand and stand.get('aktiv'))
+                if traegt and not aktiv:
+                    device = auto_device(gid)
+                    if device is None:
+                        # Das Geraet ist dem Dienst noch nie begegnet. Eine
+                        # Statusabfrage legt es an - derselbe Weg, den auch
+                        # Loxone geht.
+                        async with GERAETE_SCHLOSS:
+                            await send_to_midea([gid, 'status'])
+                        device = auto_device(gid)
+                        if device is None:
+                            continue
+                    async with GERAETE_SCHLOSS:
+                        await auto_anlegen(gid, device)
+                elif aktiv and not traegt:
+                    # Zum Loslassen wird das Geraeteobjekt nicht gebraucht.
+                    async with GERAETE_SCHLOSS:
+                        await auto_loesen(gid, wegen_hand=(rest > 0))
+                # Sonst: nichts zu tun - und dann wird auch nichts angefasst.
+                # Ein Takt, der alle fuenf Minuten jedes Klimageraet abfragt,
+                # obwohl nichts ansteht, ist kein Beiwerk: er haelt die
+                # Verbindung dauerhaft warm und steht der Bedienung im Weg.
+
+            wieviele = len([g for g, s in _AUTO_STAND.items() if s.get('aktiv')])
+            automatik_stand_schreiben(traegt, klartext, rest, wieviele)
+            await veroeffentlichen([
+                ('automatik/aktiv', '1' if traegt else '0'),
+                ('automatik/grund', klartext),
+                ('automatik/gesperrt', str(rest)),
+                ('automatik/geraete', str(wieviele)),
+            ])
+        except Exception as fehler:
+            _LOGGER.error("Automatik gescheitert: %s", fehler, exc_info=True)
+        await asyncio.sleep(AUTO_TAKT)
 
 
 def geraete_ids_aus_datei():
@@ -1131,6 +1500,22 @@ def on_connect(client, userdata, flags, rc, properties=None):
         publish = client.publish(MQTT_PRAEFIX + '/connection/status', 'connected',
                                  qos=2, retain=True)
         _LOGGER.debug("Publishing: MsgNum:%s: connection/status = connected", publish.mid)
+        # Die Abonnements gehoeren HIERHER, nicht neben den Verbindungsaufbau.
+        #
+        # Ein subscribe(), das einmal beim Start steht, ist nach dem ersten
+        # Abriss weg: der Broker vergisst die Abonnements einer getrennten
+        # Sitzung (clean session). Am 31.08.2026 ist gemessen worden, dass
+        # dieser Dienst nach einem Abriss wirklich neu verbindet - dann muss
+        # er auch neu abonnieren, sonst laeuft die Automatik ab dem ersten
+        # Netzhaenger blind weiter.
+        for _thema in (AUTO_THEMA_REGEL, AUTO_THEMA_PV):
+            if _thema:
+                try:
+                    client.subscribe(_thema, qos=0)
+                    _LOGGER.info("MQTT: abonniert %s", _thema)
+                except Exception as fehler:
+                    _LOGGER.error("MQTT: %s liess sich nicht abonnieren: %s",
+                                  _thema, fehler)
     elif rc == 1:
         _LOGGER.error("MQTT: Falsche Protokollversion")
     elif rc == 2:
@@ -1143,6 +1528,21 @@ def on_connect(client, userdata, flags, rc, properties=None):
         _LOGGER.error("MQTT: Nicht autorisiert")
     else:
         _LOGGER.error("MQTT: Ungueltiger Rueckgabecode %s", rc)
+
+
+def on_message(client, userdata, nachricht):
+    """Ein abonnierter Wert ist eingetroffen.
+
+    Laeuft im Netzwerkfaden von paho. Hier wird deshalb NICHTS entschieden
+    und nichts an ein Geraet geschickt - der Wert wird nur abgelegt. Was
+    daraus folgt, entscheidet automatik_schleife() in der Ereignisschleife.
+    """
+    try:
+        text = nachricht.payload.decode('utf-8', 'replace').strip()
+    except Exception:
+        return
+    abo_merken(nachricht.topic, text)
+    _LOGGER.debug("MQTT empfangen: %s = %s", nachricht.topic, text[:40])
 
 
 def on_disconnect(client, userdata, rc, properties=None, reason=None):
@@ -1274,6 +1674,44 @@ if _fehlt:
     print('Midea2Lox: Konfiguration unvollstaendig (%s)' % ', '.join(_fehlt))
     sys.exit(1)
 
+# --- Automatik (ab 4.5.0) ---------------------------------------------------
+#
+# AB WERK AUS. Eine Funktion, die von sich aus in ein Geraet greift, wird
+# nicht durch ein Update eingeschaltet - der Anwender schaltet sie ein,
+# nachdem er die Themen eingetragen hat.
+
+
+def _cfg_text(schluessel, vorgabe=''):
+    try:
+        return str(cfg.get('default', schluessel)).strip()
+    except Exception:
+        return vorgabe
+
+
+AUTO_EIN = _cfg_zahl('auto_ein', 0, 0, 1) == 1
+AUTO_THEMA_REGEL = _cfg_text('auto_thema_regel')
+AUTO_THEMA_PV = _cfg_text('auto_thema_pv')
+AUTO_PV_AB = _cfg_zahl('auto_pv_ab', 1500, 0, 100000)
+AUTO_VERSCHIEBUNG = _cfg_zahl('auto_verschiebung', 20, 0, 100) / 10.0
+AUTO_SOLL_MIN = _cfg_zahl('auto_soll_min', 16, 5, 35)
+AUTO_SOLL_MAX = _cfg_zahl('auto_soll_max', 30, 5, 35)
+AUTO_MAX_ALTER = _cfg_zahl('auto_max_alter', 900, 60, 86400)
+AUTO_SPERRZEIT = _cfg_zahl('auto_sperrzeit', 120, 0, 1440) * 60
+AUTO_TAKT = _cfg_zahl('auto_takt', 300, 60, 3600)
+AUTO_TURBO = _cfg_zahl('auto_turbo', 0, 0, 1) == 1
+AUTO_SCHALTEN = _cfg_zahl('auto_schalten', 0, 0, 1) == 1
+AUTO_GERAETE = [x.strip() for x in _cfg_text('auto_geraete').split(',') if x.strip()]
+
+if AUTO_SOLL_MIN > AUTO_SOLL_MAX:
+    _LOGGER.warning("auto_soll_min (%s) ist groesser als auto_soll_max (%s) - "
+                    "die Automatik bleibt AUS.", AUTO_SOLL_MIN, AUTO_SOLL_MAX)
+    AUTO_EIN = False
+
+if AUTO_EIN and not AUTO_THEMA_REGEL and not AUTO_THEMA_PV:
+    _LOGGER.warning("Die Automatik ist eingeschaltet, aber es ist KEIN Thema "
+                    "eingetragen - sie kann nichts entscheiden und bleibt aus.")
+    AUTO_EIN = False
+
 UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
 # Groesste zulaessige Laenge eines Datagramms (siehe datagram_received).
 # Der laengste zulaessige Befehl - Nummer, Schluessel, Token, IP und acht
@@ -1370,6 +1808,7 @@ try: # check if MQTTgateway is installed or not and set MQTT Client settings
     client.username_pw_set(MQTTuser, MQTTpass)
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
+    client.on_message = on_message
     client.will_set(MQTT_PRAEFIX + '/connection/status', 'disconnected', qos=2, retain=True)
     if LoxberryVersion <= 2:
         _LOGGER.info('found MQTT Gateway Plugin - publish over MQTT except on Midea2Lox support_mode')

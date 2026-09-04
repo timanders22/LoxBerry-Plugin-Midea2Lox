@@ -10,6 +10,80 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Was 4.5.0 bringt
+
+**Das Plugin hört jetzt zu.** Bis 4.4.0 hat der Dienst ausschließlich
+gesendet; neu ist ein MQTT-Abo und daraus eine Automatik, die die
+Solltemperatur verschiebt, wenn der Strom gerade günstig ist oder die
+eigene Anlage mehr liefert, als das Haus braucht.
+
+### Es holt die Preise nicht selbst — mit Absicht
+
+Das Abrufen von Spotpreisen ist im LoxBerry-Bestand bereits dreimal gebaut,
+geprüft und veröffentlicht: **Spotpreis-aWATTar**, **Spotpreis-Tibber**
+und **Spotpreis-Octopus**. Diese Plugins bringen Zugangsdaten, Morgenpreise,
+Rangfolge, Zeitfenster und eine vollständige Regelmaschine mit und
+veröffentlichen alles über MQTT. Den PV-Überschuss kennt die
+**Einspeisebremse** und veröffentlicht ihn ebenso.
+
+Ein vierter Abruf im Midea-Plugin wäre eine zweite Stelle zum Pflegen, ein
+zweiter Satz Zugangsdaten und eine zweite Abrufgrenze. Midea2Lox abonniert
+deshalb, was ohnehin auf dem Broker liegt:
+
+| Feld | übliches Thema |
+|---|---|
+| Preissignal | `spot_awattar/regel/1/aktiv` oder `tibber/regel/1/aktiv` |
+| PV-Überschuss | `einspeisebremse/ueberschuss` (in Watt) |
+
+Beide Felder sind freiwillig. Ein leeres Feld heißt: diese Quelle wird
+nicht benutzt. Die Automatik greift, sobald **eine** von beiden zutrifft.
+
+### Was sie am Gerät tut
+
+Die Verschiebung wirkt **je nach Betriebsart** in die sinnvolle Richtung:
+beim Kühlen wird der Sollwert gesenkt (vorkühlen), beim Heizen angehoben
+(vorwärmen). Betriebsarten ohne Sollwert werden übersprungen. Ober- und
+Untergrenze sind einstellbar; darüber hinaus klemmt der Dienst ohnehin auf
+die Grenzen, die das Gerät selbst nennt.
+
+Auf Wunsch schaltet die Automatik zusätzlich Turbo ein oder das Gerät
+selbst an. Beides steht ab Werk auf **aus**.
+
+### Die drei Zusagen, auf die es ankommt
+
+1. **Sie macht nur rückgängig, was sie selbst getan hat.** Ein Gerät,
+   das Sie eingeschaltet vorgefunden haben, schaltet sie nicht aus. Gemessen.
+2. **Handbetrieb hat Vorrang — und wird nicht rückabgewickelt.** Jeder
+   Befehl aus Loxone oder vom Reiter Test setzt die Automatik für die
+   eingestellte Sperrzeit aus; eine reine Statusabfrage nicht. Dabei stellt
+   sie den Sollwert zurück, **schaltet aber nicht**: ein Gerät, das Sie
+   gerade eingeschaltet haben, würde sie sonst Sekunden später wieder
+   ausschalten. Bleibt das Signal dagegen einfach aus, ist niemand da, der
+   etwas anderes wollte — dann schaltet sie zurück. Gemessen.
+3. **Im Zweifel lässt sie los.** Kommt ein Signal nicht mehr nach, ist es
+   unlesbar oder älter als die eingestellte Höchstdauer, gilt es als nicht
+   vorhanden, und der vorgefundene Zustand wird wiederhergestellt. Gemessen.
+
+### Ab Werk aus
+
+`auto_ein` steht auf 0. Eine Funktion, die von sich aus in ein Klimagerät
+greift, wird nicht durch ein Update eingeschaltet. Tragen Sie zuerst die
+Themen ein, sehen Sie im Reiter **Test** nach, ob wirklich etwas ankommt —
+dort stehen drei neue Zeilen dafür —, und schalten Sie sie erst dann ein.
+
+### Was das Plugin selbst veröffentlicht
+
+Vier neue Themen, damit in Loxone sichtbar ist, was die Automatik tut:
+`automatik/aktiv`, `automatik/gesperrt`, `automatik/geraete` und
+`automatik/grund` (Klartext). Die ersten drei stehen auch in der erzeugten
+Loxone-Vorlage für die virtuellen Eingänge; `automatik/grund` ist ein
+Satz und bekommt deshalb keinen virtuellen Eingang.
+
+### Nebenbei behoben
+
+Eine Protokollzeile nannte die Statusabfrage noch mit Komma
+(`<ID>,status`) — ein Überbleibsel des Trennzeichen-Befunds aus 4.4.0.
+
 ## Was 4.4.0 bringt
 
 Diese Fassung behebt Befunde einer vollständigen Durchsicht. Zwei davon

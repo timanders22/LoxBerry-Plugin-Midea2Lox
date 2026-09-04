@@ -59,7 +59,7 @@ if ($mi_wache !== '') {
  * zurueck auf Einstellungen. Die Zeile darunter, die Reiterleiste im HTML
  * und die id der Flaechen muessen deckungsgleich bleiben; der Reiter Test
  * zaehlt das nach (mi_smactive_probe). */
-$mi_muster = '/^tab-(settings|mqtt|loxone|test|log)$/';
+$mi_muster = '/^tab-(settings|mqtt|loxone|automatik|test|log)$/';
 $mi_wunsch = isset($_POST['activetab']) && is_string($_POST['activetab'])
     ? $_POST['activetab']
     : (isset($_GET['form']) && is_string($_GET['form']) ? 'tab-' . $_GET['form'] : '');
@@ -80,7 +80,7 @@ $mi_test_text  = '';
  * Fail closed: bei mehr als einer Aktion wird KEINE ausgefuehrt. */
 $mi_aktionen = array('speichern', 'speichern_suchen', 'mqtt_speichern',
                      'bez_speichern', 'dienst', 'test', 'schalten', 'vorlage',
-                     'mi_sichern', 'mi_zurueck');
+                     'mi_sichern', 'mi_zurueck', 'auto_speichern');
 $mi_gesetzt = array();
 foreach ($mi_aktionen as $mi_a) {
     if (isset($_POST[$mi_a])) { $mi_gesetzt[] = $mi_a; }
@@ -267,6 +267,58 @@ if (isset($_POST['mqtt_speichern'])) {
         }
     }
     $mi_tab = 'tab-mqtt';
+}
+
+// ---------- Die Automatik speichern ----------
+if (isset($_POST['auto_speichern'])) {
+    $mi_neu_auto = $mi_cfg;
+    /* Jedes Feld durch mi_wert_pruefen(), und Beanstandungen werden
+     * GESAMMELT, nicht ueberschrieben - sonst berichtigt der Anwender einen
+     * Fehler nach dem anderen statt alle auf einmal. */
+    foreach (array('auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab',
+                   'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',
+                   'auto_turbo', 'auto_schalten', 'auto_sperrzeit',
+                   'auto_max_alter', 'auto_takt', 'auto_geraete') as $mi_k) {
+        if (!isset($_POST[$mi_k])) { continue; }
+        if (!is_string($_POST[$mi_k])) {
+            $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($mi_k));
+            continue;
+        }
+        $mi_w = trim($_POST[$mi_k]);
+        $mi_f = mi_wert_pruefen($mi_k, $mi_w);
+        if ($mi_f !== '') {
+            $mi_fehler[] = $mi_f;
+            continue;
+        }
+        $mi_neu_auto[$mi_k] = $mi_w;
+    }
+    /* Zwei Werte, die einzeln stimmen und zusammen nicht: eine Untergrenze
+     * ueber der Obergrenze. Der Dienst faengt das ab und bleibt aus - hier
+     * gehoert es aber schon gesagt, statt es erst im Protokoll zu finden. */
+    if (!$mi_fehler
+        && (int) $mi_neu_auto['auto_soll_min'] > (int) $mi_neu_auto['auto_soll_max']) {
+        $mi_fehler[] = mi_t('UI.PRUEF_SOLL_VERDREHT');
+    }
+    /* Eingeschaltet ohne ein einziges Thema waere ein Schalter ohne Wirkung. */
+    if (!$mi_fehler && $mi_neu_auto['auto_ein'] === '1'
+        && $mi_neu_auto['auto_thema_regel'] === ''
+        && $mi_neu_auto['auto_thema_pv'] === '') {
+        $mi_fehler[] = mi_t('UI.PRUEF_AUTO_OHNE_THEMA');
+    }
+    if (!$mi_fehler) {
+        if (!mi_config_write($mi_neu_auto)) {
+            $mi_fehler[] = mi_t('UI.CFG_SCHREIBFEHLER');
+        } else {
+            $mi_cfg = mi_config_read();
+            // Der Dienst liest die Automatik NUR beim Start - ohne Neustart
+            // gilt weiter, was vorher eingestellt war.
+            $mi_was_auto = mi_dienst('restart');
+            $mi_meldung = ($mi_was_auto === '')
+                ? mi_t('UI.AUTO_GESPEICHERT')
+                : mi_t('UI.AUTO_GESPEICHERT_OHNE_DIENST');
+        }
+    }
+    $mi_tab = 'tab-automatik';
 }
 
 // ---------- Bezeichnungen der Geraete speichern ----------
@@ -572,6 +624,12 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-scheibe { width: 12px; height: 12px; border-radius: 50%; display: inline-block;
   margin-right: 6px; vertical-align: -1px; }
 .sm-gruen { background: #6dac20; } .sm-rot { background: #c62828; } .sm-grau { background: #9e9e9e; }
+/* Statuskacheln - woertlich aus VORLAGE_hausstandard.css.html. In dieser
+   Formatierung ist das <b> die grosse gruene Wertzeile, NICHT die
+   Beschriftung. */
+.sm-kacheln { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.sm-kachel { border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; min-width: 130px; }
+.sm-kachel b { display: block; font-size: 1.35em; color: #33691e; }
 </style>
 
 <div class="sm-wrap">
@@ -610,6 +668,8 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
      href="index.php?form=mqtt"><?php echo mi_te('COMMON.LABEL_MQTT'); ?></a>
   <a class="sm-tab<?php echo $mi_tab === 'tab-loxone' ? ' sm-active' : ''; ?>" data-ziel="tab-loxone"
      href="index.php?form=loxone"><?php echo mi_te('COMMON.LABEL_LOXONE'); ?></a>
+  <a class="sm-tab<?php echo $mi_tab === 'tab-automatik' ? ' sm-active' : ''; ?>" data-ziel="tab-automatik"
+     href="index.php?form=automatik"><?php echo mi_te('COMMON.LABEL_AUTOMATIK'); ?></a>
   <a class="sm-tab<?php echo $mi_tab === 'tab-test' ? ' sm-active' : ''; ?>" data-ziel="tab-test"
      href="index.php?form=test"><?php echo mi_te('COMMON.LABEL_TEST'); ?></a>
   <a class="sm-tab<?php echo $mi_tab === 'tab-log' ? ' sm-active' : ''; ?>" data-ziel="tab-log"
@@ -895,7 +955,7 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <div class="sm-rollen">
 <table class="sm-tbl">
 <tr><th style="width:46%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
-<?php foreach (mi_status_werte() as $wert => $info) { ?>
+<?php foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $wert => $info) { ?>
 <tr><td class="sm-mono"><?php echo mi_e($mi_topic . '/' . $wert); ?></td>
     <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
@@ -1023,6 +1083,137 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT7'); ?></b><br><br>
 <?php echo mi_t('UI.SCHRITT7_TEXT'); ?>
 </div>
+</div>
+
+<!-- ============================== Automatik =============================== -->
+<div class="sm-pane<?php echo $mi_tab === 'tab-automatik' ? ' sm-active' : ''; ?>" id="tab-automatik">
+
+<div class="sm-alert sm-info"><?php echo mi_t('UI.AUTO_EINLEITUNG'); ?></div>
+
+<?php
+list($mi_al, $mi_ad, $mi_aalter) = mi_automatik_lage($mi_cfg);
+$mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
+                   'alt' => 'sm-rot', 'unlesbar' => 'sm-rot');
+?>
+<div class="sm-kacheln">
+  <div class="sm-kachel">
+    <b><span class="sm-scheibe <?php echo $mi_apunkt[$mi_al]; ?>"></span><?php
+      echo mi_te('UI.AUTO_LAGE_' . strtoupper($mi_al)); ?></b>
+    <?php echo mi_te('UI.AUTO_K_LAGE'); ?>
+  </div>
+  <div class="sm-kachel">
+    <b><?php echo $mi_al === 'ok' ? (int) $mi_ad['geraete'] : '&mdash;'; ?></b>
+    <?php echo mi_te('UI.AUTO_K_GERAETE'); ?>
+  </div>
+  <div class="sm-kachel" style="min-width: 260px;">
+    <b style="font-size: 1em;"><?php echo $mi_al === 'ok' && isset($mi_ad['grund'])
+        ? mi_e($mi_ad['grund']) : '&mdash;'; ?></b>
+    <?php echo mi_te('UI.AUTO_K_GRUND'); ?>
+  </div>
+</div>
+
+<form method="post" action="index.php">
+<input data-role="none" type="hidden" name="fmt" value="<?php echo mi_e(mi_formtoken()); ?>">
+<input data-role="none" type="hidden" name="activetab" value="tab-automatik">
+
+<div class="sm-step">
+<h3><?php echo mi_te('UI.AUTO_S1'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.AUTO_S1_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><td><?php echo mi_te('UI.AUTO_F_EIN'); ?></td>
+    <td><select data-role="none" name="auto_ein">
+      <option value="0"<?php echo mi_cfg($mi_cfg, 'auto_ein', '0') === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.AUS'); ?></option>
+      <option value="1"<?php echo mi_cfg($mi_cfg, 'auto_ein', '0') === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.EIN'); ?></option>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_THEMA_REGEL'); ?></td>
+    <td><input data-role="none" type="text" name="auto_thema_regel" size="42"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_thema_regel', '')); ?>"
+        placeholder="spot_awattar/regel/1/aktiv"></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_THEMA_PV'); ?></td>
+    <td><input data-role="none" type="text" name="auto_thema_pv" size="42"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_thema_pv', '')); ?>"
+        placeholder="einspeisebremse/ueberschuss"></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_PV_AB'); ?></td>
+    <td><input data-role="none" type="text" name="auto_pv_ab" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_pv_ab', '1500')); ?>"> W</td></tr>
+</table>
+<p class="sm-small"><?php echo mi_t('UI.AUTO_S1_HINWEIS'); ?></p>
+</div>
+
+<div class="sm-step">
+<h3><?php echo mi_te('UI.AUTO_S2'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.AUTO_S2_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><td><?php echo mi_te('UI.AUTO_F_VERSCHIEBUNG'); ?></td>
+    <td><input data-role="none" type="text" name="auto_verschiebung" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_verschiebung', '20')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_F_VERSCHIEBUNG_EINHEIT'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_SOLL_MIN'); ?></td>
+    <td><input data-role="none" type="text" name="auto_soll_min" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_soll_min', '16')); ?>"> &deg;C</td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_SOLL_MAX'); ?></td>
+    <td><input data-role="none" type="text" name="auto_soll_max" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_soll_max', '30')); ?>"> &deg;C</td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_TURBO'); ?></td>
+    <td><select data-role="none" name="auto_turbo">
+      <option value="0"<?php echo mi_cfg($mi_cfg, 'auto_turbo', '0') === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.NEIN'); ?></option>
+      <option value="1"<?php echo mi_cfg($mi_cfg, 'auto_turbo', '0') === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.JA'); ?></option>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_SCHALTEN'); ?></td>
+    <td><select data-role="none" name="auto_schalten">
+      <option value="0"<?php echo mi_cfg($mi_cfg, 'auto_schalten', '0') === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.NEIN'); ?></option>
+      <option value="1"<?php echo mi_cfg($mi_cfg, 'auto_schalten', '0') === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.JA'); ?></option>
+    </select></td></tr>
+</table>
+<div class="sm-alert sm-warn"><?php echo mi_t('UI.AUTO_S2_WARNUNG'); ?></div>
+</div>
+
+<div class="sm-step">
+<h3><?php echo mi_te('UI.AUTO_S3'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.AUTO_S3_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><td><?php echo mi_te('UI.AUTO_F_SPERRZEIT'); ?></td>
+    <td><input data-role="none" type="text" name="auto_sperrzeit" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_sperrzeit', '120')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_MINUTEN'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_MAX_ALTER'); ?></td>
+    <td><input data-role="none" type="text" name="auto_max_alter" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_max_alter', '900')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_SEKUNDEN'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_TAKT'); ?></td>
+    <td><input data-role="none" type="text" name="auto_takt" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_takt', '300')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_SEKUNDEN'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.AUTO_F_GERAETE'); ?></td>
+    <td><input data-role="none" type="text" name="auto_geraete" size="42"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'auto_geraete', '')); ?>"
+        placeholder="<?php echo mi_e(mi_t('UI.AUTO_F_GERAETE_LEER')); ?>"></td></tr>
+</table>
+</div>
+
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
+</div>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="auto_speichern" value="1"><?php echo mi_te('UI.AUTO_SPEICHERN'); ?></button>
+</div>
+</form>
+
+<div class="sm-step">
+<h3><?php echo mi_te('UI.AUTO_S4'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.AUTO_S4_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><th><?php echo mi_te('UI.AUTO_TH_THEMA'); ?></th><th><?php echo mi_te('UI.AUTO_TH_BEDEUTUNG'); ?></th></tr>
+<?php /* AUS DERSELBEN QUELLE wie der Reiter MQTT und die Loxone-Vorlage.
+         Eine zweite, von Hand gepflegte Liste waere eine zweite Wahrheit -
+         und die laeuft frueher oder spaeter auseinander. */
+foreach (mi_automatik_werte() as $mi_t1 => $mi_t2) { ?>
+<tr><td class="sm-mono"><?php echo mi_e(mi_mqtt_topic($mi_cfg) . '/' . $mi_t1); ?></td>
+    <td><?php echo mi_te($mi_t2[1]); ?></td></tr>
+<?php } ?>
+</table>
+</div>
+
 </div>
 
 <!-- ================================= Test ================================= -->
