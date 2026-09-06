@@ -1545,18 +1545,23 @@ def on_message(client, userdata, nachricht):
     _LOGGER.debug("MQTT empfangen: %s = %s", nachricht.topic, text[:40])
 
 
-def on_disconnect(client, userdata, rc, properties=None, reason=None):
+def on_disconnect(client, userdata, *rest):
     """Beim Trennen.
 
-    Die Signatur nimmt jetzt beide Formen an. paho 1.x ruft
-    on_disconnect(client, userdata, rc), paho 2.x mit VERSION2 ruft mit fuenf
-    Argumenten. Bis 4.2.12 standen hier VIER Pflichtparameter - das passt zu
-    KEINER von beiden, und beim Trennen haette es einen TypeError im
-    Netzwerkfaden gegeben. Praktisch faengt der letzte Wille den Fall ohnehin
-    ab; deshalb war es nie aufgefallen.
+    paho ruft hier VERSCHIEDEN, am Geraet an 2.1.0 gemessen (06.09.2026):
+    VERSION1 mit drei Argumenten (client, userdata, rc), VERSION2 mit fuenf
+    (client, userdata, DisconnectFlags, ReasonCode, Properties). Die
+    Argumente VERSCHIEBEN sich also - das dritte ist unter VERSION2 nicht
+    der Code, sondern die Flags.
+
+    Bis 4.2.12 standen hier VIER Pflichtparameter - das passte zu KEINER von
+    beiden. Danach vier mit Vorgabewerten; das nahm zwar die Zahl der
+    Argumente hin, las unter VERSION2 aber die Flags als Code und haette
+    jeden sauberen Abschied mit "rc=DisconnectFlags(...)" protokolliert.
     """
     global mqtt_error
     mqtt_error = 1
+    rc = rest[1] if len(rest) >= 3 else (rest[0] if rest else 0)
     _LOGGER.info("MQTT Disconnected (rc=%s)", rc)
 
 
@@ -1637,7 +1642,63 @@ except (configparser.NoOptionError, configparser.NoSectionError):
 import logging.handlers
 os.makedirs(log_path, exist_ok=True)
 _stufe = logging.DEBUG if DEBUG == "1" else logging.INFO
-_handler = logging.handlers.RotatingFileHandler(
+class WachsameRotation(logging.handlers.RotatingFileHandler):
+    """Umlaufender Protokollhandler, der eine geloeschte Datei neu oeffnet.
+
+    `log/plugins` liegt auf einer Ramdisk (zram). Wird sie geleert, raeumt
+    LoxBerrys `log_maint` auf, oder loescht jemand die Datei von Hand, dann
+    schreibt ein einmal geoeffneter Handler bis zum Prozessende in einen
+    Inode, den es nicht mehr gibt - ohne Fehlermeldung, ohne Datei, ohne
+    Hinweis. Am Geraet gemessen (06.09.2026, Python 3.13.5): FileHandler und
+    RotatingFileHandler verlieren die Zeile, WatchedFileHandler nicht.
+
+    Die Standardbibliothek hat den WatchedFileHandler, aber nicht zusammen
+    mit dem Umlauf. Deshalb hier beides: vor jeder Zeile Geraetenummer und
+    Inode vergleichen, bei Abweichung neu oeffnen, nach jedem Umlauf die
+    Kennung nachfuehren.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._kennung = self._kennung_lesen()
+
+    def _kennung_lesen(self):
+        """(Geraetenummer, Inode) der Datei - None, wenn es sie nicht gibt."""
+        try:
+            s = os.stat(self.baseFilename)
+        except OSError:
+            return None
+        return (s.st_dev, s.st_ino)
+
+    def _nachfassen(self):
+        """Neu oeffnen, wenn unter dem offenen Deskriptor eine andere (oder
+        gar keine) Datei mehr liegt."""
+        if self._kennung_lesen() == self._kennung:
+            return
+        if self.stream is not None:
+            try:
+                self.stream.flush()
+            finally:
+                self.stream.close()
+                self.stream = None
+        self.stream = self._open()
+        self._kennung = self._kennung_lesen()
+
+    def emit(self, record):
+        try:
+            self._nachfassen()
+        except Exception:
+            # Ein Fehlschlag beim Nachfassen darf die Zeile nicht kosten:
+            # lieber in den alten Deskriptor schreiben als gar nicht.
+            pass
+        super().emit(record)
+
+    def doRollover(self):
+        super().doRollover()
+        self._kennung = self._kennung_lesen()
+
+
+_handler = WachsameRotation(
     log_path + '/midea2lox.log', maxBytes=500000, backupCount=1, encoding='utf-8')
 _handler.setFormatter(logging.Formatter(
     '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s',
@@ -1801,8 +1862,14 @@ try: # check if MQTTgateway is installed or not and set MQTT Client settings
     # Anlegen. Bis 4.2.12 landete dieser Fehler im umschliessenden except
     # und schaltete STILL auf HTTP um - mit einer einzigen debug-Zeile. Der
     # Anwender sah dann HTTP statt MQTT, ohne Erklaerung.
+    # Die Fassung wird abgetastet, nicht angenommen: paho-mqtt 2.x schreibt
+    # bei VERSION1 eine DeprecationWarning in JEDES Protokoll (am Geraet an
+    # 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die Aufzaehlung gar nicht.
     if hasattr(mqtt, 'CallbackAPIVersion'):
-        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id='Midea2Lox')
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='Midea2Lox')
+        except (AttributeError, TypeError):
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id='Midea2Lox')
     else:
         client = mqtt.Client(client_id='Midea2Lox')
     client.username_pw_set(MQTTuser, MQTTpass)

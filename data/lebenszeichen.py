@@ -68,9 +68,16 @@ def main(argv):
             allgemein = json.load(f)
         m = allgemein['Mqtt']
         import paho.mqtt.client as mqtt
+        # Die Fassung wird abgetastet, nicht angenommen: paho-mqtt 2.x schreibt
+        # bei VERSION1 eine DeprecationWarning in JEDES Protokoll (am Geraet an
+        # 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die Aufzaehlung gar nicht.
         if hasattr(mqtt, 'CallbackAPIVersion'):
-            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
-                            client_id='Midea2Lox_leben')
+            try:
+                c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                client_id='Midea2Lox_leben')
+            except (AttributeError, TypeError):
+                c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
+                                client_id='Midea2Lox_leben')
         else:
             c = mqtt.Client(client_id='Midea2Lox_leben')
         c.username_pw_set(m['Brokeruser'], m['Brokerpass'])
