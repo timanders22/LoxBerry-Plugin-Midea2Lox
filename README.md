@@ -10,6 +10,17 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.2
+
+- **Nur Schreibweise.** Die Sprachdateien führten für sichtbare Zeichen
+  noch HTML-Entitäten (`&mdash;`, `&auml;`, `&bdquo;`); jetzt stehen dort die
+  Zeichen selbst — in dieser Fassung **10** Stück. Das ist der Hausbeschluss
+  vom 14.08.2026: mit direkten Zeichen darf `htmlspecialchars` folgenlos
+  zweimal laufen, und die Doppelmaskierung fällt als Fehlerklasse weg.
+  `&nbsp;` und `&shy;` bleiben Entität (unsichtbares Zeichen im Quelltext ist
+  eine Wartungsfalle), ebenso die bedeutungstragenden `&amp;`, `&lt;`, `&gt;`,
+  `&quot;` und `&apos;`. **Am Verhalten ändert sich nichts.**
+
 ## Neu in 4.5.1
 
 - **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 4.5.0 kam er von der
