@@ -83,7 +83,11 @@ def main(argv):
         c.username_pw_set(m['Brokeruser'], m['Brokerpass'])
         c.connect(m['Brokerhost'], int(m['Brokerport']), keepalive=15)
         c.loop_start()
-        info = c.publish(thema, laeuft, qos=1, retain=True)
+        # NICHT retained. Dieses Thema ist das Lebenszeichen des Dienstes;
+        # retained stuende es nach einem Neustart des Miniservers sofort
+        # wieder da und meldete "laeuft", auch wenn der Dienst tot ist.
+        # Hausstandard seit 03.09.2026.
+        info = c.publish(thema, laeuft, qos=1, retain=False)
         try:
             info.wait_for_publish(timeout=5)
         except TypeError:

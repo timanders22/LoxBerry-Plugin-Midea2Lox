@@ -10,6 +10,82 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.4
+
+Vier Berichtigungen, alle am Gerät gemessen — und eine davon nimmt eine
+Aussage zurück, die seit 4.3.2 in dieser README stand.
+
+### Retain wird jetzt je Thema entschieden
+
+Bis 4.5.3 ging **jede** Veröffentlichung zurückbehalten hinaus. Am Broker
+gemessen (13.09.2026): fünf retained Themen unter `Midea2Lox/#` — und
+**vier davon waren das Lebenszeichen**.
+
+Der Hausstandard seit 03.09.2026 trennt: **Zustände** zurückbehalten,
+**Messwerte mit Zeitbezug** nicht, das **Lebenszeichen nie**. Die Begründung
+für das Lebenszeichen ist die wichtigste: zurückbehalten meldete es nach
+einem Neustart des Miniservers sofort wieder „läuft" — auch dann, wenn der
+Dienst längst tot ist. Ein Lebenszeichen, das den eigenen Tod überlebt, ist
+keines.
+
+Ohne Retain gehen jetzt hinaus: `status/ts`, `status/zaehler`, `status/ok`,
+`status/dienst` sowie `indoor_temperature`, `outdoor_temperature`,
+`indoor_humidity`, `total_energy_usage`, `current_energy_usage` und
+`real_time_power_usage`. Alles Übrige bleibt zurückbehalten. Die
+Themen-Tabelle im Reiter MQTT führt die Angabe jetzt als eigene Spalte.
+
+Dienst und Oberfläche führen dieselbe Liste an zwei Orten — damit sie nicht
+auseinanderlaufen, hält eine neue Prüfzeile im Reiter Test sie gegeneinander.
+
+### Die Abo-Prüfzeile sah in der falschen Datei nach
+
+Sie las `config/system/subscriptions.json`. Am Gerät war das eine Leiche vom
+28.08. mit fünf fremden Einträgen; die Liste, die das Gateway heute führt,
+ist `mqttgateway.json` mit 52. Jetzt wird die erste lesbare der beiden
+genommen — eine feste Entscheidung für eine wäre die nächste Wette auf eine
+LoxBerry-Fassung.
+
+Und sie kennt einen zweiten Weg: steht unser Thema nicht in der Liste des
+Anwenders, aber unsere mitgelieferte Datei stimmt, ist das ebenfalls ein
+Haken — denn das Gateway liest sie.
+
+### Der Installateur liest die Abo-Datei nicht, das Gateway schon
+
+`sbin/plugininstall.pl` enthält den Namen `mqtt_subscriptions` **kein
+einziges Mal**; er kopiert die Datei nur. Das Einlesen macht allein das
+Gateway — siehe den berichtigten Abschnitt weiter unten.
+
+### Die Loxone-Vorlage baute einen leeren virtuellen Eingang
+
+Ein Fehler von mir, seit 4.5.0 veröffentlicht. `mi_automatik_werte()` führt
+`automatik/grund` bewusst mit `null` als Vorlage — ein Satz gehört in keinen
+virtuellen Eingang, genau wie `operational_mode`. Die Geräte-Schleife prüft das,
+die Status-Schleife nicht: sie baute daraus einen `VirtualInHttpCmd` mit leerem
+`Signed`, `MinVal`, `MaxVal` und `Unit`. Beim Rendern unter 7.4 und 8.4 stand
+dreimal „Trying to access array offset on value of type null“ im Protokoll.
+Die erzeugte Vorlage hat jetzt sieben statt acht Eingänge, keinen leeren davon.
+
+## Neu in 4.5.3
+
+**Der Grund einer abgelehnten Broker-Anmeldung stand nur unter paho 1.x im
+Klartext.** `on_connect` kannte die Rückmeldecodes 1 bis 5 aus MQTT 3.1.1.
+Dieser Dienst legt den Client aber mit `CallbackAPIVersion.VERSION2` an, sobald
+paho 2.x vorliegt — und dort kommen dieselben Fälle als Ursachencodes von
+MQTT 5 an (132 bis 136). Im Protokoll stand dann „Ungueltiger Rueckgabecode
+135" statt „Nicht autorisiert": die Zahl statt des Grundes, ausgerechnet bei
+falschen Zugangsdaten.
+
+Aufgefallen ist es nicht im Betrieb, denn im Venv dieses Plugins steckt heute
+paho **1.6.1** (am Gerät gemessen, 11.09.2026). Die paho-Fassung hängt an der
+Python-Umgebung jeder Linie einzeln; im selben Haus laufen 1.6.1 und 2.1.0
+nebeneinander. Eine Linie kann sich also nicht darauf verlassen, welche
+Zählweise ankommt — die Tabelle kennt jetzt beide.
+
+Geprüft mit `Werkzeuge/connack_klartext_pruefen.py`, das den Rückruf aus der
+Datei schneidet und beide Zählweisen durchspielt: gegen 4.5.3 grün (15 von 15),
+gegen 4.5.2 rot an genau den Codes 134 und 135. **Am Verhalten ändert sich
+nichts** — abgelehnt wurde vorher wie nachher, nur der Grund ist jetzt lesbar.
+
 ## Neu in 4.5.2
 
 - **Nur Schreibweise.** Die Sprachdateien führten für sichtbare Zeichen
@@ -59,7 +135,6 @@ Midea2Lox-Dienst hielt `midea2lox.log (deleted)` offen, während unter
 demselben Namen längst eine neue Datei fortgeschrieben wurde — von außen sah
 das Plugin gesund aus. Elf Linien tragen dieselbe Bauart; alle elf sind am
 06.09.2026 nachgezogen worden.
-
 
 ## Was 4.5.0 bringt
 
@@ -642,25 +717,35 @@ Ein Kopfkommentar in beiden Dateien hält das fest.
 - **`.gitignore`** ergänzt — sie schließt vor allem `venv/` aus: die virtuelle
   Python-Umgebung entsteht bei der Installation und belegt 60 bis 100 MB.
 
-### `config/mqtt_subscriptions.cfg` — was sie tut und was nicht
+### `config/mqtt_subscriptions.cfg` — sie wirkt, und wie sie es tut
 
 Die Datei enthält eine einzige Zeile (`Midea2Lox/#`, ohne Zeilenumbruch am
-Ende). Bis 4.3.2 stand hier, das MQTT-Gateway lese sie aus und abonniere die
-darin genannten Themen. **Das ist am Gerät gemessen worden und trifft nicht
-zu:** zwei Probedateien, eine davon in einem wirklich installierten Plugin,
-sind nach einem Neustart des Gateways in keinem Abonnement gelandet.
+Ende). **Das MQTT-Gateway liest sie und abonniert daraus.**
 
-Was die Datei damit noch ist: eine Dokumentation dessen, was einzutragen
-wäre, und möglicherweise die Vorlage, die der Installateur einmalig einliest
-— das ist die eine Hälfte der Frage, die noch offen ist. Das Plugin schreibt
-sie beim Ändern des Themen-Präfix mit, damit sie nicht auf einen Zweig zeigt,
-in den niemand mehr schreibt.
+> **Berichtigung, 13.09.2026.** In 4.3.2 bis 4.5.3 stand hier das Gegenteil:
+> „am Gerät gemessen … trifft nicht zu". Diese Messung sah in
+> `config/system/subscriptions.json` nach — und **dort landen Plugin-Abos
+> nie**, das Gateway hält sie ausschließlich im Arbeitsspeicher. Ein Blick an
+> die falsche Stelle, und „nicht gefunden" wurde als „wird nicht gelesen"
+> gelesen. Wer es nachmisst, findet dasselbe wie wir.
 
-**Verlassen Sie sich nicht darauf.** Ob Ihr Thema wirklich abonniert ist,
-beantwortet der Reiter Test in der Zeile *Ist unser Thema im Gateway
-abonniert?* — die liest `config/system/subscriptions.json` und sagt es Ihnen
-schwarz auf weiß. Steht dort ein Kreuz, tragen Sie das Thema im Reiter MQTT
-von Hand ein.
+Belegt im Quelltext des MQTT-Gateways (`sbin/mqttgateway.pl`), als
+durchgehende Kette:
+`get_plugins()` über alle installierten Plugins → `watch` auf
+`config/plugins/<Ordner>/mqtt_subscriptions.cfg` → `read_file` →
+`push @subscriptions` → `$mqtt->subscribe`. Und am laufenden Gateway
+nachgerechnet: 52 Abos der Oberfläche plus die eine Zeile aus unserer Datei
+ergaben `Uniquify subscriptions: Before 53 / Afterwards 52` — eine Dopplung,
+weil das Thema hier auch von Hand eingetragen war.
+
+Das Plugin schreibt die Datei beim Ändern des Themen-Präfix mit, damit sie
+nicht auf einen Zweig zeigt, in den niemand mehr schreibt. **Der Installateur
+liest sie nicht** — `sbin/plugininstall.pl` enthält den Namen kein einziges
+Mal; er kopiert die Datei nur. Das Einlesen macht allein das Gateway, und es
+tut es im laufenden Betrieb, sobald sich die Datei ändert.
+
+Ob es bei Ihnen trägt, sagt der Reiter Test in der Zeile *Ist unser Thema im
+Gateway abonniert?*
 
 Deshalb steht in der Datei auch **kein** erklärender Kommentar: `#` ist im
 MQTT-Thema der Platzhalter für „alles darunter". Eine Zeile, die mit `#`

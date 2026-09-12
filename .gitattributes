@@ -1,0 +1,5 @@
+# Keine Normalisierung durch git - weder beim Einchecken noch beim
+# Erzeugen des Tag-Archivs. Ohne diese Zeile ist ein Ordner mit
+# CRLF-Dateien nie byteweise gleich mit seinem Tag-Archiv, sobald
+# irgendwo core.autocrlf oder ein geerbtes "* text=auto" greift.
+* -text

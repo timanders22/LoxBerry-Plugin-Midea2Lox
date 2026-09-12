@@ -60,11 +60,19 @@ function mi_paths()
         'config'  => $home . '/config/plugins/' . $ordner . '/midea2lox.cfg',
         'devices' => $home . '/config/plugins/' . $ordner . '/devices.cfg',
         'abo'     => $home . '/config/plugins/' . $ordner . '/mqtt_subscriptions.cfg',
-        // Die Abonnements des Gateways. Der Ort ist GEMESSEN (29.08.2026,
-        // LoxBerry 4): config/system/subscriptions.json, NICHT unter
-        // config/system/mqtt/. Aufbau:
-        //   {"Subscriptions":[{"Id":"heimkino/beamer/an","Toms":[], ...}, ...]}
-        'abos'    => $home . '/config/system/subscriptions.json',
+        /* Die Abonnements des Gateways - ZWEI moegliche Dateien.
+         *
+         * Berichtigt am 13.09.2026 am Geraet: die Liste, die das Gateway
+         * heute fuehrt, ist `mqttgateway.json` (dort 52 Eintraege).
+         * `subscriptions.json` war auf derselben Anlage eine Leiche vom
+         * 28.08. mit fuenf fremden Eintraegen - wer nur dort nachsah,
+         * bekam ein Kreuz fuer ein Thema, das laengst abonniert war.
+         *
+         * Beide stehen hier, die neuere zuerst; genommen wird die erste
+         * lesbare. Eine feste Entscheidung fuer eine von beiden waere die
+         * naechste Wette auf eine LoxBerry-Fassung. */
+        'abos'    => $home . '/config/system/mqttgateway.json',
+        'abos_alt' => $home . '/config/system/subscriptions.json',
         'log'     => $home . '/log/plugins/' . $ordner . '/midea2lox.log',
         'datadir'    => $home . '/data/plugins/' . $ordner,
         'leben'   => $home . '/data/plugins/' . $ordner . '/lebenszeichen.json',
@@ -1150,6 +1158,57 @@ function mi_automatik_werte()
     );
 }
 
+/**
+ * Themen, die NICHT zurueckbehalten werden - dieselbe Liste wie im Dienst.
+ *
+ * Hausstandard seit 03.09.2026: Zustaende retained, Messwerte mit Zeitbezug
+ * nicht, das Lebenszeichen nie. Der Dienst fuehrt dieselbe Liste als
+ * OHNE_RETAIN in data/midea2lox.py; dass beide gleich bleiben, prueft
+ * mi_retain_probe() nach - zwei Listen ohne Waechter laufen auseinander.
+ */
+function mi_ohne_retain()
+{
+    return array(
+        'status/ts', 'status/zaehler', 'status/ok', 'status/dienst',
+        'indoor_temperature', 'outdoor_temperature', 'indoor_humidity',
+        'total_energy_usage', 'current_energy_usage', 'real_time_power_usage',
+    );
+}
+
+/** Wird dieses Thema zurueckbehalten? Entschieden am hinteren Teil. */
+function mi_retain($thema)
+{
+    $t = (string) $thema;
+    $ohne = mi_ohne_retain();
+    if (in_array($t, $ohne, true)) { return false; }
+    $teile = explode('/', $t);
+    return !in_array(end($teile), $ohne, true);
+}
+
+/**
+ * Fuehren Oberflaeche und Dienst dieselbe Retain-Liste?
+ *
+ * Liefert (ok, Zahl im Dienst, was auseinanderlaeuft). Der Dienst ist die
+ * massgebliche Seite - er sendet. Findet die Probe im Dienst gar keine
+ * Liste, sagt sie das, statt Gleichheit zu behaupten.
+ */
+function mi_retain_probe()
+{
+    $datei = mi_paths()['dienst'];
+    if (!is_readable($datei)) {
+        return array(null, 0, array());
+    }
+    $q = (string) @file_get_contents($datei);
+    if (!preg_match('/OHNE_RETAIN\s*=\s*\((.*?)\)/s', $q, $m)) {
+        return array(null, 0, array());
+    }
+    preg_match_all("/'([A-Za-z0-9_\/]+)'/", $m[1], $t);
+    $dienst = array_values(array_unique($t[1]));
+    $hier = mi_ohne_retain();
+    $ab = array_merge(array_diff($dienst, $hier), array_diff($hier, $dienst));
+    return array(count($dienst) > 0 && !$ab, count($dienst), array_values($ab));
+}
+
 /* ==================================================================
  * Miniserver
  * ================================================================== */
@@ -1330,6 +1389,12 @@ function mi_vorlage($cfg = null)
     }
     // Das Lebenszeichen gilt fuer das Plugin, nicht je Geraet.
     foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $wert => $w) {
+        // Textwert, kein Eingang - dieselbe Wache wie in der Schleife
+        // darueber. Sie fehlte hier seit 4.5.0: 'automatik/grund' traegt
+        // einen Satz und hat deshalb keine Vorlagenangabe; ohne diese Zeile
+        // entstand daraus ein virtueller Eingang mit leerem Signed, MinVal,
+        // MaxVal und Unit - und beim Rendern dreimal "array offset on null".
+        if ($w[2] === null) { continue; }
         $titel = $topic . '_' . str_replace('/', '_', $wert);
         $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
         $o .= 'Comment="' . $x(mi_t($w[1])) . '" Check=" " ';
@@ -1545,8 +1610,15 @@ function mi_abo_text()
 function mi_abo_eingetragen($cfg = null)
 {
     if ($cfg === null) { $cfg = mi_config_read(); }
-    $datei = mi_paths()['abos'];
-    if (!is_readable($datei)) {
+    /* Die erste LESBARE der beiden Listen. clearstatcache vorher, weil das
+     * Gateway sie im Betrieb neu schreibt. */
+    $p = mi_paths();
+    $datei = '';
+    foreach (array($p['abos'], $p['abos_alt']) as $kandidat) {
+        clearstatcache(true, $kandidat);
+        if (is_readable($kandidat)) { $datei = $kandidat; break; }
+    }
+    if ($datei === '') {
         return array('unlesbar', array(), 0);
     }
     $d = json_decode((string) @file_get_contents($datei), true);
@@ -1578,7 +1650,28 @@ function mi_abo_eingetragen($cfg = null)
             $treffer[] = $id;
         }
     }
-    return array($treffer ? 'ja' : 'nein', $treffer, count($liste));
+    if ($treffer) {
+        return array('ja', $treffer, count($liste));
+    }
+    /* NICHT in der Liste des Anwenders - das heisst aber nicht "nicht
+     * abonniert".
+     *
+     * Das Gateway liest `config/plugins/<Ordner>/mqtt_subscriptions.cfg`
+     * und haengt deren Zeilen an seine Abo-Liste. Belegt im Quelltext
+     * (`sbin/mqttgateway.pl`: get_plugins -> watch -> read_file ->
+     * push @subscriptions -> subscribe) und am laufenden Gateway durch
+     * die Rechnung "Before 53 / Afterwards 52": 52 Abos des Anwenders plus
+     * die eine Zeile aus unserer Datei, eine Dopplung.
+     *
+     * Bis 4.5.3 stand hier das Gegenteil - die Messung vom 29.08.2026 hatte
+     * in `subscriptions.json` nachgesehen, wo Plugin-Abos NIE landen: das
+     * Gateway haelt sie nur im Arbeitsspeicher. Ein Blick an die falsche
+     * Stelle, und "nicht gefunden" wurde als "wird nicht gelesen" gelesen. */
+    list($dateilage, , $dateisoll) = mi_abo_datei($cfg);
+    if ($dateilage === 'ok') {
+        return array('mitgeliefert', array($dateisoll), count($liste));
+    }
+    return array('nein', array(), count($liste));
 }
 
 /**

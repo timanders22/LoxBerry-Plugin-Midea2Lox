@@ -959,24 +959,30 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <h3><?php echo mi_te($mi_gt); ?></h3>
 <div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:46%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
+<tr><th style="width:40%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:10%"><?php echo mi_te('UI.EINHEIT'); ?></th><th style="width:10%"><?php echo mi_te('UI.THEMA_RETAIN'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
 <?php foreach (mi_werte() as $wert => $info) {
         if ($info[2] !== $mi_g) { continue; } ?>
 <tr><td class="sm-mono"><?php echo mi_e($mi_topic . '/' . $mi_bsp . '/' . $wert); ?></td>
-    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
+    <td><?php echo $info[0]; ?></td>
+    <td><?php echo mi_te(mi_retain($wert) ? 'UI.RETAIN_JA' : 'UI.RETAIN_NEIN'); ?></td>
+    <td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
 </table>
 </div>
 <?php } ?>
 
+<div class="sm-hinweis"><?php echo mi_t('UI.RETAIN_ERKLAERUNG'); ?></div>
+
 <h3><?php echo mi_te('UI.GRUPPE_STATUS'); ?></h3>
 <div class="sm-hinweis"><?php echo mi_t('UI.STATUS_ERKLAERUNG'); ?></div>
 <div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th style="width:46%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
+<tr><th style="width:40%"><?php echo mi_te('UI.THEMA'); ?></th><th style="width:10%"><?php echo mi_te('UI.EINHEIT'); ?></th><th style="width:10%"><?php echo mi_te('UI.THEMA_RETAIN'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
 <?php foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $wert => $info) { ?>
 <tr><td class="sm-mono"><?php echo mi_e($mi_topic . '/' . $wert); ?></td>
-    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
+    <td><?php echo $info[0]; ?></td>
+    <td><?php echo mi_te(mi_retain($wert) ? 'UI.RETAIN_JA' : 'UI.RETAIN_NEIN'); ?></td>
+    <td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
 </table>
 </div>

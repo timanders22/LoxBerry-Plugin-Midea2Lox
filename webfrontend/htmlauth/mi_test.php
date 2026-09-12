@@ -157,23 +157,30 @@ function mi_pruefungen($cfg)
                  : mi_t('UI.GATEWAY_FASSUNG_UNBEKANNT'));
 
     /* OFFENER PUNKT: dass LoxBerry config/plugins/<Ordner>/mqtt_subscriptions.cfg
-     * ueberhaupt liest, steht in der README dieses Plugins und ist nicht am
-     * Geraet gemessen. Diese Zeile beantwortet nur, was sie beantworten
-     * KANN - ob die Datei da ist und zum Praefix passt. */
+     * ueberhaupt liest, ist seit dem 13.09.2026 am Geraet BELEGT - es tut
+     * es. Diese Zeile beantwortet trotzdem nur, was sie selbst messen kann:
+     * ob die Datei da ist und zum Praefix passt. Ob das Gateway sie
+     * eingelesen hat, sagt die Zeile darunter. */
     list($abolage, $aboist, $abosoll) = mi_abo_datei($cfg);
     $z[] = array(mi_e(mi_t('PRUEF.ABO_DATEI')), $abolage === 'ok' ? 1 : 0,
         $abolage === 'ok' ? mi_e($abosoll)
             : ($abolage === 'fehlt' ? mi_t('UI.ABO_DATEI_FEHLT')
                : sprintf(mi_t('UI.ABO_DATEI_ABWEICHEND'), mi_e($aboist), mi_e($abosoll))));
 
-    /* Die Frage, die wirklich zaehlt - und die erst seit 4.3.2 gestellt wird.
+    /* Die Frage, die wirklich zaehlt: ist das Thema abonniert?
      *
-     * Gemessen am Geraet (29.08.2026, Gateway V1): das Gateway liest
-     * config/plugins/<Ordner>/mqtt_subscriptions.cfg im Betrieb NICHT. Zwei
-     * Probedateien, eine davon in einem wirklich installierten Plugin, sind
-     * nach einem Neustart des Gateways in keinem Abonnement gelandet. Die
-     * Zeile darueber sagt also nur, dass die mitgelieferte DATEI stimmt -
-     * diese hier sagt, ob das Thema auch abonniert IST. */
+     * BERICHTIGT AM 13.09.2026. Bis 4.5.3 stand hier, das Gateway lese
+     * config/plugins/<Ordner>/mqtt_subscriptions.cfg nicht. Das war falsch,
+     * und die Zeile zeigte deshalb ein Kreuz, waehrend alles lief.
+     *
+     * Was wirklich gilt, im Quelltext des Geraets und am laufenden Gateway
+     * belegt: es liest sie und abonniert daraus. Die Messung vom 29.08.2026
+     * hatte in config/system/subscriptions.json nachgesehen - dort landen
+     * Plugin-Abos NIE, das Gateway haelt sie nur im Arbeitsspeicher.
+     *
+     * Es gibt also ZWEI Wege, auf denen unser Thema abonniert sein kann:
+     * der Anwender hat es selbst eingetragen ('ja'), oder unsere
+     * mitgelieferte Datei tut es ('mitgeliefert'). Beide sind ein Haken. */
     list($eingetragen, $treffer, $gesamt) = mi_abo_eingetragen($cfg);
     if ($eingetragen === 'unlesbar') {
         $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 2, mi_t('UI.ABO_LISTE_UNLESBAR'));
@@ -182,6 +189,10 @@ function mi_pruefungen($cfg)
     } elseif ($eingetragen === 'ja') {
         $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 1,
             sprintf(mi_t('UI.ABO_EINGETRAGEN_JA'), mi_e(implode(', ', $treffer)), $gesamt));
+    } elseif ($eingetragen === 'mitgeliefert') {
+        $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 1,
+            sprintf(mi_t('UI.ABO_EINGETRAGEN_MITGELIEFERT'),
+                    mi_e(implode(', ', $treffer)), $gesamt));
     } else {
         $z[] = array(mi_e(mi_t('PRUEF.ABO_EINGETRAGEN')), 0,
             sprintf(mi_t('UI.ABO_EINGETRAGEN_NEIN'), mi_e(mi_mqtt_topic($cfg)), $gesamt));
@@ -216,6 +227,17 @@ function mi_pruefungen($cfg)
         $vanz === 0 ? mi_t('UI.NICHTS_ANGESEHEN')
             : ($vok ? sprintf(mi_t('UI.VORLAGEN_OK'), $vanz)
                     : sprintf(mi_t('UI.VORLAGEN_KAPUTT'), mi_e($vname))));
+
+    /* Fuehren Oberflaeche und Dienst dieselbe Retain-Liste?
+     *
+     * Zwei Listen an zwei Orten laufen auseinander, sobald jemand nur eine
+     * anfasst - und man merkt es nicht, weil beide fuer sich stimmig
+     * aussehen. Deshalb haelt diese Zeile sie gegeneinander. */
+    list($rok, $ranz, $rab) = mi_retain_probe();
+    $z[] = array(mi_e(mi_t('PRUEF.RETAIN')), $rok === null ? 2 : ($rok ? 1 : 0),
+        $rok === null ? mi_t('UI.DIENST_NICHT_LESBAR')
+            : ($rok ? sprintf(mi_t('UI.RETAIN_GLEICH'), $ranz)
+                    : sprintf(mi_t('UI.RETAIN_UNGLEICH'), mi_e(implode(', ', $rab)))));
 
     // ---- Automatik (ab 4.5.0) ----
     //

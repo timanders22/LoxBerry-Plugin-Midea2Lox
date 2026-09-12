@@ -1432,6 +1432,51 @@ async def _im_faden(arbeit):
     return await asyncio.get_running_loop().run_in_executor(None, arbeit)
 
 
+# ---------------------------------------------------------------------------
+# Retain wird JE THEMA entschieden (ab 4.5.4)
+# ---------------------------------------------------------------------------
+#
+# Hausstandard seit 03.09.2026: Zustaende retained, Messwerte mit Zeitbezug
+# nicht, das Lebenszeichen nie.
+#
+# Die Begruendung fuer das Lebenszeichen ist die wichtigste: retained zeigte
+# es immer "lebt". Nach einem Neustart des Miniservers stuende der letzte
+# Herzschlag sofort wieder da - auch dann, wenn der Dienst laengst tot ist.
+# Ein Lebenszeichen, das den eigenen Tod ueberlebt, ist keines.
+#
+# Messwerte mit Zeitbezug (Temperatur, Leistung, Zaehlerstand) sind aus
+# demselben Grund nicht retained: ein alter Wert saehe aus wie ein aktueller.
+# Der virtuelle Eingang in Loxone traegt dafuer seinen Fehlwert nach Ablauf.
+#
+# Zustaende dagegen GEHOEREN retained: an/aus, Betriebsart, Sollwert,
+# Erreichbarkeit. Sie gelten weiter, bis etwas anderes gemeldet wird, und
+# Loxone hat sie nach einem Neustart sofort.
+#
+# Am Broker gemessen (13.09.2026, Midea2Lox 4.5.3): fuenf retained Themen -
+# und vier davon waren das Lebenszeichen.
+
+OHNE_RETAIN = (
+    # Lebenszeichen - nie retained
+    'status/ts', 'status/zaehler', 'status/ok', 'status/dienst',
+    # Messwerte mit Zeitbezug
+    'indoor_temperature', 'outdoor_temperature', 'indoor_humidity',
+    'total_energy_usage', 'current_energy_usage', 'real_time_power_usage',
+)
+
+
+def retain_fuer(thema):
+    """Gehoert dieses Thema zurueckbehalten?
+
+    Das Thema kommt mit oder ohne Geraetenummer davor an
+    ("123456789012/indoor_temperature" oder "status/ts"). Entschieden wird
+    am hinteren Teil - die Geraetenummer aendert die Art des Wertes nicht.
+    """
+    t = str(thema)
+    if t in OHNE_RETAIN:
+        return False
+    return t.rsplit('/', 1)[-1] not in OHNE_RETAIN
+
+
 async def veroeffentlichen(paare, support_mode=0):
     """Ueber MQTT, sonst per HTTP an virtuelle Eingaenge.
 
@@ -1441,7 +1486,7 @@ async def veroeffentlichen(paare, support_mode=0):
         for thema, wert in paare:
             try:
                 publish = client.publish(MQTT_PRAEFIX + '/' + thema, wert,
-                                         qos=2, retain=True)
+                                         qos=2, retain=retain_fuer(thema))
                 # MIT Zeitgrenze. Bis 4.2.12 stand hier wait_for_publish()
                 # ohne Argument: QoS 2 verlangt den vollen Vier-Wege-
                 # Handschlag, und brach der Broker waehrend des Sendens weg,
@@ -1490,6 +1535,27 @@ async def veroeffentlichen(paare, support_mode=0):
 # MQTT
 # ===========================================================================
 
+# Klartext der CONNACK-Codes, fuer BEIDE Zaehlweisen.
+#
+# paho 1.x liefert die Codes aus MQTT 3.1.1 (1-5), paho 2.x bildet
+# dieselben Faelle auf die Ursachencodes von MQTT 5 ab (132-136) - und
+# dieser Dienst legt den Client mit CallbackAPIVersion.VERSION2 an, sobald
+# paho 2.x vorliegt. Bis 4.5.2 standen hier nur 1-5; im venv dieses Plugins
+# steckt paho 1.6.1 (am Geraet gemessen 11.09.2026), deshalb fiel es nicht
+# auf. Nach einem paho-2-Upgrade haette das Protokoll nur noch
+# "Ungueltiger Rueckgabecode 135" gemeldet - also die Zahl statt des
+# Grundes, und ausgerechnet bei falschen Zugangsdaten.
+#
+# Am echten Mosquitto gemessen (11.09.2026): falsches Kennwort UND anonyme
+# Anmeldung ergeben beide 5 bzw. 135 („nicht berechtigt"), nie 4/134.
+CONNACK_KLARTEXT = {
+    1: "Falsche Protokollversion", 132: "Falsche Protokollversion",
+    2: "Identifizierung fehlgeschlagen", 133: "Identifizierung fehlgeschlagen",
+    3: "Server nicht erreichbar", 136: "Server nicht erreichbar",
+    4: "Falscher Benutzername oder Passwort", 134: "Falscher Benutzername oder Passwort",
+    5: "Nicht autorisiert", 135: "Nicht autorisiert",
+}
+
 # Ist ein Callback, der ausgefuehrt wird, wenn sich mit dem Broker verbunden wird
 def on_connect(client, userdata, flags, rc, properties=None):
     global mqtt_error
@@ -1516,18 +1582,21 @@ def on_connect(client, userdata, flags, rc, properties=None):
                 except Exception as fehler:
                     _LOGGER.error("MQTT: %s liess sich nicht abonnieren: %s",
                                   _thema, fehler)
-    elif rc == 1:
-        _LOGGER.error("MQTT: Falsche Protokollversion")
-    elif rc == 2:
-        _LOGGER.error("MQTT: Identifizierung fehlgeschlagen")
-    elif rc == 3:
-        _LOGGER.error("MQTT: Server nicht erreichbar")
-    elif rc == 4:
-        _LOGGER.error("MQTT: Falscher Benutzername oder Passwort")
-    elif rc == 5:
-        _LOGGER.error("MQTT: Nicht autorisiert")
     else:
-        _LOGGER.error("MQTT: Ungueltiger Rueckgabecode %s", rc)
+        # Den Code als Zahl lesen, gleich welcher Rueckruffassung: paho 2.x
+        # uebergibt ein ReasonCode-Objekt, paho 1.x eine Zahl.
+        try:
+            code = int(getattr(rc, 'value', rc))
+        except (TypeError, ValueError):
+            code = rc
+        grund = CONNACK_KLARTEXT.get(code)
+        if grund:
+            _LOGGER.error("MQTT: %s (Code %s)", grund, code)
+        else:
+            # Nicht benennbar ist nicht in Ordnung: die Zahl wird genannt,
+            # damit sie nachschlagbar bleibt.
+            _LOGGER.error("MQTT: Anmeldung abgelehnt, Code %s ohne bekannte "
+                          "Bedeutung", code)
 
 
 def on_message(client, userdata, nachricht):
