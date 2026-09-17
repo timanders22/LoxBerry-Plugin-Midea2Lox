@@ -46,7 +46,23 @@ rm -rf "$SICHER"
 # Der Dienst wird ueber das Startskript gestartet, nicht direkt. Bis 3.4.8
 # stand hier ein "./midea2lox.py &" - das umging das Startskript und lief
 # damit ohne dessen Pruefungen.
+#
+# Der Rueckgabewert wird seit 4.5.6 angesehen und gemeldet. Bis 4.5.5 war
+# er ohnehin wertlos: das Startskript endete immer mit 0. Die Ausgabe des
+# Skripts geht ins Installationsprotokoll - das Einzige, was der Anwender
+# von den Hakenskripten je zu sehen bekommt; eine Erfolgsmeldung fuer einen
+# Dienst, der nicht laeuft, schickt ihn an die falsche Stelle
+# (Regeln/06, APC-UPS NG 1.2.5).
 echo "<INFO> Starte Midea2Lox"
-"$LBHOME/system/daemons/plugins/$PDIR" restart >/dev/null 2>&1
+STARTAUS=$("$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)
+STARTRC=$?
+if [ "$STARTRC" -eq 0 ]; then
+	echo "<OK> Midea2Lox laeuft."
+else
+	echo "$STARTAUS" | sed 's/^/<WARNING> /'
+	echo "<WARNING> Midea2Lox laeuft nach dem Update nicht. Der minuetliche"
+	echo "<WARNING> Waechter versucht es weiter; der Grund steht in"
+	echo "<WARNING> log/plugins/$PDIR/midea2lox.log."
+fi
 
 exit 0

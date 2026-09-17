@@ -96,7 +96,12 @@ fi
 
 N=$((N + 1))
 echo "$N" > "$ZAEHLER"
-melde "WARNING" "Dienst lief nicht - Neustart ($N/$GRENZE)."
+# "Dienst lief nicht" waere eine Behauptung: seit 4.5.6 kann "start" auch
+# einen laufenden Dienst OHNE PID-Datei vorfinden und nur dessen Nummer
+# nachtragen. Gemeldet wird deshalb, was gemessen ist - dass status ihn
+# nicht als laufend gemeldet hat. Was daraus wurde, schreibt das
+# Startskript selbst ins Protokoll.
+melde "WARNING" "status meldete den Dienst nicht als laufend - Startversuch ($N/$GRENZE)."
 "$DAEMON" start >/dev/null 2>&1
 
 # Die WIRKUNG pruefen, nicht den Rueckgabewert des Aufrufs: das Startskript

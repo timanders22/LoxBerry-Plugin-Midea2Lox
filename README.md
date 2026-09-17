@@ -10,6 +10,210 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.6
+
+### Ein Dienst ohne PID-Datei überlebte Update, Neustart und Deinstallation
+
+`stop` im Startskript beendete nur den Prozess, dessen Nummer in
+`data/plugins/Midea2Lox/dienst.pid` stand. Lief ein Dienst ohne diese Datei
+— am Startskript vorbei gestartet, oder die Datei war verloren —, meldete
+`stop` „Midea2Lox laeuft nicht" und ließ ihn stehen. Nachgestellt in WSL mit
+den echten Hakenskripten in der Reihenfolge des Installers (17.09.2026): der
+alte Dienst überlebte `preupgrade.sh` und hielt den UDP-Port, der neue
+meldete „Socket konnte nicht gebunden werden" und endete, und der minütliche
+Wächter gab nach fünf Versuchen auf — während der alte Prozess weiter
+Herzschläge schickte und `status/dienst` 0 meldete. Derselbe Dienst blieb
+beim Neustart über die Oberfläche und nach dem Deinstallieren übrig.
+
+`stop` sucht jetzt zusätzlich jeden Prozess, der genau dieses Programm
+ausführt: er gehört dem Dienstbenutzer (als root aufgerufen `loxberry`), das
+erste Argument ist ein Python-Interpreter, und das zweite ist, gegen den
+Arbeitsordner des Prozesses aufgelöst, genau `midea2lox.py` im eigenen
+Datenordner. Ein Teilwort der Befehlszeile genügt nicht. Ein solcher Prozess
+bekommt SIGTERM und fünf Sekunden Zeit; SIGKILL folgt nur, wenn seine
+Befehlszeile dann noch dieselbe ist. Das wirkt in `preupgrade.sh`, in
+`postupgrade.sh` und beim Neustart über die Oberfläche. `uninstall` hält den
+Dienst jetzt ebenfalls über das Startskript an; der bisherige Weg über die
+PID-Datei bleibt als Rückfall, falls das Startskript fehlt.
+
+Gemessen in WSL, nicht am Gerät, in 11 Fällen mit 28 Prüfzeilen: vor der
+Änderung 10 rot, danach alle grün. Stehen bleiben, wie sie sollen: `tail` auf
+die Datei, `python3 -c` mit dem Dateinamen als Argument, dasselbe Programm in
+einem Nachbarordner und unter einer anderen Wurzel, und ein Prozess eines
+anderen Benutzers.
+
+### Das Startskript meldete Erfolg, auch wenn der Dienst nicht hochkam
+
+Am Ende von `daemon/daemon` stand ein nacktes `exit 0`. `start` prüft seit
+4.3.0 die Wirkung — es wartet zwei Sekunden und sieht nach, ob der Prozess
+noch lebt — und endet in `start_dienst` mit 1, wenn nicht; dieser Wert wurde
+eine Zeile später weggeworfen. Gemessen in WSL (17.09.2026) mit einem
+Programm, das sofort aufgibt: Ausgabe „FEHLER: Midea2Lox wurde gestartet,
+lief aber nach zwei Sekunden nicht mehr", Rückgabewert **0**. Die Oberfläche
+fragt genau diesen Wert ab (`mi_dienst()` in `mi_lib.php`) und meldete
+darauf „Der Dienst wurde neu gestartet".
+
+`start`, `restart` und `waechter` geben jetzt weiter, was `start_dienst`
+gemessen hat; `stop` und ein laufender `status` bleiben bei 0, ein
+gestoppter `status` und ein unbekanntes Argument bei 1. Die Oberfläche
+meldet in derselben Lage jetzt `DIENST_FEHLGESCHLAGEN`. Der Kommentar in
+`mi_lib.php`, der bis 4.5.5 das Gegenteil behauptete („daemon/daemon … endet
+mit 1"), ist berichtigt.
+
+`postupgrade.sh` startet den Dienst am Ende und warf den Rückgabewert
+ebenfalls weg (`>/dev/null 2>&1`). Es sieht ihn jetzt an und schreibt
+entweder `<OK> Midea2Lox laeuft.` oder die Ausgabe des Startskripts mit
+`<WARNING>` ins Installationsprotokoll — das Einzige, was der Anwender von
+den Hakenskripten je zu sehen bekommt.
+
+### Die PID-Datei wurde nur am Dateinamen gegengeprüft
+
+Für Dienste **ohne** PID-Datei erkennt 4.5.6 den eigenen Prozess pfadgenau
+(siehe oben). Für die Nummer **aus** der PID-Datei stand daneben eine
+zweite, losere Prüfung: es genügte, dass irgendein Argument der
+Befehlszeile `midea2lox.py` hieß. Gemessen in WSL mit der Nummer eines
+fremden Prozesses in der PID-Datei: `tail -f ./midea2lox.py` im Datenordner,
+`python3 -c '…' ./midea2lox.py`, ein gleichnamiges Programm im
+Nachbarordner und `tail ./midea2lox.py -f` wurden alle als laufender Dienst
+gemeldet — im Startskript und in der Oberfläche. Prozessnummern werden
+wiederverwendet, und die Oberfläche bietet einen Stopp-Knopf.
+
+Beide Stellen fragen jetzt dasselbe: erstes Argument ein Python-Interpreter,
+zweites Argument gegen den Arbeitsordner des Prozesses aufgelöst genau
+`data/plugins/Midea2Lox/midea2lox.py`. Der **Benutzer** wird dabei
+absichtlich nicht geprüft — die Nummer stammt aus dem eigenen Datenordner,
+und eine zusätzliche Bedingung hätte einen laufenden Dienst als gestoppt
+angezeigt und den Wächter eine zweite Ausfertigung starten lassen. Geprüft
+ist das in beide Richtungen: als root mit gefundenem und mit nicht
+auffindbarem Dienstbenutzer meldet `status` weiter „läuft".
+
+Dieselbe lose Prüfung stand in den Rückfallwegen von `preupgrade.sh` und
+`uninstall` — den Wegen, die greifen, wenn das Startskript fehlt. Dort war
+sie gefährlicher, denn dort folgt ein `kill`. Beide sind umgestellt.
+
+### `kill -9` ohne zweiten Blick auf die Befehlszeile
+
+In denselben Rückfallwegen stand `kill`, dann Warten, dann `kill -9` — ohne
+noch einmal nachzusehen, wem die Nummer inzwischen gehört. Nachgestellt mit
+einem Prozess, der beim SIGTERM seine Befehlszeile wechselt (`execv` auf
+`sleep`), die Nummer aber behält: bis 4.5.5 traf das `kill -9` das fremde
+Programm. Vor jedem Tötungsschritt wird die Befehlszeile jetzt erneut
+geprüft; `uninstall` meldet außerdem nicht mehr „Dienst beendet", ohne
+nachgesehen zu haben, sondern nennt einen überlebenden Prozess mit seiner
+Nummer.
+
+### Eine Fehlerzeile aus `/proc`, die niemand abstellen konnte
+
+`tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null` sieht aus, als wäre der
+Fehlerkanal stillgelegt. Die Schale führt Umleitungen aber von links nach
+rechts aus: scheitert das Öffnen der Datei, ist `2>/dev/null` noch nicht in
+Kraft, und `/proc/<pid>/cmdline: No such file or directory` steht in der
+Ausgabe. Das trat auf, sobald in der PID-Datei die Nummer eines beendeten
+Prozesses stand — also nach jedem unsauberen Ende des Dienstes — und landete
+so auch im Installations- und im Deinstallationsprotokoll. Gemessen in WSL
+mit beiden Formen nebeneinander. Im Startskript ist die Stelle mit der losen
+Prüfung entfallen, in `preupgrade.sh` und `uninstall` steht die Umleitung
+jetzt vor der Eingabe.
+
+### Der Wächter zählte einen laufenden Dienst weg
+
+Fehlte die PID-Datei, während der Dienst lief, sah `start` nur die fehlende
+Datei und startete eine zweite Ausfertigung. Die kam wegen des belegten
+UDP-Ports nicht hoch; der minütliche Wächter schrieb fünfmal „Neustart ohne
+Wirkung" und danach „aufgegeben" — über einen Dienst, der die ganze Zeit
+lief und weiter Werte lieferte.
+
+`start` sucht jetzt zuerst nach genau diesem Fall. Findet es **einen**
+eigenen Prozess ohne PID-Datei, trägt es dessen Nummer nach, startet nichts
+und beendet nichts, und meldet das einmal — im Plugin-Protokoll und über den
+Systemlogger, mit dem Hinweis, dass dieser Prozess die Dateien ausführt, mit
+denen er gestartet wurde, und ein „Dienst neu starten" in der Oberfläche die
+neue Fassung holt. Finden sich **mehrere**, wird nichts angefasst und der
+Doppelbetrieb gemeldet; eine Nummer davon nachzutragen würde ihn zudecken.
+`status` nennt einen solchen Prozess jetzt ebenfalls, ohne etwas zu ändern.
+
+Beendet wird an dieser Stelle absichtlich nicht: ein Wächter, der einen
+Dienst abschießt, der Werte liefert, ist schlimmer als der Zustand, den er
+beheben soll. Der Weg zum Beenden ist ausdrücklich — `stop` und `restart`
+räumen solche Prozesse ab, und `preupgrade.sh` ruft `stop`. Gemessen in
+beide Richtungen: mit dem Nachtragen endet das Karussell beim ersten Takt
+(ein Dienst, Zähler fort, sechs Takte hintereinander ruhig); ohne es läuft
+es bis „aufgegeben". Ein zweiter Dienst entsteht in keinem der Fälle.
+
+Die Zeile des Wächters heißt deshalb nicht mehr „Dienst lief nicht —
+Neustart", sondern „status meldete den Dienst nicht als laufend —
+Startversuch": was daraus wurde, schreibt das Startskript selbst.
+
+### Beim Systemstart gehörten Datenordner und Merkdatei root
+
+`daemon/daemon` läuft in zwei Rollen: beim Systemstart als root (es liegt
+unter `system/daemons/plugins/`), im Betrieb als `loxberry` — so rufen es
+die Oberfläche und der minütliche Wächter. Angelegt hat es im root-Zweig
+Protokollordner, Datenordner und die Merkdatei `soll_laufen`, und übereignet
+hat es davon nur die PID-Datei. Was root anlegt, gehört root; `loxberry`
+kann es danach weder überschreiben noch entfernen. Betroffen wäre vor allem
+`soll_laufen`: ohne sie zu löschen lässt sich der Dienst über die Oberfläche
+nicht anhalten, der Wächter startet ihn binnen einer Minute wieder.
+
+Alles, was das Skript unter `data/` und `log/` anlegt, wird jetzt dem
+Dienstbenutzer übereignet. Gemessen ist der Aufruf, nicht der
+Eigentümerwechsel: der Prüfbenutzer in WSL ist nicht root. Die Messung
+benutzt eine `chown`-Attrappe auf dem Suchpfad, die ihre Argumente
+mitschreibt — bis 4.5.5 genau ein Aufruf (die PID-Datei), jetzt
+Protokollordner, Datenordner, Merkdatei und PID-Datei. Ohne root wird
+weiterhin kein `chown` gerufen.
+
+### Wie das geprüft ist
+
+Alles in WSL/Ubuntu gemessen, **nicht** am Gerät; paho, msmart und requests
+sind Attrappen, der root-Zweig ist über eine `id`-Attrappe nachgestellt.
+Zwei Prüfstände mit zusammen 112 Prüfzeilen: 28 zum Dienst ohne PID-Datei,
+84 zu Rückgabewerten, Erkennung, Wächter, Rückfallwegen und Eigentümer.
+Gegen das veröffentlichte Archiv 4.5.5 sind 42 der 84 rot, gegen 4.5.6 keine.
+Jede der sechzehn Korrekturen ist außerdem einzeln in einer Kopie
+zurückgebaut worden; jede macht genau die vorher benannten Zeilen rot.
+
+## Neu in 4.5.5
+
+Dieser Abschnitt ist am 17.09.2026 nachgetragen worden — er fehlte bei der
+Veröffentlichung. Was hier steht, stammt aus dem Vergleich der
+veröffentlichten Archive 4.5.4 und 4.5.5, Eintrag für Eintrag: acht Dateien
+unterscheiden sich, davon `plugin.cfg`, `release.cfg` und `prerelease.cfg`
+nur in der Fassungsnummer.
+
+### Die Fassungsnummer in der Kopfzeile fehlte, je nach Einstieg
+
+`LBSystem::pluginversion()` ohne Argument beantwortet die Frage nicht aus
+dem eigenen Ablageort, sondern aus dem zuerst eingebundenen Skript. Am Gerät
+gemessen (17.09.2026): aus einem fremden Einstieg heraus kam `NULL` zurück,
+mit dem Ordnernamen die installierte Fassung. Beide Stellen —
+`index.php` für die Kopfzeile und `mi_lib.php` für den Reiter Test — fragen
+seither mit `basename(__DIR__)`; installiert liegt diese Datei unter
+`webfrontend/htmlauth/plugins/<ordner>/`.
+
+### `REQUEST_METHOD` gibt es unter der Kommandozeile nicht
+
+Drei Stellen in `index.php` lasen `$_SERVER['REQUEST_METHOD']` unmittelbar:
+der Vorlagen-Download, „Einstellungen sichern" und „Einstellungen
+zurückspielen". Unter der PHP-Kommandozeile ist der Schlüssel nicht
+gesetzt, und jede Prüfung, die die Seite dort durchläuft, meldete eine
+Beanstandung, die es auf dem Webserver nicht gibt. Gelesen wird jetzt mit
+`isset()` davor — so, wie `mi_wachposten()` in `mi_lib.php` es schon tat. Am
+Verhalten im Browser ändert sich nichts.
+
+### Sprachdateien neu sortiert, kein Schlüssel geändert
+
+In `language_de.ini` und `language_en.ini` sind 21 Schlüssel an das
+Dateiende gewandert. Nachgezählt: vorher wie nachher **503** Schlüssel je
+Sprache, keiner hinzugekommen, keiner fortgefallen, kein Wert geändert.
+
+### Ein Platzhalter im Kommentar
+
+Im Kopfkommentar von `cron/cron.01min` stand `REPLACELBPDATADIR` als
+Beispiel. Der Installateur ersetzt diese Zeichenfolge überall in der Datei,
+auch im Kommentar; der Satz erklärte danach etwas anderes als gemeint. Er
+nennt den Platzhalter jetzt nicht mehr beim Namen.
+
 ## Neu in 4.5.4
 
 Vier Berichtigungen, alle am Gerät gemessen — und eine davon nimmt eine

@@ -850,10 +850,27 @@ function mi_beispiel_id()
  * Interpreter (python3), nicht der Dateiname. Nachgemessen liefert der
  * Aufruf nie einen Treffer: die Oberflaeche zeigte den Dienst also
  * dauerhaft als gestoppt an, auch waehrend er lief.
+ *
+ * Bis 4.5.5 stand hier die Gegenprobe "einer der ersten drei Eintraege von
+ * /proc/<pid>/cmdline heisst midea2lox.py". Das ist argumentweise, aber
+ * nicht pfadgenau. Gemessen 17.09.2026 in WSL mit der Nummer eines
+ * FREMDEN Prozesses in der PID-Datei: "tail -f ./midea2lox.py" im
+ * Datenordner, "python3 -c '...' ./midea2lox.py", ein gleichnamiges
+ * Programm im Nachbarordner - alle drei wurden als laufender Dienst
+ * gemeldet. Seit 4.5.6 gilt dieselbe Bedingung wie in daemon/daemon
+ * (eigener_dienst): argv[0] ist ein python-Interpreter, argv[1] ist,
+ * gegen den Arbeitsordner des Prozesses aufgeloest, genau
+ * data/plugins/<ordner>/midea2lox.py.
+ *
+ * Der Benutzer des Prozesses wird NICHT geprueft. Die Nummer stammt aus
+ * der eigenen PID-Datei im eigenen Datenordner; eine Benutzerpruefung
+ * waere hier keine Erkennung, sondern eine zusaetzliche Bedingung, unter
+ * der die Oberflaeche einen laufenden Dienst als gestoppt anzeigt.
  */
 function mi_dienst_pid()
 {
-    $datei = mi_paths()['datadir'] . '/dienst.pid';
+    $pfade = mi_paths();
+    $datei = $pfade['datadir'] . '/dienst.pid';
     $roh = is_readable($datei) ? trim((string) @file_get_contents($datei)) : '';
     if ($roh === '' || !ctype_digit($roh)) {
         return null;
@@ -862,19 +879,41 @@ function mi_dienst_pid()
     if ($pid < 2) {
         return null;
     }
-    // Gegenprobe argumentweise, nicht als Teilzeichenkette: Prozessnummern
-    // werden wiederverwendet, und die Oberflaeche bietet einen Stopp-Knopf.
     $cmd = @file_get_contents('/proc/' . $pid . '/cmdline');
-    if ($cmd === false) {
+    if ($cmd === false || $cmd === '') {
         return null;
     }
-    $teile = array_slice(array_values(array_filter(explode("\0", $cmd), 'strlen')), 0, 3);
-    foreach ($teile as $teil) {
-        if (basename($teil) === 'midea2lox.py') {
-            return (string) $pid;
-        }
+    $teile = explode("\0", $cmd);
+    if (count($teile) < 2) {
+        return null;
     }
-    return null;
+    if (!preg_match('#^python(3(\.[0-9]+)?)?$#', basename($teile[0]))) {
+        return null;
+    }
+    $a1 = $teile[1];
+    if (basename($a1) !== 'midea2lox.py') {
+        return null;
+    }
+    $programm = $pfade['dienst'];
+    if (substr($a1, 0, 1) === '/') {
+        return ($a1 === $programm) ? (string) $pid : null;
+    }
+    /* Relativer Pfad - so startet daemon/daemon den Dienst ("./midea2lox.py"
+     * im Datenordner). Eindeutig wird er erst mit dem Arbeitsordner. Steht
+     * dort " (deleted)", hat ein Upgrade den Datenordner unter dem
+     * laufenden Prozess neu angelegt: derselbe Pfad, derselbe Dienst.
+     *
+     * Ist der Arbeitsordner nicht lesbar - /proc/<pid>/cwd gibt ihn nur dem
+     * Eigentuemer des Prozesses und root -, bleibt die Bindung ueber die
+     * eigene PID-Datei; dann wird nicht weiter eingeschraenkt, statt einen
+     * laufenden Dienst als gestoppt zu melden. */
+    $wd = @readlink('/proc/' . $pid . '/cwd');
+    if ($wd === false || $wd === '') {
+        return (string) $pid;
+    }
+    $wd = preg_replace('/ \(deleted\)$/', '', $wd);
+    $ziel = str_replace('/./', '/', $wd . '/' . $a1);
+    return ($ziel === $programm) ? (string) $pid : null;
 }
 
 function mi_dienst($was)
@@ -891,9 +930,20 @@ function mi_dienst($was)
      * Bis 4.3.2 stand hier ein exec() ohne $output und ohne $return_var,
      * und die Funktion lieferte danach immer ''. Die Oberflaeche schloss
      * daraus auf "Der Dienst wurde neu gestartet" - eine Behauptung, kein
-     * Befund. daemon/daemon prueft seinerseits die WIRKUNG (es wartet zwei
-     * Sekunden und sieht nach, ob der Prozess noch lebt) und endet mit 1,
-     * wenn nicht. Genau diese Auskunft wurde weggeworfen.
+     * Befund.
+     *
+     * BERICHTIGT AM 17.09.2026: hier stand, daemon/daemon ende bei einem
+     * Fehlschlag mit 1, und genau diese Auskunft sei weggeworfen worden.
+     * Der erste Halbsatz war falsch. daemon/daemon prueft zwar seit 4.3.0
+     * die Wirkung (es wartet zwei Sekunden und sieht nach, ob der Prozess
+     * noch lebt), warf den Rueckgabewert von start_dienst aber selbst weg:
+     * am Dateiende stand ein nacktes "exit 0". Gemessen 17.09.2026 in WSL
+     * mit einem Programm, das sofort aufgibt: Ausgabe "FEHLER: Midea2Lox
+     * wurde gestartet, lief aber nach zwei Sekunden nicht mehr",
+     * Rueckgabewert 0 - und diese Funktion lieferte '' und die Oberflaeche
+     * "Der Dienst wurde neu gestartet". Seit 4.5.6 folgt der
+     * Rueckgabewert des Startskripts der Wirkung, und dieselbe Messung
+     * ergibt hier 'fehlgeschlagen'.
      *
      * Die Ausgabe wird mit aufgefangen, damit sie nicht in die Seite
      * laeuft; gebraucht wird sie nicht. */

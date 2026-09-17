@@ -45,17 +45,56 @@ if [ -x "$ARGV5/system/daemons/plugins/$ARGV3" ]; then
     "$ARGV5/system/daemons/plugins/$ARGV3" stop
 else
     # Rueckfallebene: PID-Datei unmittelbar auswerten.
+    #
+    # Die Erkennung ist dieselbe wie in daemon/daemon (eigener_dienst):
+    # argv[0] ein python-Interpreter, argv[1] gegen den Arbeitsordner des
+    # Prozesses aufgeloest genau das eigene Programm. Bis 4.5.5 reichte der
+    # DATEINAME irgendeines Arguments - gemessen 17.09.2026 in WSL kam damit
+    # ein "tail -f ./midea2lox.py" im Datenordner durch und wurde beendet.
+    #
+    # Und "2>/dev/null" stand HINTER der Eingabeumleitung. Die Schale fuehrt
+    # Umleitungen von links nach rechts aus: scheitert das Oeffnen von
+    # /proc/<pid>/cmdline, ist der Fehlerkanal noch nicht umgelenkt, und die
+    # Zeile "/proc/<pid>/cmdline: No such file or directory" steht im
+    # Installationsprotokoll. Gemessen 17.09.2026 in WSL, beide Formen
+    # nebeneinander.
     PIDDATEI="$ARGV5/data/plugins/$ARGV3/dienst.pid"
+    PROGRAMM="$ARGV5/data/plugins/$ARGV3/midea2lox.py"
+    unser_prozess() {  # $1 PID
+        local a0 a1 wd ziel
+        { IFS= read -r -d '' a0 && IFS= read -r -d '' a1; } 2>/dev/null < "/proc/$1/cmdline" || return 1
+        case "${a0##*/}" in
+            python|python3|python3.[0-9]|python3.[0-9][0-9]) ;;
+            *) return 1 ;;
+        esac
+        [ "${a1##*/}" = "midea2lox.py" ] || return 1
+        case "$a1" in
+            /*) ziel=$a1 ;;
+            *)  wd=$(readlink "/proc/$1/cwd" 2>/dev/null) || return 1
+                ziel="${wd% (deleted)}/$a1" ;;
+        esac
+        ziel=${ziel//\/.\//\/}
+        [ "$ziel" = "$PROGRAMM" ]
+    }
     if [ -f "$PIDDATEI" ]; then
         PID=$(cat "$PIDDATEI" 2>/dev/null)
         case "$PID" in
             ''|*[!0-9]*) PID="" ;;
         esac
-        if [ -n "$PID" ] && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null \
-             | sed 's#.*/##' | grep -qx "midea2lox.py"; then
+        if [ -n "$PID" ] && unser_prozess "$PID"; then
             kill "$PID" 2>/dev/null
-            sleep 2
-            kill -9 "$PID" 2>/dev/null
+            WARTE=0
+            while [ $WARTE -lt 20 ] && kill -0 "$PID" 2>/dev/null; do
+                sleep 0.25
+                WARTE=$((WARTE + 1))
+            done
+            # Vor dem KILL erneut nachsehen: nach fuenf Sekunden kann die
+            # Nummer schon einem anderen Programm gehoeren, und ein kill -9
+            # an den Falschen ist nicht rueckgaengig zu machen. Bis 4.5.5
+            # stand hier "sleep 2; kill -9" ohne jede weitere Pruefung.
+            if unser_prozess "$PID"; then
+                kill -9 "$PID" 2>/dev/null
+            fi
         fi
         rm -f "$PIDDATEI"
     fi

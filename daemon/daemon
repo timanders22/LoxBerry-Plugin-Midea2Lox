@@ -29,6 +29,24 @@
 # argumentweiser Gegenprobe ueber /proc/<pid>/cmdline. Argumentweise, nicht
 # als Teilzeichenkette - eine fremde Kommandozeile kann den Namen zufaellig
 # enthalten, und ein kill an den Falschen ist nicht rueckgaengig zu machen.
+#
+# ===================================================================
+# WAS 4.5.6 DARAN GEAENDERT HAT
+# ===================================================================
+#
+# Bis 4.5.5 war die Gegenprobe auf zwei Arten gebaut: eigener_dienst()
+# (pfadgenau, unten) fuer die Suche nach Diensten ohne PID-Datei, und
+# gehoert_uns() (nur der Dateiname IRGENDEINES Arguments) fuer die PID-Datei
+# selbst. Gemessen 17.09.2026 in WSL: ein "tail -f ./midea2lox.py" im
+# Datenordner kam durch gehoert_uns() - "status" meldete dann einen fremden
+# Prozess als laufenden Dienst. gehoert_uns() ist entfallen; laufende_pid()
+# fragt jetzt dieselbe Stelle wie die Waisensuche.
+#
+# Ausserdem endeten "start" und "restart" bis 4.5.5 immer mit exit 0 (die
+# Zeile "exit 0" am Dateiende), obwohl start_dienst die Wirkung prueft und
+# mit 1 endet. Gemessen: Ausgabe "FEHLER: Midea2Lox wurde gestartet, lief
+# aber nach zwei Sekunden nicht mehr", Rueckgabewert 0. Die Oberflaeche
+# (mi_dienst) meldete daraufhin Erfolg.
 
 datadir=REPLACELBPDATADIR
 logdir=REPLACELBPLOGDIR
@@ -38,14 +56,106 @@ piddatei="$datadir/dienst.pid"
 # angehaltenen Dienst nach spaetestens einer Minute wieder hochfahren.
 sollmarke="$datadir/soll_laufen"
 programm="$datadir/midea2lox.py"
+protokoll="$logdir/midea2lox.log"
+
+# Alles, was dieses Skript unter data/ und log/ anlegt, muss dem
+# Dienstbenutzer gehoeren.
+#
+# Dieses Skript laeuft in zwei Rollen: beim Systemstart als root (es liegt
+# unter system/daemons/plugins/<ordner>), im Betrieb als loxberry - die
+# Oberflaeche und der minuetliche Waechter rufen es so auf. Was root anlegt,
+# gehoert root; loxberry kann eine solche Datei danach weder ueberschreiben
+# noch entfernen, und in einem root-eigenen Verzeichnis auch keine neue
+# anlegen. Betroffen waeren die Merkdatei (loxberry koennte den Dienst nicht
+# mehr anhalten - der Waechter startete ihn binnen einer Minute wieder), die
+# PID-Datei und das Protokoll.
+#
+# Gemessen 17.09.2026 in WSL mit einer chown-Attrappe auf dem PATH: bis
+# 4.5.5 rief das Skript im root-Zweig chown genau einmal auf, fuer die
+# PID-Datei; Datenordner, Protokollordner und Merkdatei blieben bei root.
+# (Der Eigentuemerwechsel selbst ist in WSL nicht nachgestellt - der
+# Pruefbenutzer ist nicht root. Gemessen ist der Aufruf.)
+uebereignen() {  # $@ Pfade, die dem Dienstbenutzer gehoeren sollen
+    [ "$(id -u)" -eq 0 ] || return 0
+    id loxberry >/dev/null 2>&1 || return 0
+    chown loxberry:loxberry "$@" 2>/dev/null
+    return 0
+}
 
 mkdir -p "$logdir" "$datadir" 2>/dev/null
+uebereignen "$logdir" "$datadir"
 
-# Gehoert die Prozessnummer wirklich zu unserem Dienst?
-gehoert_uns() {
-    [ -n "$1" ] || return 1
-    tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null \
-        | sed 's#.*/##' | grep -qx "midea2lox.py"
+# Eine Zeile ins Plugin-Protokoll UND in den Systemlogger.
+#
+# Das Format ist das des Python-Loggers (data/midea2lox.py: Formatter
+# '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s',
+# datefmt '%d.%m %H:%M'); der minuetliche Waechter schreibt schon so. Die
+# Zeilennummer ist 0, weil sie aus der Schale kommt.
+#
+# Warum zusaetzlich logger: die Ausgabe dieses Skripts verwirft der Cron
+# ("$DAEMON" start >/dev/null 2>&1), und beim Systemstart sieht sie
+# niemand. Ohne Protokollverzeichnis wird nichts geschrieben, statt jede
+# Minute einen Fehler zu erzeugen.
+melde_log() {  # $1 Stufe, $2 Text
+    if [ -d "$logdir" ]; then
+        printf '%s %-12s %-8s :0 %s\n' "$(date '+%d.%m %H:%M')" \
+            "Startskript" "$1" "$2" >> "$protokoll" 2>/dev/null
+        uebereignen "$protokoll"
+    fi
+    if command -v logger >/dev/null 2>&1; then
+        logger -t midea2lox -p daemon.warning "$2" 2>/dev/null
+    fi
+    return 0
+}
+
+# ===================================================================
+# WAS IST "UNSER" PROZESS?
+# ===================================================================
+#
+# Genau heisst:
+#   - argv[0] ist ein python-Interpreter,
+#   - argv[1] ist, gegen den Arbeitsordner des Prozesses aufgeloest, genau
+#     $programm. start_dienst startet "./midea2lox.py" im Datenordner; die
+#     Befehlszeile traegt den Pfad also relativ, eindeutig wird er erst mit
+#     dem Arbeitsordner. Ein Teilwort der Befehlszeile reicht nie.
+#   - fuer das Beenden zusaetzlich: er gehoert dem Dienstbenutzer (als root
+#     startet start_dienst ueber "su loxberry", also ist es dann loxberry,
+#     sonst der Aufrufer).
+# Steht der Arbeitsordner auf " (deleted)", hat ein Upgrade den Datenordner
+# unter dem laufenden Prozess neu angelegt - derselbe Pfad, derselbe Dienst.
+#
+# Die Benutzerpruefung ist ein Schutz VOR DEM TOETEN, keine Erkennung. Beim
+# Lesen der eigenen PID-Datei bleibt sie deshalb aus: die Nummer stammt aus
+# dem eigenen Datenordner, und wer den Dienst von Hand unter einem anderen
+# Benutzer gestartet hat, soll in "status" nicht als "gestoppt" erscheinen -
+# sonst startet der minuetliche Waechter eine zweite Ausfertigung.
+
+dienst_uid() {
+    if [ "$(id -u)" -eq 0 ]; then
+        id -u loxberry 2>/dev/null
+    else
+        id -u
+    fi
+}
+
+eigener_dienst() {  # $1 PID, $2 UID des Dienstbenutzers ("" = nicht pruefen)
+    local a0 a1 wd ziel
+    { IFS= read -r -d '' a0 && IFS= read -r -d '' a1; } 2>/dev/null < "/proc/$1/cmdline" || return 1
+    case "${a0##*/}" in
+        python|python3|python3.[0-9]|python3.[0-9][0-9]) ;;
+        *) return 1 ;;
+    esac
+    [ "${a1##*/}" = "midea2lox.py" ] || return 1
+    if [ -n "$2" ]; then
+        [ "$(stat -c %u "/proc/$1" 2>/dev/null)" = "$2" ] || return 1
+    fi
+    case "$a1" in
+        /*) ziel=$a1 ;;
+        *)  wd=$(readlink "/proc/$1/cwd" 2>/dev/null) || return 1
+            ziel="${wd% (deleted)}/$a1" ;;
+    esac
+    ziel=${ziel//\/.\//\/}
+    [ "$ziel" = "$programm" ]
 }
 
 laufende_pid() {
@@ -55,18 +165,135 @@ laufende_pid() {
     case "$p" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    if gehoert_uns "$p"; then
+    if eigener_dienst "$p" ""; then
         echo "$p"
         return 0
     fi
     return 1
 }
 
+# ===================================================================
+# DIENSTE OHNE PID-DATEI
+# ===================================================================
+#
+# Die PID-Datei kennt nur den Dienst, den dieses Skript zuletzt gestartet
+# hat. Ein Dienst, der an ihr vorbei gestartet wurde oder dessen PID-Datei
+# fehlt, war fuer stop_dienst unsichtbar. Gemessen in WSL (17.09.2026,
+# Pruefung-Upgradeluecke-2026-09-17, Fall C): der alte Dienst ueberlebte
+# preupgrade.sh, hielt den UDP-Port ("Socket konnte nicht gebunden
+# werden"), der neue startete nicht, und der Waechter gab nach fuenf
+# Versuchen auf - waehrend der alte Prozess weiter Herzschlaege sendete.
+#
+# waisen_suchen() ist rein lesend und beendet nichts. Sie verlangt einen
+# bekannten Dienstbenutzer: wer nicht sagen kann, wem der Prozess gehoeren
+# muesste, darf ihn weder toeten noch als eigenen ausgeben.
+#   Rueckgabe 0 = Nummern auf der Standardausgabe (mit fuehrendem Leerraum)
+#             1 = keiner laeuft
+#             2 = Dienstbenutzer unbekannt
+
+waisen_suchen() {
+    local uid d p treffer=""
+    uid=$(dienst_uid)
+    case "$uid" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    for d in /proc/[0-9]*; do
+        p=${d#/proc/}
+        eigener_dienst "$p" "$uid" && treffer="$treffer $p"
+    done
+    [ -n "$treffer" ] || return 1
+    echo "$treffer"
+}
+
+# Beendet alle eigenen Dienste, die jetzt noch laufen. Rueckgabe 0, wenn
+# einer gefunden wurde, 1, wenn keiner lief.
+waisen_beenden() {
+    local uid waisen offen="" p i rc
+    waisen=$(waisen_suchen); rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "Der Dienstbenutzer ist unbekannt - nach Midea2Lox ohne PID-Datei wurde nicht gesucht."
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    uid=$(dienst_uid)
+    echo "Beende Midea2Lox ohne PID-Datei (PID$waisen)..."
+    kill $waisen 2>/dev/null
+    i=0
+    while [ $i -lt 20 ]; do
+        offen=""
+        for p in $waisen; do
+            kill -0 "$p" 2>/dev/null && offen="$offen $p"
+        done
+        [ -n "$offen" ] || break
+        sleep 0.25
+        i=$((i + 1))
+    done
+    # KILL nur an einen Prozess, dessen Befehlszeile JETZT noch unsere ist -
+    # nach fuenf Sekunden kann die Nummer schon einem anderen gehoeren.
+    for p in $offen; do
+        eigener_dienst "$p" "$uid" && kill -9 "$p" 2>/dev/null
+    done
+    [ -n "$offen" ] || return 0
+    i=0
+    while [ $i -lt 8 ]; do
+        offen=""
+        for p in $waisen; do
+            eigener_dienst "$p" "$uid" && offen="$offen $p"
+        done
+        [ -n "$offen" ] || return 0
+        sleep 0.25
+        i=$((i + 1))
+    done
+    echo "Midea2Lox ohne PID-Datei liess sich nicht beenden (PID$offen)."
+    return 0
+}
+
 start_dienst() {
-    local p
+    local p w n
     if p=$(laufende_pid); then
         echo "Midea2Lox laeuft bereits. PID: $p"
         return 0
+    fi
+    # ===============================================================
+    # EIN DIENST OHNE PID-DATEI IST KEIN FEHLENDER DIENST
+    # ===============================================================
+    #
+    # Bis 4.5.5 sah start_dienst nur in die PID-Datei. Fehlte sie, waehrend
+    # der Dienst lief, startete es eine zweite Ausfertigung; die kam wegen
+    # des belegten UDP-Ports nicht hoch, und der minuetliche Waechter
+    # schrieb fuenfmal "Neustart ohne Wirkung" und danach "aufgegeben" -
+    # ueber einen Dienst, der die ganze Zeit lief. Gemessen 17.09.2026
+    # (Pruefung-Upgradeluecke-2026-09-17, Befund B5, Fall C).
+    #
+    # Es wird NICHT beendet und NICHT neu gestartet, sondern die Nummer
+    # nachgetragen und einmal gemeldet. Gruende:
+    #   - "start" auf einen laufenden Dienst heisst "laeuft bereits"; ein
+    #     Dienst ohne Buchfuehrung ist derselbe Fall.
+    #   - Der Waechter darf nichts beenden, was Werte liefert (CLAUDE.md
+    #     Abschnitt 4: melden ist richtig, blockieren nicht). Der Weg zum
+    #     Beenden ist ausdruecklich: "stop" und "restart" raeumen Waisen ab,
+    #     und preupgrade.sh ruft "stop".
+    #   - Gemessen in beide Richtungen: mit dem Nachtragen endet das
+    #     Neustartkarussell beim ersten Takt (ein Dienst, Zaehler fort);
+    #     ohne es lief es bis "aufgegeben". Ein zweiter Dienst entsteht
+    #     dabei in keinem Fall.
+    # Laufen mehrere, wird nichts angefasst und der Doppelbetrieb gemeldet -
+    # eine Nummer davon nachzutragen wuerde ihn zudecken.
+    if w=$(waisen_suchen); then
+        n=$(set -- $w; echo $#)
+        if [ "$n" -eq 1 ]; then
+            touch "$sollmarke" 2>/dev/null
+            echo "${w# }" > "$piddatei"
+            uebereignen "$sollmarke" "$piddatei"
+            echo "Midea2Lox lief ohne PID-Datei. PID nachgetragen:${w}"
+            melde_log "WARNING" "Midea2Lox lief ohne PID-Datei (PID$w). Die PID-Datei wurde nachgetragen, der Prozess NICHT neu gestartet. Er fuehrt die Dateien aus, mit denen er gestartet wurde; nach einem Update ist das die alte Fassung. Ein \"Dienst neu starten\" in der Oberflaeche holt die neue."
+            return 0
+        fi
+        echo "FEHLER: Midea2Lox laeuft $n mal ohne PID-Datei (PID$w)."
+        echo "        Es wurde nichts gestartet und nichts beendet."
+        echo "        Bitte einmal anhalten und dann neu starten."
+        melde_log "ERROR" "Midea2Lox laeuft $n mal ohne PID-Datei (PID$w). Es wurde nichts gestartet und nichts beendet. Bitte den Dienst einmal anhalten und neu starten."
+        return 1
     fi
     if [ ! -x "$programm" ]; then
         echo "FEHLER: $programm fehlt oder ist nicht ausfuehrbar."
@@ -74,6 +301,7 @@ start_dienst() {
     fi
     echo "Starte Midea2Lox..."
     touch "$sollmarke" 2>/dev/null
+    uebereignen "$sollmarke"
     cd "$datadir" || return 1
     if [ "$(id -u)" -eq 0 ]; then
         # Die geschweiften Klammern sind der ganze Unterschied.
@@ -82,9 +310,10 @@ start_dienst() {
         # nohup-Aufruf: in den Hintergrund geht dann "cd ... && nohup ...",
         # und $! ist die Nummer der Huellschale, nicht die von python3.
         # Gemessen unter bash 5.3: in der PID-Datei stand 4077, das echte
-        # python3 lief als 4080. gehoert_uns() sucht "midea2lox.py"
-        # argumentweise in /proc/<pid>/cmdline und findet in der Huellschale
-        # nur "bash", "-c" und den Befehlstext - also nie einen Treffer.
+        # python3 lief als 4080. eigener_dienst() sucht den Interpreter in
+        # argv[0] und das Programm in argv[1] von /proc/<pid>/cmdline und
+        # findet in der Huellschale nur "bash", "-c" und den Befehlstext -
+        # also nie einen Treffer.
         #
         # Die Folge betraf nur den root-Zweig, dafuer vollstaendig: "status"
         # meldete dauerhaft "gestoppt", waehrend der Dienst arbeitete; der
@@ -93,7 +322,7 @@ start_dienst() {
         # Prozess nie mehr erreichen - er ueberlebte Update und
         # Deinstallation.
         su loxberry -c "cd '$datadir' && { nohup ./midea2lox.py >/dev/null 2>&1 & echo \$! > '$piddatei'; }"
-        chown loxberry:loxberry "$piddatei" 2>/dev/null
+        uebereignen "$piddatei"
     else
         nohup ./midea2lox.py >/dev/null 2>&1 &
         echo $! > "$piddatei"
@@ -122,48 +351,78 @@ stop_dienst() {
     # Zuerst die Merkmarke fort - sonst startet der Waechter den Dienst in
     # der naechsten Minute wieder, waehrend hier noch beendet wird.
     rm -f "$sollmarke"
-    if ! p=$(laufende_pid); then
-        echo "Midea2Lox laeuft nicht."
-        rm -f "$piddatei"
-        return 0
-    fi
-    echo "Beende Midea2Lox (PID $p)..."
-    kill "$p" 2>/dev/null
-    # Zeit zum Aufraeumen lassen: der Dienst meldet beim Beenden noch
-    # 'disconnected' per MQTT, damit Loxone den Ausfall mitbekommt.
-    i=0
-    while [ $i -lt 20 ] && kill -0 "$p" 2>/dev/null; do
-        sleep 0.25
-        i=$((i + 1))
-    done
-    if kill -0 "$p" 2>/dev/null && gehoert_uns "$p"; then
-        kill -9 "$p" 2>/dev/null
+    if p=$(laufende_pid); then
+        echo "Beende Midea2Lox (PID $p)..."
+        kill "$p" 2>/dev/null
+        # Zeit zum Aufraeumen lassen: der Dienst meldet beim Beenden noch
+        # 'disconnected' per MQTT, damit Loxone den Ausfall mitbekommt.
+        i=0
+        while [ $i -lt 20 ] && kill -0 "$p" 2>/dev/null; do
+            sleep 0.25
+            i=$((i + 1))
+        done
+        if kill -0 "$p" 2>/dev/null && eigener_dienst "$p" ""; then
+            kill -9 "$p" 2>/dev/null
+        fi
+    else
+        p=""
     fi
     rm -f "$piddatei"
+    if ! waisen_beenden && [ -z "$p" ]; then
+        echo "Midea2Lox laeuft nicht."
+    fi
+    # "stop" hat immer gewirkt, wenn es hier ankommt: SIGKILL laesst sich
+    # nicht abfangen. Der einzige Zweig, der etwas stehen laesst, meldet das
+    # oben im Klartext ("liess sich nicht beenden") und ist nicht
+    # herstellbar - deshalb steht hier 0 und keine Behauptung.
+    return 0
 }
 
+# ===================================================================
+# DER RUECKGABEWERT FOLGT DER WIRKUNG
+# ===================================================================
+#
+# Bis 4.5.5 stand am Dateiende ein nacktes "exit 0". start_dienst prueft
+# seit 4.3.0 die Wirkung und endet mit 1, wenn der Prozess nach zwei
+# Sekunden nicht mehr da ist - dieser Rueckgabewert wurde hier
+# weggeworfen. Gemessen 17.09.2026 in WSL: Ausgabe "FEHLER: Midea2Lox
+# wurde gestartet, lief aber nach zwei Sekunden nicht mehr",
+# Rueckgabewert 0. Die Oberflaeche (mi_dienst in mi_lib.php) fragt genau
+# diesen Wert ab und meldete deshalb "Der Dienst wurde neu gestartet".
+rueck=0
 case "$1" in
     'start'|'')
-        start_dienst ;;
+        start_dienst || rueck=1 ;;
     'stop')
-        stop_dienst ;;
+        stop_dienst || rueck=1 ;;
     'restart')
-        stop_dienst
-        start_dienst ;;
+        # Beide Schritte zaehlen: bleibt beim Anhalten etwas stehen, kommt
+        # der neue Dienst wegen des belegten UDP-Ports nicht hoch, und das
+        # soll der Aufrufer erfahren.
+        stop_dienst || rueck=1
+        start_dienst || rueck=1 ;;
     'waechter')
         # Vom Cron benutzt: startet nur, wenn der Dienst laufen soll.
         if [ -f "$sollmarke" ] && ! laufende_pid >/dev/null; then
-            start_dienst
+            start_dienst || rueck=1
         fi ;;
     'status')
         if p=$(laufende_pid); then
             echo "Midea2Lox laeuft. PID: $p"
         else
             echo "Midea2Lox ist gestoppt."
-            exit 1
+            # Rein lesende Auskunft: ein Dienst ohne PID-Datei ist sonst
+            # nirgends sichtbar, und "gestoppt" allein waere falsch.
+            # Der Rueckgabewert bleibt 1 - der Waechter soll "start"
+            # rufen, und erst das traegt die Nummer nach.
+            if w=$(waisen_suchen); then
+                echo "Es laeuft aber Midea2Lox ohne PID-Datei (PID$w)."
+                echo "\"start\" traegt die Nummer nach, \"stop\" beendet den Prozess."
+            fi
+            rueck=1
         fi ;;
     *)
         echo "Aufruf: $0 start|stop|restart|status"
-        exit 1 ;;
+        rueck=1 ;;
 esac
-exit 0
+exit $rueck
