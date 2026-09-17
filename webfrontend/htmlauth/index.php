@@ -402,7 +402,10 @@ if (isset($_POST['schalten'])) {
 }
 
 // ---------- Loxone-Vorlagen herunterladen ----------
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
+/* isset() an der Lesestelle - wie mi_wachposten() in mi_lib.php es schon
+ * tut; unter der Kommandozeile gibt es REQUEST_METHOD nicht (13.09.2026). */
+if (isset($_SERVER['REQUEST_METHOD'])
+    && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
     $welche = is_string($_POST['vorlage']) ? $_POST['vorlage'] : '';
     if ($welche === 'ausgang') {
         list($mi_vname, $mi_vinhalt) = mi_vorlage_ausgang($mi_cfg);
@@ -430,7 +433,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
  * gemessen unter 7.4.33 und 8.4.24 endete der Knopf mit ArgumentCountError,
  * Rueckgabewert 255 und 0 Byte Ausgabe - auf jeder Anlage eine leere Seite.
  * Es ist mi_config_read(), das die volle Konfiguration liefert. */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
+if (isset($_SERVER['REQUEST_METHOD'])
+    && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
     /* JSON_INVALID_UTF8_SUBSTITUTE: eine von Hand in Latin-1 bearbeitete
      * devices.cfg liess json_encode() bis 4.3.2 mit false enden, und der
      * Knopf "Einstellungen sichern" meldete daraufhin, es liesse sich nichts
@@ -453,7 +457,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
  * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
  * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
  * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
+if (isset($_SERVER['REQUEST_METHOD'])
+    && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
     /* Den Fehlercode ZUERST. Eine Datei, die an upload_max_filesize
      * gescheitert ist, kommt mit leerem tmp_name an und wurde bis 4.3.2 als
      * "Es wurde keine Datei ausgewaehlt" gemeldet - der Anwender hatte aber
@@ -553,7 +558,12 @@ $mi_bsp     = mi_beispiel_id();
 
 $mi_version = '';
 if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-    $mi_version = (string) LBSystem::pluginversion();
+    /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
+     * Antwort am ersten eingebundenen Skript - am Geraet gemessen
+     * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
+     * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
+     * unter webfrontend/html(auth)/plugins/<ordner>/. */
+    $mi_version = (string) LBSystem::pluginversion(basename(__DIR__));
 }
 
 /* Eine unbekannte Region ist ein Aktualisierungsfall, kein Grund zu raten.

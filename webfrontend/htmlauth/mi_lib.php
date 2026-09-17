@@ -1968,7 +1968,12 @@ function mi_sicherung_bauen($cfg = null)
     }
     $fassung = '';
     if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-        $fassung = (string) LBSystem::pluginversion();
+        /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
+         * Antwort am ersten eingebundenen Skript - am Geraet gemessen
+         * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
+         * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
+         * unter webfrontend/html(auth)/plugins/<ordner>/. */
+        $fassung = (string) LBSystem::pluginversion(basename(__DIR__));
     }
     return array(
         '_hinweis'      => mi_t('UI.SICH_KOPF'),

@@ -28,7 +28,7 @@
 #    falsche Zeuge. Das Ergebnis geht ueber data/lebenszeichen.py an
 #    <praefix>/status/dienst.
 #
-# Alle Pfade werden aus EINEM Platzhalter abgeleitet. REPLACELBPDATADIR ist
+# Alle Pfade werden aus EINEM Platzhalter abgeleitet, dem des Datenordners:
 # <home>/data/plugins/<ordner>; daraus ergeben sich Ordnername und
 # Wurzelverzeichnis. So kann kein zweiter Platzhalter danebenliegen.
 
