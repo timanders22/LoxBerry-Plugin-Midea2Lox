@@ -374,6 +374,11 @@ if (isset($_POST['dienst'])) {
         // Bis 4.2.12 meldeten BEIDE Faelle "Startskript fehlt" - auch der,
         // in dem gar keine gueltige Aktion angefordert war.
         $mi_fehler[] = sprintf(mi_t('UI.DIENST_SKRIPT_FEHLT'), mi_e($mi_p['daemon']));
+    } elseif ($ergebnis === 'aktualisierung') {
+        // Seit 4.5.7: waehrend einer Aktualisierung startet das Startskript
+        // nicht und endet trotzdem mit 0. Ohne diesen Zweig stuende hier
+        // "Der Dienst wurde neu gestartet" - eine Behauptung ohne Wirkung.
+        $mi_hinweise[] = mi_t('UI.DIENST_UPGRADE');
     } elseif ($ergebnis === 'fehlgeschlagen') {
         // Seit 4.4.0 unterscheidbar: das Startskript LIEF, hat aber mit
         // einem Fehler geendet. Bis dahin meldete die Oberflaeche in diesem

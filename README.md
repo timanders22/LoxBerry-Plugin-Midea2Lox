@@ -10,6 +10,95 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.7
+
+### Ein bewusst angehaltener Dienst lief nach dem Systemstart wieder
+
+Das Plugin merkt sich in `data/plugins/Midea2Lox/soll_laufen`, ob der Dienst
+laufen soll. „Dienst anhalten" entfernt die Datei, „Dienst starten" legt sie
+an; der minütliche Wächter sieht seit 4.3.0 zuerst dort nach und lässt einen
+angehaltenen Dienst in Ruhe.
+
+Das Startskript tat das nur im Zweig `waechter`. Beim Systemstart — und bei
+jedem `start` und `restart` — startete es bedingungslos und legte die
+Merkdatei dabei gleich wieder an. Gemessen am 18.09.2026 in WSL: Merkdatei
+entfernt, `daemon start` aufgerufen, danach **ein** laufender Prozess
+(erwartet null) und die Merkdatei wieder da. Wer den Dienst absichtlich
+anhielt, hatte ihn nach dem nächsten Neustart des LoxBerry zurück.
+
+Seit 4.5.7 achten alle Startwege dieselbe Merkdatei. Zwei Wege setzen sie
+ausdrücklich außer Kraft, und nur diese zwei:
+
+* `postupgrade.sh` — der Start nach der Installation. Der Installer räumt
+  den Datenordner und mit ihm die Merkdatei beim Upgrade ab; ohne Ausnahme
+  käme nach jedem Update kein Dienst mehr hoch.
+* die Oberfläche — bis dorthin kommt nur ein angemeldeter Mensch, der einen
+  Knopf gedrückt oder Einstellungen gespeichert hat. Ohne Ausnahme wäre der
+  Knopf „Dienst starten" nach einem „Dienst anhalten" wirkungslos.
+
+Ein übersprungener Start ist kein Fehlschlag: das Skript sagt im Klartext,
+warum es nichts getan hat, schreibt eine Zeile ins Protokoll und endet
+mit 0.
+
+### Während einer Aktualisierung startet nichts mehr
+
+Zwischen `preupgrade.sh` und `postupgrade.sh` liegt eine Lücke von rund
+einer Minute, in der der Installer den Datenordner löscht, die neuen
+Dateien einspielt und die Hakenskripte durchläuft. Wer in dieser Zeit
+startet — ein Systemstart, der minütliche Takt, ein Knopf in der Oberfläche
+—, fährt den Dienst mit den Vorgabewerten hoch, und der nächste Schritt des
+Installers zieht ihm die Dateien unter den Füßen weg.
+
+`preupgrade.sh` legt deshalb als Allererstes
+`data/plugins/Midea2Lox.upgrade_laeuft` mit der Unixzeit an — **neben** dem
+Datenordner, denn den löscht der Installer mitsamt Inhalt. Solange die Marke
+gilt, startet das Startskript nicht. Nur eine Marke, die höchstens eine
+Stunde alt ist, zählt: eine abgebrochene Installation darf den Dienst nicht
+für immer stilllegen. Ältere, unlesbare und in der Zukunft liegende Marken
+gelten nicht. Lässt sich die Uhr nicht lesen, fällt die Prüfung
+**geschlossen** aus — dann gilt die Marke.
+
+`postupgrade.sh` startet am Ende mit beiden Ausnahmen und entfernt die Marke
+erst **danach**. Umgekehrt bliebe zwischen „Marke weg" und „gestartet" ein
+Fenster, in dem ein Minutentakt weder Marke noch Dienst sieht und einen
+eigenen startet. `uninstall` räumt die Marke weg.
+
+Gemessen, ob in der Lücke überhaupt etwas anläuft — in beiden Lagen:
+
+* Im Regelfall nicht. Der Minutentakt steigt aus, sobald
+  `data/plugins/Midea2Lox` fehlt, und der Installer hat es gerade gelöscht.
+* Überlebt der Merker die Lücke aber doch, dann schon. Der Prüfstand der
+  Upgradelücke stellt genau das her: 4.5.6 fuhr dort einen Dienst mit der
+  **Vorgabekonfiguration** hoch — Präfix `Midea2Lox` statt des
+  eingestellten —, und nach dem Update liefen zwei Bindungen statt einer.
+  Mit 4.5.7 bleibt es bei null Prozessen in der Lücke und genau einem
+  danach, mit dem zurückgespielten Präfix.
+
+Die Marke deckt außerdem die Wege ab, die der Minutentakt gar nicht sieht:
+Systemstart mitten im Update, ein Aufruf des Startskripts von Hand, ein
+Knopf in der Oberfläche.
+
+### Die Oberfläche behauptet keinen Start mehr, den es nicht gab
+
+Weil ein übersprungener Start mit 0 endet, hätte die Oberfläche während
+einer Aktualisierung „Der Dienst wurde neu gestartet" gemeldet. Sie fragt
+die Marke jetzt selbst — mit derselben Frist wie das Startskript — und sagt
+stattdessen, dass gerade eine Aktualisierung läuft. Im Reiter *Test* stehen
+zwei neue Zeilen: *Soll der Dienst laufen?* und *Läuft gerade eine
+Aktualisierung?*
+
+### Wie das geprüft ist
+
+Alles in WSL/Ubuntu gemessen, **nicht** am Gerät; paho, msmart und requests
+sind Attrappen, es gibt weder Broker noch Klimagerät. Ein Prüfstand mit
+**68 Prüfzeilen** in fünf Gruppen: der Wille bei `start`, ohne Argument, bei
+`restart`, `waechter`, `stop` und im Minutentakt; die Marke frisch, alt, aus
+der Zukunft, leer, unlesbar und ohne lesbare Uhr; der ganze Upgrade-Ablauf
+am Stück samt Lücke; die beiden Wege der Oberfläche; die zwei Zeilen im
+Reiter Test. Gegen das veröffentlichte Archiv 4.5.6 sind 20 davon rot, gegen
+4.5.7 keine. Jede der zwölf Korrekturen ist außerdem einzeln in einer Kopie
+zurückgebaut worden; jede macht genau die vorher benannten Zeilen rot.
+
 ## Neu in 4.5.6
 
 ### Ein Dienst ohne PID-Datei überlebte Update, Neustart und Deinstallation

@@ -53,8 +53,26 @@ rm -rf "$SICHER"
 # von den Hakenskripten je zu sehen bekommt; eine Erfolgsmeldung fuer einen
 # Dienst, der nicht laeuft, schickt ihn an die falsche Stelle
 # (Regeln/06, APC-UPS NG 1.2.5).
+#
+# ZWEI AUSNAHMEN, UND WARUM SIE HIER STEHEN
+#
+# daemon/daemon startet seit 4.5.7 nicht mehr blind. Es fragt zweierlei:
+#   - Liegt der Merker soll_laufen? purge_installation hat den Datenordner
+#     gerade abgeraeumt, also liegt er nie - MI_START_TROTZ_WILLE=1.
+#   - Liegt die Marke aus preupgrade.sh? Sie liegt noch, denn sie wird erst
+#     unten entfernt - MI_START_TROTZ_MARKE=1.
+# Beide Ausnahmen gelten nur fuer diesen einen Aufruf. Es ist der Start
+# nach der Installation, und er ist gewollt.
+#
+# Die Marke faellt erst NACH dem Start. Umgekehrt - Marke weg, dann starten
+# - bliebe zwischen beiden Schritten ein Fenster offen, in dem ein
+# Minutentakt weder die Marke noch einen laufenden Dienst sieht und einen
+# eigenen startet; an Chromecast4lox 1.3.10 mit 400 Waechterlaeufen im
+# Abstand von 0,02 s gemessen (17.09.2026). Mit der Ausnahme oben ist das
+# Fenster ganz geschlossen: die Marke liegt waehrend des ganzen Starts.
 echo "<INFO> Starte Midea2Lox"
-STARTAUS=$("$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)
+STARTAUS=$(MI_START_TROTZ_WILLE=1 MI_START_TROTZ_MARKE=1 \
+	"$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)
 STARTRC=$?
 if [ "$STARTRC" -eq 0 ]; then
 	echo "<OK> Midea2Lox laeuft."
@@ -63,6 +81,21 @@ else
 	echo "<WARNING> Midea2Lox laeuft nach dem Update nicht. Der minuetliche"
 	echo "<WARNING> Waechter versucht es weiter; der Grund steht in"
 	echo "<WARNING> log/plugins/$PDIR/midea2lox.log."
+fi
+
+# Die Marke der Aktualisierung faellt hier - postupgrade.sh ist in dieser
+# Linie das letzte Hakenskript, das LoxBerry ruft (es gibt kein
+# postroot.sh; Reihenfolge nach Regeln/06: preroot, preinstall, preupgrade,
+# postinstall, postupgrade, postroot).
+MARKE="$LBHOME/data/plugins/$PDIR.upgrade_laeuft"
+if [ -f "$MARKE" ]; then
+	rm -f "$MARKE" 2>/dev/null
+	if [ -f "$MARKE" ]; then
+		echo "<WARNING> Die Marke $MARKE liess sich nicht entfernen."
+		echo "<WARNING> Sie verfaellt nach einer Stunde von selbst."
+	else
+		echo "<OK> Marke der Aktualisierung entfernt."
+	fi
 fi
 
 exit 0

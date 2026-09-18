@@ -74,6 +74,26 @@ function mi_pruefungen($cfg)
         $pid !== null ? sprintf(mi_t('UI.LAEUFT_PID'), mi_e($pid))
                       : mi_e(mi_t('UI.GESTOPPT')));
 
+    /* Zwei Zeilen zu den beiden Fragen, die daemon/daemon seit 4.5.7 vor
+     * jedem Start stellt (CLAUDE.md Abschnitt 6: zu jeder Regel gehoert das
+     * Werkzeug, das sie findet). Beide sind Auskunft, kein Urteil: ein
+     * bewusst angehaltener Dienst ist kein Fehler, eine laufende
+     * Aktualisierung auch nicht - deshalb ein Strich und kein Kreuz. */
+    $soll = is_file($p['sollmarke']);
+    $z[] = array(mi_e(mi_t('PRUEF.SOLL')), $soll ? 1 : 2,
+        $soll ? mi_e(mi_t('UI.SOLL_JA')) : mi_t('UI.SOLL_NEIN'));
+
+    $malter = mi_upgrade_alter();
+    if (mi_upgrade_laeuft()) {
+        $z[] = array(mi_e(mi_t('PRUEF.MARKE')), 2,
+            sprintf(mi_t('UI.MARKE_JA'), (int) $malter));
+    } elseif (is_file($p['marke'])) {
+        $z[] = array(mi_e(mi_t('PRUEF.MARKE')), 1,
+            sprintf(mi_t('UI.MARKE_ALT'), mi_e($p['marke'])));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.MARKE')), 1, mi_e(mi_t('UI.MARKE_NEIN')));
+    }
+
     /* Arbeitet der Dienst noch? Ein Prozess kann dastehen und nichts tun.
      * Ueber einen Dienst, der gar nicht laeuft, wird kein Herzschlag
      * beurteilt - sonst stuenden hier zwei rote Zeilen fuer eine Ursache. */

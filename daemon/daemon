@@ -55,6 +55,10 @@ piddatei="$datadir/dienst.pid"
 # der Dienst laufen SOLL. Ohne sie wuerde der Waechter einen bewusst
 # angehaltenen Dienst nach spaetestens einer Minute wieder hochfahren.
 sollmarke="$datadir/soll_laufen"
+# Marke einer laufenden Aktualisierung. Sie liegt NEBEN dem Datenordner -
+# purge_installation loescht data/plugins/<ordner> mitsamt Inhalt, eine
+# Marke darin waere genau dann weg, wenn sie gebraucht wird.
+marke="$datadir.upgrade_laeuft"
 programm="$datadir/midea2lox.py"
 protokoll="$logdir/midea2lox.log"
 
@@ -106,6 +110,81 @@ melde_log() {  # $1 Stufe, $2 Text
         logger -t midea2lox -p daemon.warning "$2" 2>/dev/null
     fi
     return 0
+}
+
+# ===================================================================
+# ZWEI FRAGEN VOR JEDEM START
+# ===================================================================
+#
+# Gemessen am 18.09.2026 (Bestand-2026-09-18/klasse-G, Spielart G1,
+# MESSUNG_wsl.txt): mit entferntem Merker "soll_laufen" startete
+# "daemon start" den Dienst trotzdem - 1 Prozess, erwartet 0 - und legte
+# den Merker dabei neu an. Ein bewusst angehaltener Dienst lief damit nach
+# dem naechsten Systemstart wieder. Der minuetliche Waechter achtet den
+# Merker seit 4.3.0; dieses Skript tat es nur im Zweig "waechter".
+#
+# 1. DER WILLE. "stop" nimmt den Merker fort, "start" legt ihn an. Fehlt
+#    er, soll der Dienst nicht laufen. Die Ausnahme MI_START_TROTZ_WILLE=1
+#    setzen genau zwei Stellen, und beide sind eine ausdrueckliche
+#    Handlung: postupgrade.sh - der Start nach der Installation, bei dem
+#    purge_installation den Datenordner und mit ihm den Merker gerade
+#    abgeraeumt hat - und mi_dienst() in der Oberflaeche, also der
+#    Knopfdruck eines angemeldeten Menschen. Systemstart, Minutentakt und
+#    jeder andere Aufruf achten den Merker.
+#
+# 2. DIE MARKE. preupgrade.sh legt data/plugins/<ordner>.upgrade_laeuft
+#    mit der Unixzeit an. Solange sie gilt, wird nicht gestartet - sonst
+#    laeuft der Dienst mitten in der Aktualisierung mit der
+#    Vorgabekonfiguration an. Nur eine Marke, die hoechstens 3600 s alt
+#    ist, zaehlt: eine abgebrochene Installation darf den Dienst nicht fuer
+#    immer stilllegen. Aeltere, unlesbare und in der Zukunft liegende
+#    gelten nicht. Ohne lesbare Uhr faellt die Pruefung GESCHLOSSEN aus
+#    (CLAUDE.md Abschnitt 4) - liefert "date" nichts, gilt die Marke.
+#    MI_START_TROTZ_MARKE=1 setzt nur postupgrade.sh: dort ist die Marke
+#    die eigene, und der Start ist der letzte Schritt der Installation.
+#    Bauweise und Fristen nach Einspeisebremse 0.9.20 und Chromecast4lox
+#    1.3.11 (dort daemon/daemon, Frage 2).
+
+wille_liegt() {
+    [ "${MI_START_TROTZ_WILLE:-0}" = "1" ] && return 0
+    [ -f "$sollmarke" ]
+}
+
+marke_gilt() {
+    local seit jetzt alter
+    [ "${MI_START_TROTZ_MARKE:-0}" = "1" ] && return 1
+    [ -f "$marke" ] || return 1
+    seit=$(cat "$marke" 2>/dev/null)
+    case "$seit" in
+        ''|*[!0-9]*) seit=0 ;;
+    esac
+    jetzt=$(date +%s 2>/dev/null)
+    case "$jetzt" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    alter=$(( jetzt - seit ))
+    [ "$alter" -ge 0 ] && [ "$alter" -lt 3600 ]
+}
+
+# $1: 1 = der Dienst soll laufen. Bei "restart" wird das VOR dem Anhalten
+# gemessen - stop_dienst nimmt den Merker fort, sonst startete "restart"
+# nie wieder. Ein uebersprungener Start ist kein Fehlschlag: die Rueckgabe
+# ist 0, damit weder der Installer noch die Oberflaeche einen Fehler
+# meldet, den es nicht gibt.
+starten_wenn_erlaubt() {
+    if marke_gilt; then
+        echo "Start uebersprungen: eine Aktualisierung dieses Plugins laeuft."
+        melde_log "INFO" "Start uebersprungen: eine Aktualisierung dieses Plugins laeuft."
+        return 0
+    fi
+    if [ "$1" != "1" ]; then
+        echo "Start uebersprungen: Midea2Lox ist bewusst angehalten."
+        echo "        Der Merker $sollmarke fehlt; \"stop\" hat ihn entfernt."
+        echo "        Der Knopf \"Dienst starten\" in der Oberflaeche legt ihn wieder an."
+        melde_log "INFO" "Start uebersprungen: Midea2Lox ist bewusst angehalten (der Merker soll_laufen fehlt)."
+        return 0
+    fi
+    start_dienst
 }
 
 # ===================================================================
@@ -392,19 +471,23 @@ stop_dienst() {
 rueck=0
 case "$1" in
     'start'|'')
-        start_dienst || rueck=1 ;;
+        if wille_liegt; then wille=1; else wille=0; fi
+        starten_wenn_erlaubt "$wille" || rueck=1 ;;
     'stop')
         stop_dienst || rueck=1 ;;
     'restart')
+        # Der Wille wird VOR dem Anhalten gelesen - stop_dienst entfernt
+        # den Merker.
+        if wille_liegt; then wille=1; else wille=0; fi
         # Beide Schritte zaehlen: bleibt beim Anhalten etwas stehen, kommt
         # der neue Dienst wegen des belegten UDP-Ports nicht hoch, und das
         # soll der Aufrufer erfahren.
         stop_dienst || rueck=1
-        start_dienst || rueck=1 ;;
+        starten_wenn_erlaubt "$wille" || rueck=1 ;;
     'waechter')
         # Vom Cron benutzt: startet nur, wenn der Dienst laufen soll.
         if [ -f "$sollmarke" ] && ! laufende_pid >/dev/null; then
-            start_dienst || rueck=1
+            starten_wenn_erlaubt 1 || rueck=1
         fi ;;
     'status')
         if p=$(laufende_pid); then

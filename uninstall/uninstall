@@ -148,5 +148,10 @@ UN_FOLDER="${3:-}"
 UN_BASE="${5:-$LBHOMEDIR}"
 if [ -n "$UN_FOLDER" ] && [ -n "$UN_BASE" ] && [ -d "$UN_BASE/data/plugins" ]; then
     rm -rf "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung" 2>/dev/null
+    # Dasselbe gilt fuer die Marke aus preupgrade.sh (seit 4.5.7). Sie liegt
+    # aus demselben Grund neben dem Ordner und bliebe sonst liegen - eine
+    # abgebrochene Aktualisierung, gefolgt von einer Deinstallation, liesse
+    # eine Datei zurueck, die niemand mehr entfernt.
+    rm -f "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_laeuft" 2>/dev/null
 fi
 exit 0

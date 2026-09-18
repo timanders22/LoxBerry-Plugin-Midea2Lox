@@ -7,6 +7,51 @@ ARGV5=$5 # Fifth argument is Base folder of LoxBerry
 # Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
 LBHOMEDIR="${LBHOMEDIR:-$5}"
 
+# ===================================================================
+# DIE MARKE - ALS ALLERERSTES
+# ===================================================================
+#
+# Zwischen diesem Skript und postupgrade.sh liegt die Upgradeluecke: der
+# Installer raeumt mit &purge_installation den Datenordner ab, spielt die
+# neuen Dateien ein und laeuft die Hakenskripte durch. Wer in dieser Zeit
+# startet - ein Systemstart, ein Aufruf des Startskripts, der Minutentakt -
+# faehrt den Dienst mit der Vorgabekonfiguration hoch, und beim naechsten
+# Schritt loescht der Installer die Dateien unter ihm weg. Gemessen am
+# 17.09.2026 (Pruefung-Upgradeluecke-2026-09-17): zwei Dienste, der alte
+# hielt den UDP-Port, der neue kam nicht hoch.
+#
+# Deshalb eine Marke mit der Unixzeit, NEBEN dem Datenordner (derselbe
+# Grund wie beim Sicherungsordner unten: der Punkt im Namen rettet sie vor
+# "rm -rf .../<x>/"). daemon/daemon und damit auch der Minutentakt lesen
+# sie; postupgrade.sh entfernt sie nach dem Start wieder. Bauweise nach
+# Einspeisebremse 0.9.20, Entscheidung des Hausherrn vom 18.09.2026.
+#
+# Die Zeile steht VOR allem anderen: eine Marke, die erst nach der
+# Sicherung entstuende, liesse genau das Zeitfenster offen, das sie
+# schliessen soll. Schreibt sie sich nicht, geht die Installation trotzdem
+# weiter - eine Aktualisierung an einer nicht schreibbaren Marke scheitern
+# zu lassen waere der groessere Schaden.
+#
+# Die Uhr wird gemessen, nicht angenommen: eine Marke mit leerem Inhalt
+# gilt nirgends (dort steht dann 0, und 0 ist aelter als eine Stunde). Ein
+# blindes "date +%s > MARKE" haette die Datei auch dann angelegt, wenn der
+# fork scheitert - eine Marke, die nicht wirkt.
+MARKE="$ARGV5/data/plugins/$ARGV3.upgrade_laeuft"
+mkdir -p "$ARGV5/data/plugins" 2>/dev/null
+MARKE_ZEIT=$(date +%s 2>/dev/null)
+case "$MARKE_ZEIT" in
+    ''|*[!0-9]*) MARKE_ZEIT="" ;;
+esac
+if [ -n "$MARKE_ZEIT" ] && printf '%s\n' "$MARKE_ZEIT" > "$MARKE" 2>/dev/null; then
+    chmod 0644 "$MARKE" 2>/dev/null
+    echo "<INFO> Marke fuer die laufende Aktualisierung gesetzt ($MARKE)."
+else
+    rm -f "$MARKE" 2>/dev/null
+    echo "<WARNING> Die Marke $MARKE liess sich nicht setzen."
+    echo "<WARNING> Startet der Rechner waehrend der Aktualisierung neu, kann"
+    echo "<WARNING> der Dienst mit den Vorgabewerten anlaufen."
+fi
+
 # Der Sicherungsordner liegt unter data/, NICHT unter /tmp.
 #
 # /tmp ist auf dem LoxBerry eine Ramdisk: bricht die Installation ab oder

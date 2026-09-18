@@ -75,6 +75,11 @@ function mi_paths()
         'abos_alt' => $home . '/config/system/subscriptions.json',
         'log'     => $home . '/log/plugins/' . $ordner . '/midea2lox.log',
         'datadir'    => $home . '/data/plugins/' . $ordner,
+        // Der Merker, der sagt, ob der Dienst laufen SOLL, und die Marke
+        // einer laufenden Aktualisierung. Die Marke liegt NEBEN dem
+        // Datenordner - purge_installation loescht den Ordner samt Inhalt.
+        'sollmarke'  => $home . '/data/plugins/' . $ordner . '/soll_laufen',
+        'marke'      => $home . '/data/plugins/' . $ordner . '.upgrade_laeuft',
         'leben'   => $home . '/data/plugins/' . $ordner . '/lebenszeichen.json',
         // Ab 4.5.0: derselbe Zustand, den die Automatik veroeffentlicht, als
         // Datei - die Oberflaeche kann kein MQTT lesen.
@@ -916,6 +921,36 @@ function mi_dienst_pid()
     return ($ziel === $programm) ? (string) $pid : null;
 }
 
+/**
+ * Liegt eine gueltige Marke einer laufenden Aktualisierung?
+ *
+ * Dieselbe Frist und dieselbe Bauart wie in daemon/daemon (marke_gilt):
+ * nur eine Marke, die hoechstens 3600 Sekunden alt ist, zaehlt; aeltere,
+ * unlesbare und in der Zukunft liegende gelten nicht. Rein lesend.
+ */
+function mi_upgrade_alter()
+{
+    $datei = mi_paths()['marke'];
+    if (!is_file($datei)) {
+        return null;
+    }
+    $inhalt = @file_get_contents($datei);
+    if ($inhalt === false) {
+        return null;
+    }
+    $inhalt = trim($inhalt);
+    if ($inhalt === '' || !ctype_digit($inhalt)) {
+        return null;
+    }
+    return time() - (int) $inhalt;
+}
+
+function mi_upgrade_laeuft()
+{
+    $alter = mi_upgrade_alter();
+    return ($alter !== null && $alter >= 0 && $alter < 3600);
+}
+
 function mi_dienst($was)
 {
     if (!in_array($was, array('start', 'stop', 'restart'), true)) {
@@ -924,6 +959,19 @@ function mi_dienst($was)
     $d = mi_paths()['daemon'];
     if (!is_executable($d)) {
         return 'fehlt';
+    }
+    /* WAEHREND EINER AKTUALISIERUNG WIRD NICHT GESTARTET - UND NICHTS
+     * BEHAUPTET.
+     *
+     * daemon/daemon ueberspringt den Start seit 4.5.7, solange die Marke
+     * aus preupgrade.sh gilt, und endet dabei mit 0 (ein uebersprungener
+     * Start ist kein Fehlschlag). Ohne diese Abfrage bekaeme die
+     * Oberflaeche also eine 0 und meldete "Der Dienst wurde neu
+     * gestartet", obwohl nichts gestartet wurde - eine Behauptung ohne
+     * Wirkung (CLAUDE.md Abschnitt 2). "stop" bleibt erlaubt: anhalten
+     * geht immer. */
+    if ($was !== 'stop' && mi_upgrade_laeuft()) {
+        return 'aktualisierung';
     }
     /* Den Rueckgabewert HOLEN und ansehen.
      *
@@ -949,7 +997,21 @@ function mi_dienst($was)
      * laeuft; gebraucht wird sie nicht. */
     $aus = array();
     $code = 0;
-    @exec(escapeshellarg($d) . ' ' . escapeshellarg($was) . ' 2>&1', $aus, $code);
+    /* MI_START_TROTZ_WILLE=1: daemon/daemon startet seit 4.5.7 nicht mehr,
+     * wenn der Merker soll_laufen fehlt - sonst lief ein bewusst
+     * angehaltener Dienst nach dem naechsten Systemstart wieder (gemessen
+     * 18.09.2026, Bestand-2026-09-18/klasse-G, Spielart G1). Hier ist der
+     * Merker gerade nicht der Massstab, sondern der Knopfdruck: bis hierher
+     * kommt nur ein angemeldeter Mensch, der "Dienst starten" oder
+     * "Dienst neu starten" gedrueckt oder Einstellungen gespeichert hat.
+     * Ohne diese Ausnahme waere der Knopf "Dienst starten" nach einem
+     * "Dienst anhalten" wirkungslos - der Merker ist dann fort. Die
+     * Ausnahme gilt nur fuer diesen einen Aufruf.
+     *
+     * Die Zuweisung vor dem Befehl geht durch /bin/sh, das exec() ohnehin
+     * benutzt; "stop" bekommt sie nicht, dort gibt es nichts zu starten. */
+    $vorsatz = ($was === 'stop') ? '' : 'MI_START_TROTZ_WILLE=1 ';
+    @exec($vorsatz . escapeshellarg($d) . ' ' . escapeshellarg($was) . ' 2>&1', $aus, $code);
     return ((int) $code === 0) ? '' : 'fehlgeschlagen';
 }
 
