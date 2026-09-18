@@ -177,39 +177,109 @@ rm -rf "$VENV_VORHER"
 NETZ_BASE="${5:-$LBHOMEDIR}"
 NETZ_PDIR="${3:-Midea2Lox}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
-# Ab 4.3.0 nimmt netz_zurueck MEHRERE Sollsummen entgegen, durch Leerzeichen
-# getrennt: die der mitgelieferten Vorgabe DIESER Fassung und die der
-# Vorgaengerfassungen. Grund ist der Aktualisierungsfall - wer nie gespeichert
-# hat, dessen Datei ist zeichengenau die Vorgabe der ALTEN Fassung, und mit
-# nur einer Summe wuerde sie nicht als "verloren" erkannt. Eine Zahl, die nur
-# fuer die neueste Fassung stimmt, ist eine Pruefung auf Zeit.
+# ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
+# Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
+# wird nach dem INHALT, nicht nach der Groesse. Bis 4.5.7 stand an diesen
+# Stellen "[ -s datei ]": eine abgeschnittene Datei ist nicht leer, und die
+# mitgelieferte Vorgabe auch nicht. Beide verdraengten die heile
+# Zweitschrift (Bestand-2026-09-18/klasse-C; nachgemessen 18.09.2026 in WSL,
+# Pruefung-Midea2Lox-4.5.8, Faelle C1-C3 und D3).
+#
+# "Eigenes" heisst: die Datei ist vollstaendig geschrieben (jeder Schreiber
+# dieser Linie - mi_config_write(), mi_devices_write(), discover.py - endet
+# mit einem Zeilenumbruch), sie hat den Aufbau, den der Dienst liest, und
+# sie ist NICHT zeichengenau eine mitgelieferte Vorgabe. Die Pruefsummen
+# sind die der Vorgaben dieser und der frueheren Fassungen (die Liste stand
+# bis 4.5.7 nur in postinstall.sh).
+# Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
+# erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
+MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
+mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
+    local ist soll liste
+    case "$1" in
+        devices.cfg)            liste=$MI_VORGABE_DEVICES ;;
+        midea2lox.cfg)          liste=$MI_VORGABE_MIDEA ;;
+        mqtt_subscriptions.cfg) liste=$MI_VORGABE_ABO ;;
+        *) return 1 ;;
+    esac
+    [ -f "$2" ] || return 1
+    ist=$(sha256sum "$2" 2>/dev/null | cut -d" " -f1)
+    [ -n "$ist" ] || return 1
+    for soll in $liste; do
+        [ "$ist" = "$soll" ] && return 0
+    done
+    return 1
+}
+mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwenders traegt
+    local k
+    [ -f "$2" ] && [ -r "$2" ] && [ -s "$2" ] || return 1
+    mi_vorgabe "$1" "$2" && return 1
+    case "$1" in
+        midea2lox.cfg)
+            # Endet mit Zeilenumbruch, Abschnitt [default], und die Schluessel,
+            # die schon die Vorgabe von 4.3.x trug.
+            [ -z "$(tail -c 1 "$2")" ] || return 1
+            grep -q '^[[:space:]]*\[default\][[:space:]]*$' "$2" || return 1
+            for k in MINISERVER UDP_PORT DEBUG LoxberryIP maxConnectionLifetime region \
+                     MideaUser MideaPassword mqtt_praefix abfragetakt lox_timeout; do
+                grep -q "^[[:space:]]*$k[[:space:]]*=" "$2" || return 1
+            done ;;
+        devices.cfg)
+            # Endet mit Zeilenumbruch, mindestens ein Abschnitt, jede Zeile ist
+            # leer, Kommentar, Abschnitt oder "schluessel = wert".
+            [ -z "$(tail -c 1 "$2")" ] || return 1
+            grep -q '^[[:space:]]*\[[^]]*\][[:space:]]*$' "$2" || return 1
+            if grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' \
+                    -e '^[[:space:]]*\[[^]]*\][[:space:]]*$' -e '=' "$2" | grep -q .; then
+                return 1
+            fi ;;
+        mqtt_subscriptions.cfg)
+            # Je Zeile ein Thema, das auf "/#" endet (mi_abo_datei_schreiben()
+            # schreibt "<praefix>/#", ohne Zeilenumbruch).
+            grep -q '/#' "$2" || return 1
+            if grep -v '^[[:space:]]*$' "$2" | grep -qv '^[^[:space:]#+][^[:space:]#+]*/#$'; then
+                return 1
+            fi ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+# ---- MI-INHALTSBLOCK ENDE ----
+# "Verloren" heisst: die Datei traegt nichts Eigenes (mi_inhalt oben) - sie
+# fehlt, ist leer, ist zeichengenau eine mitgelieferte Vorgabe dieser oder
+# einer frueheren Fassung, oder sie ist unvollstaendig. Bis 4.5.7 galt eine
+# abgeschnittene Datei als "gueltige Konfiguration" und wurde nicht ersetzt
+# (Fall I1), und die Zweitschrift wurde ohne jede Pruefung zurueckgespielt -
+# eine abgeschnittene verdraengte die heile Vorgabe (Fall I2). Die
+# Sollsummen stehen jetzt im Inhaltsblock oben, nicht mehr hier.
 netz_zurueck() {
-    local datei ziel zweit verloren ist soll
-    datei=$1; shift
+    local datei ziel zweit
+    datei=$1
     ziel="$NETZ_CFG/$datei"
     zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"
     [ -f "$zweit" ] || return 0
-    verloren=0
-    if [ ! -f "$ziel" ] || [ ! -s "$ziel" ]; then
-        verloren=1
-    else
-        ist=$(sha256sum "$ziel" 2>/dev/null | cut -d" " -f1)
-        for soll in "$@"; do
-            [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
-        done
+    mi_inhalt "$datei" "$ziel" && return 0
+    if ! mi_inhalt "$datei" "$zweit"; then
+        # Eine Zweitschrift, die selbst nur die Vorgabe ist, hat nichts zu
+        # retten - das ist keine Warnung wert.
+        mi_vorgabe "$datei" "$zweit" && return 0
+        echo "<WARNING> Die Zweitschrift $zweit ist unvollstaendig;"
+        echo "<WARNING> $datei wird daraus NICHT zurueckgespielt."
+        return 0
     fi
-    if [ "$verloren" = "1" ]; then
-        if cp -p "$zweit" "$ziel" 2>/dev/null; then
-            echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
-        else
-            echo "<WARNING> $datei liess sich nicht zurueckspielen. Die Sicherung"
-            echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
-        fi
+    if cp -p "$zweit" "$ziel.neu" 2>/dev/null && cmp -s "$zweit" "$ziel.neu" \
+       && mv -f "$ziel.neu" "$ziel" 2>/dev/null; then
+        echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
+    else
+        rm -f "$ziel.neu" 2>/dev/null
+        echo "<WARNING> $datei liess sich nicht zurueckspielen. Die Sicherung"
+        echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
     fi
 }
-# Sollsummen: erst die Vorgabe dieser Fassung, dann die der Vorgaenger.
-netz_zurueck "devices.cfg"     "db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-netz_zurueck "midea2lox.cfg"     "fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9"     "1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460"     "cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
-netz_zurueck "mqtt_subscriptions.cfg"     "a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
+netz_zurueck "devices.cfg"
+netz_zurueck "midea2lox.cfg"
+netz_zurueck "mqtt_subscriptions.cfg"
 
 exit 0

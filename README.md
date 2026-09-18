@@ -10,6 +10,84 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.8
+
+### Ein zweiter Aktualisierungsversuch löschte die einzige Sicherung
+
+`preupgrade.sh` sichert den ganzen Konfigordner nach
+`data/plugins/Midea2Lox.upgrade_sicherung`. Bis 4.5.7 löschte es die
+vorhandene Sicherung dabei **zuerst** und baute die neue erst danach. Bricht
+eine Aktualisierung ab, nachdem der Installer den Konfigordner abgeräumt hat,
+ist diese Sicherung die einzige Abschrift der Einstellungen — und der zweite
+Versuch hat sie gelöscht, bevor er feststellte, dass es nichts mehr zu
+sichern gab. Übrig blieben nur die drei Zweitschriften neben dem
+Konfigordner; alles andere im Ordner war fort.
+
+Jetzt entsteht die neue Sicherung neben der alten (`….upgrade_sicherung.neu`),
+jede Datei wird byteweise gegen das Original gehalten, und erst dann tauscht
+sie den Platz mit der alten. Gibt es keinen Konfigordner, scheitert das
+Kopieren oder fehlt auch nur eine Datei, bleibt die bisherige Sicherung
+unangetastet, und das Protokoll sagt warum. Eine Sicherung mit eigenen
+Einstellungen wird außerdem nie durch eine ersetzt, die nur noch die
+mitgelieferte Vorgabe enthält — so sieht der Konfigordner aus, wenn der
+Installer nach dem Einspielen der neuen Dateien abgebrochen ist.
+
+### Die Zweitschrift wurde nach Größe beurteilt, nicht nach Inhalt
+
+Neben dem Konfigordner liegen Zweitschriften von `devices.cfg`,
+`midea2lox.cfg` und `mqtt_subscriptions.cfg`. Ob sie erneuert wird, entschied
+bis 4.5.7 allein die Frage „ist die Datei leer?". Eine abgeschnittene Datei
+ist nicht leer, die mitgelieferte Vorgabe auch nicht — beide haben die heile
+Zweitschrift überschrieben, in `devices.cfg` samt Schlüssel und Token der
+Klimageräte, in `midea2lox.cfg` samt Zugangsdaten des Midea-Kontos.
+
+Erneuert wird eine Zweitschrift jetzt nur noch aus einer Datei, die etwas
+Eigenes trägt: vollständig geschrieben (sie endet mit einem Zeilenumbruch,
+wie jede Datei, die das Plugin selbst schreibt), im Aufbau, den der Dienst
+liest, und nicht zeichengenau eine mitgelieferte Vorgabe. Geschrieben wird in
+eine Nebendatei, verglichen und dann umbenannt — ein direktes `cp` kappte die
+Zweitschrift, bevor die neue stand; nach einem Abbruch beim Schreiben blieb
+eine leere Datei. Die Meldung „Zweitschrift der Einstellungen angelegt" kam
+bis 4.5.7 immer, auch wenn nichts angelegt war; jetzt steht je Datei da, was
+geschehen ist.
+
+Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
+erkennt die Prüfung nur, wenn dabei einer der Pflichtschlüssel verloren ging.
+
+### Nach einem gescheiterten Zurückstellen war auch die Sicherung weg
+
+`postupgrade.sh` stellt die Sicherung zurück und löscht sie danach. Bis
+4.5.7 löschte es sie auch dann, wenn das Zurückstellen gescheitert war — nach
+dem Skript gab es weder die Einstellungen noch ihre Sicherung. Jetzt wird
+jede Datei der Sicherung im Konfigordner nachgesehen; weicht eine ab, bleibt
+die Sicherung liegen, und das Protokoll nennt ihren Ort.
+
+Ohne Sicherung meldete `postupgrade.sh` „Die Einstellungen sind vorhanden
+(aus der Zweitschrift)", sobald `midea2lox.cfg` nicht leer war — auch für die
+Vorgabe, die der Installer gerade eingespielt hatte, und auch dann, wenn es
+gar keine Zweitschrift gab. Die Meldung kommt jetzt nur noch, wenn die Datei
+etwas Eigenes trägt; sonst steht dort eine Warnung.
+
+`postinstall.sh` spielt eine Zweitschrift zurück, wenn die Einstellungen
+verloren sind. Eine abgeschnittene Datei galt dort als „gültige
+Konfiguration" und wurde nicht ersetzt; eine abgeschnittene Zweitschrift
+wurde ungeprüft über die Vorgabe kopiert. Beides entscheidet jetzt dieselbe
+Inhaltsprüfung wie in `preupgrade.sh` — sie steht wortgleich in allen drei
+Hakenskripten, und der Prüfstand hält die drei Abschriften gegeneinander.
+
+### Wie das geprüft ist
+
+Alles in WSL/Ubuntu gemessen, **nicht** am Gerät; der Installer ist
+nachgestellt (Abräumen des Konfig- und Datenordners, Einspielen der
+Vorgabe), das Startskript ist eine Attrappe. Ein Prüfstand mit **20 Fällen
+und 37 Prüfzeilen**: der Abbruch nach dem Abräumen, der Abbruch beim
+Schreiben, der Abbruch nach dem Einspielen der Vorgabe, ein Kopieren ohne
+volle Wirkung, je eine abgeschnittene Datei, der ganze Ablauf am Stück und
+die Kontrollfälle. Gegen den Stand vor der Behebung sind 22 davon rot,
+danach keine. Jede der zwölf Korrekturen ist einzeln in einer Kopie
+zurückgebaut worden; jede macht genau die vorher benannten Zeilen rot. Die
+Prüfstände der Fassungen 4.5.6 und 4.5.7 laufen unverändert weiter.
+
 ## Neu in 4.5.7
 
 ### Ein bewusst angehaltener Dienst lief nach dem Systemstart wieder

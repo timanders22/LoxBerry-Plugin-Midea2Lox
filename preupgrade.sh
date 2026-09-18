@@ -52,6 +52,77 @@ else
     echo "<WARNING> der Dienst mit den Vorgabewerten anlaufen."
 fi
 
+# ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
+# Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
+# wird nach dem INHALT, nicht nach der Groesse. Bis 4.5.7 stand an diesen
+# Stellen "[ -s datei ]": eine abgeschnittene Datei ist nicht leer, und die
+# mitgelieferte Vorgabe auch nicht. Beide verdraengten die heile
+# Zweitschrift (Bestand-2026-09-18/klasse-C; nachgemessen 18.09.2026 in WSL,
+# Pruefung-Midea2Lox-4.5.8, Faelle C1-C3 und D3).
+#
+# "Eigenes" heisst: die Datei ist vollstaendig geschrieben (jeder Schreiber
+# dieser Linie - mi_config_write(), mi_devices_write(), discover.py - endet
+# mit einem Zeilenumbruch), sie hat den Aufbau, den der Dienst liest, und
+# sie ist NICHT zeichengenau eine mitgelieferte Vorgabe. Die Pruefsummen
+# sind die der Vorgaben dieser und der frueheren Fassungen (die Liste stand
+# bis 4.5.7 nur in postinstall.sh).
+# Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
+# erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
+MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
+mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
+    local ist soll liste
+    case "$1" in
+        devices.cfg)            liste=$MI_VORGABE_DEVICES ;;
+        midea2lox.cfg)          liste=$MI_VORGABE_MIDEA ;;
+        mqtt_subscriptions.cfg) liste=$MI_VORGABE_ABO ;;
+        *) return 1 ;;
+    esac
+    [ -f "$2" ] || return 1
+    ist=$(sha256sum "$2" 2>/dev/null | cut -d" " -f1)
+    [ -n "$ist" ] || return 1
+    for soll in $liste; do
+        [ "$ist" = "$soll" ] && return 0
+    done
+    return 1
+}
+mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwenders traegt
+    local k
+    [ -f "$2" ] && [ -r "$2" ] && [ -s "$2" ] || return 1
+    mi_vorgabe "$1" "$2" && return 1
+    case "$1" in
+        midea2lox.cfg)
+            # Endet mit Zeilenumbruch, Abschnitt [default], und die Schluessel,
+            # die schon die Vorgabe von 4.3.x trug.
+            [ -z "$(tail -c 1 "$2")" ] || return 1
+            grep -q '^[[:space:]]*\[default\][[:space:]]*$' "$2" || return 1
+            for k in MINISERVER UDP_PORT DEBUG LoxberryIP maxConnectionLifetime region \
+                     MideaUser MideaPassword mqtt_praefix abfragetakt lox_timeout; do
+                grep -q "^[[:space:]]*$k[[:space:]]*=" "$2" || return 1
+            done ;;
+        devices.cfg)
+            # Endet mit Zeilenumbruch, mindestens ein Abschnitt, jede Zeile ist
+            # leer, Kommentar, Abschnitt oder "schluessel = wert".
+            [ -z "$(tail -c 1 "$2")" ] || return 1
+            grep -q '^[[:space:]]*\[[^]]*\][[:space:]]*$' "$2" || return 1
+            if grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' \
+                    -e '^[[:space:]]*\[[^]]*\][[:space:]]*$' -e '=' "$2" | grep -q .; then
+                return 1
+            fi ;;
+        mqtt_subscriptions.cfg)
+            # Je Zeile ein Thema, das auf "/#" endet (mi_abo_datei_schreiben()
+            # schreibt "<praefix>/#", ohne Zeilenumbruch).
+            grep -q '/#' "$2" || return 1
+            if grep -v '^[[:space:]]*$' "$2" | grep -qv '^[^[:space:]#+][^[:space:]#+]*/#$'; then
+                return 1
+            fi ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+# ---- MI-INHALTSBLOCK ENDE ----
+
 # Der Sicherungsordner liegt unter data/, NICHT unter /tmp.
 #
 # /tmp ist auf dem LoxBerry eine Ramdisk: bricht die Installation ab oder
@@ -69,14 +140,81 @@ fi
 # "rm -rf .../<x>/" trifft den Nachbarn "<x>.upgrade_sicherung" nicht.
 SICHER="$ARGV5/data/plugins/$ARGV3.upgrade_sicherung"
 
+# Die neue Sicherung entsteht NEBEN der alten und ersetzt sie erst, wenn sie
+# vollstaendig steht. Bis 4.5.7 stand hier "rm -rf $SICHER" VOR dem
+# Kopieren: brach ein Update nach purge_installation ab und wurde erneut
+# angestossen, gab es nichts mehr zu sichern, und die einzige Abschrift war
+# schon geloescht (Bestand-2026-09-18/klasse-D: 11 von 12 Dateien; in WSL
+# nachgemessen 18.09.2026, Pruefung-Midea2Lox-4.5.8, Fall D1: 4 von 7,
+# Fall D2: Abbruch beim Schreiben). Reihenfolge wie GardenaSmartSystem
+# 1.2.10 und Chromecast4lox 1.3.11: in $SICHER.neu bauen -> jede Datei
+# byteweise pruefen -> die alte nach $SICHER.alt -> die neue an ihren Platz
+# -> die alte wegwerfen. "mv -T" schiebt nie IN ein vorhandenes Verzeichnis.
+mi_abweichend() {  # $1 Quellordner, $2 Kopie -> Dateien, die in der Kopie fehlen oder abweichen
+    [ -d "$1" ] || return 0
+    ( cd "$1" && find . -type f | while IFS= read -r mi_f; do
+          cmp -s "$mi_f" "$2/$mi_f" || printf '%s ' "${mi_f#./}"
+      done ) 2>/dev/null || echo "(nicht lesbar: $1)"
+}
+mi_sicherung_traegt() {  # $1 Konfigordner einer Sicherung -> 0, wenn dort Eigenes liegt
+    mi_inhalt midea2lox.cfg "$1/midea2lox.cfg" || mi_inhalt devices.cfg "$1/devices.cfg"
+}
+MI_NEU="$SICHER.neu"
+MI_QCFG="$ARGV5/config/plugins/$ARGV3"
+
 echo "<INFO> Creating backup folder for upgrading $SICHER"
-rm -rf "$SICHER" 2>/dev/null
-mkdir -p "$SICHER/config"
-chmod 0700 "$SICHER" 2>/dev/null
+rm -rf "$MI_NEU" 2>/dev/null
+mkdir -p "$MI_NEU/config" 2>/dev/null
+chmod 0700 "$MI_NEU" 2>/dev/null
+MI_OK=1
+MI_GRUND=""
 
 echo "<INFO> Backing up existing config files"
-cp -a "$ARGV5/config/plugins/$ARGV3/." "$SICHER/config/" 2>/dev/null \
-    && echo "<OK> Konfiguration gesichert (Rechte 0700)."
+# Ohne Konfigordner gibt es nichts, was eine vorhandene Sicherung ersetzen
+# duerfte: so sieht der zweite Versuch nach einem abgebrochenen Update aus
+# (purge_installation hat den Ordner schon entfernt, Fall D1).
+if [ -d "$MI_QCFG" ]; then
+    cp -a "$MI_QCFG/." "$MI_NEU/config/" 2>/dev/null \
+        || { MI_RC=$?; MI_OK=0; MI_GRUND="$MI_GRUND cp Rueckgabewert $MI_RC;"; }
+else
+    MI_OK=0
+    MI_GRUND="$MI_GRUND keine Konfiguration unter $MI_QCFG;"
+fi
+MI_ABW=$(mi_abweichend "$MI_QCFG" "$MI_NEU/config")
+[ -z "$MI_ABW" ] || { MI_OK=0; MI_GRUND="$MI_GRUND nicht in der Sicherung: $MI_ABW;"; }
+
+# Eine Sicherung mit eigenen Einstellungen wird nie durch eine ohne ersetzt.
+# Nach purge_installation kopiert der Installer die mitgelieferte Vorgabe
+# nach config/plugins/<ordner>/; bricht er danach ab, ist ihre Kopie
+# vollstaendig und heil - und traegt nichts mehr vom Anwender (Fall D3).
+if [ "$MI_OK" = 1 ] && ! mi_sicherung_traegt "$MI_NEU/config" \
+   && mi_sicherung_traegt "$SICHER/config"; then
+    MI_OK=0
+    MI_GRUND="$MI_GRUND die Einstellungen tragen nichts Eigenes, die vorhandene Sicherung schon;"
+fi
+
+if [ "$MI_OK" = 1 ]; then
+    rm -rf "$SICHER.alt" 2>/dev/null
+    if [ -e "$SICHER" ] && ! mv -T "$SICHER" "$SICHER.alt" 2>/dev/null; then
+        rm -rf "$MI_NEU" 2>/dev/null
+        echo "<WARNING> Die bisherige Sicherung liess sich nicht beiseitelegen; sie bleibt"
+        echo "<WARNING> unangetastet: $SICHER"
+    elif mv -T "$MI_NEU" "$SICHER" 2>/dev/null; then
+        rm -rf "$SICHER.alt" 2>/dev/null
+        echo "<OK> Konfiguration gesichert (Rechte 0700)."
+    else
+        [ -e "$SICHER.alt" ] && mv -T "$SICHER.alt" "$SICHER" 2>/dev/null
+        rm -rf "$MI_NEU" 2>/dev/null
+        echo "<WARNING> Die neue Sicherung liess sich nicht an ihren Platz bringen."
+        echo "<WARNING> Platz und Rechte in $ARGV5/data/plugins pruefen."
+    fi
+else
+    rm -rf "$MI_NEU" 2>/dev/null
+    echo "<WARNING> Die Einstellungen wurden NICHT neu gesichert:$MI_GRUND"
+    if [ -d "$SICHER" ]; then
+        echo "<WARNING> Die bisherige Sicherung bleibt unangetastet: $SICHER"
+    fi
+fi
 
 echo "<INFO> stoppe Midea2Lox"
 # Ueber das Startskript beenden, nicht ueber killall.
@@ -158,18 +296,36 @@ fi
 NETZ_BASE="${5:-$LBHOMEDIR}"
 NETZ_PDIR="${3:-Midea2Lox}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
-if [ -s "$NETZ_CFG/devices.cfg" ]; then
-    cp -p "$NETZ_CFG/devices.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.devices.cfg" 2>/dev/null \
-        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.devices.cfg" 2>/dev/null
-fi
-if [ -s "$NETZ_CFG/midea2lox.cfg" ]; then
-    cp -p "$NETZ_CFG/midea2lox.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.midea2lox.cfg" 2>/dev/null \
-        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.midea2lox.cfg" 2>/dev/null
-fi
-if [ -s "$NETZ_CFG/mqtt_subscriptions.cfg" ]; then
-    cp -p "$NETZ_CFG/mqtt_subscriptions.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.mqtt_subscriptions.cfg" 2>/dev/null \
-        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.mqtt_subscriptions.cfg" 2>/dev/null
-fi
-echo "<INFO> Zweitschrift der Einstellungen angelegt."
+# Nach INHALT entscheiden (mi_inhalt oben), nicht nach Groesse. Bis 4.5.7
+# stand hier "[ -s ]": eine abgeschnittene Datei und die mitgelieferte
+# Vorgabe verdraengten die heile Zweitschrift (Faelle C1-C3, D3).
+# Und erst eine Nebendatei, dann umbenennen: "cp -p" direkt auf die
+# Zweitschrift kappte sie, bevor die neue stand (Fall D2: nach einem Abbruch
+# beim Schreiben blieb eine Zweitschrift mit 0 Byte). Die Meldung
+# "Zweitschrift ... angelegt" stand bis 4.5.7 unbedingt am Ende, auch wenn
+# nichts angelegt war (Fall D2).
+mi_zweitschrift() {  # $1 Dateiname im Konfigordner
+    local q="$NETZ_CFG/$1" z="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$1"
+    if mi_inhalt "$1" "$q"; then
+        if cp -p "$q" "$z.neu" 2>/dev/null \
+           && chmod 0600 "$z.neu" 2>/dev/null \
+           && cmp -s "$q" "$z.neu" \
+           && mv -f "$z.neu" "$z" 2>/dev/null; then
+            echo "<INFO> Zweitschrift $1 angelegt."
+        else
+            rm -f "$z.neu" 2>/dev/null
+            echo "<WARNING> Die Zweitschrift von $1 liess sich nicht anlegen;"
+            echo "<WARNING> eine vorhandene bleibt unveraendert: $z"
+        fi
+    elif [ -f "$z" ]; then
+        echo "<WARNING> $1 fehlt, ist unvollstaendig oder die mitgelieferte Vorgabe -"
+        echo "<WARNING> die vorhandene Zweitschrift bleibt unveraendert: $z"
+    else
+        echo "<INFO> $1 traegt keine eigenen Einstellungen - keine Zweitschrift angelegt."
+    fi
+}
+mi_zweitschrift devices.cfg
+mi_zweitschrift midea2lox.cfg
+mi_zweitschrift mqtt_subscriptions.cfg
 
 exit 0
