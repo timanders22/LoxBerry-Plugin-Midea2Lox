@@ -9,11 +9,17 @@
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
  * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
- * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
- * Installation genauso wie eine an einem anderen Ort - und es trifft auch
- * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
- * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
- * abfangen muss).
+ * config/plugins, data/plugins UND config/system/general.json traegt. Das
+ * trifft die uebliche Installation genauso wie eine an einem anderen Ort -
+ * und es trifft auch den Fall, dass das Plugin noch als entpacktes Archiv
+ * daliegt (dann findet es nichts und gibt einen Leerstring zurueck, was der
+ * Aufrufer ohnehin abfangen muss).
+ *
+ * general.json ist seit 4.5.9 die entscheidende Bedingung (Regeln/06). Bis
+ * 4.5.8 genuegten config/plugins und webfrontend - genau diese Ordner
+ * hinterlaesst ein Pruefstand auf einem Arbeitsrechner; in WSL gemessen
+ * (Pruefung-Midea2Lox-4.5.9, Fall P2) nahm die Oberflaeche einen solchen
+ * fremden Baum als Wurzel.
  *
  * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
  * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
@@ -23,7 +29,8 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/data/plugins')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -34,25 +41,103 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* Die Wurzel in der Reihenfolge der Hausregel: erst die Umgebung, dann die
+ * Suche - und DANACH NICHTS MEHR.
+ *
+ * Bis 4.5.8 stand hier als dritte Stufe ein fest verdrahteter Systempfad
+ * (das Heimatverzeichnis des Benutzers loxberry). Er macht jede Suche
+ * wirkungslos und trifft auf einem anders installierten LoxBerry die falsche
+ * Anlage (Muster 1 der Nachlese; entfernt ebenso in Tibber 0.9.19,
+ * VolkswagenID 0.9.24). Ein gesetztes LBHOMEDIR gilt mit config/plugins UND
+ * data/plugins darunter - general.json wird dort nicht verlangt, damit die
+ * Attrappe der Pruefwerkzeuge (Werkzeuge/lb) weiter traegt. Rueckgabe ''
+ * heisst "keine Wurzel". */
+function mi_lbhome()
+{
+    $h = getenv('LBHOMEDIR');
+    if ($h && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')) {
+        return rtrim($h, '/');
+    }
+    return lb_wurzel_ermitteln();
+}
+
 function mi_paths()
 {
     static $p = null;
     if ($p !== null) {
         return $p;
     }
-    $home = getenv('LBHOMEDIR');
-    if (!$home || !is_dir($home)) {
-        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-            if (is_dir($k)) { $home = $k; break; }
-        }
-    }
-    $home = $home ? $home : lb_wurzel_ermitteln();
-    // Den Pluginordner aus dem eigenen Ablageort ableiten statt ihn fest
-    // einzutragen: er heisst laut plugin.cfg "Midea2Lox" mit grossen
-    // Buchstaben, und unter Linux ist das ein Unterschied.
+    $home = mi_lbhome();
+    /* Der Pluginordner. LBPPLUGINDIR ist die Auskunft von LoxBerry SELBST
+     * und hat Vorrang; sonst der eigene Ablageort. Der feste Name greift nur,
+     * wo der abgeleitete nachweislich kein Pluginordner sein KANN - aus dem
+     * ausgepackten Archiv heraus heisst er 'htmlauth'. Er heisst laut
+     * plugin.cfg "Midea2Lox" mit grossen Buchstaben, und unter Linux ist das
+     * ein Unterschied. Bauart wie tb_paths() in Spotpreis-Tibber 0.9.19. */
+    $kein_ordner = array('', '.', '/', 'html', 'htmlauth', 'bin', 'plugins');
+    $lbp = basename(rtrim((string) getenv('LBPPLUGINDIR'), '/'));
+    $lbp_gilt = !in_array($lbp, $kein_ordner, true);
     $ordner = basename(dirname(__FILE__));
-    if ($ordner === '' || $ordner === 'htmlauth') {
+    if ($lbp_gilt) {
+        $ordner = $lbp;
+    } elseif (in_array($ordner, $kein_ordner, true)) {
         $ordner = 'Midea2Lox';
+    }
+    /* ARCHIVMODUS (seit 4.5.9, Muster 3 der Nachlese). Die Pfade DER ANLAGE
+     * gelten nur, wenn diese Bibliothek dort installiert liegt
+     * (<Wurzel>/webfrontend/htmlauth/plugins/<ordner>, physisch verglichen)
+     * oder der Aufrufer Wurzel UND Ordner ausdruecklich nennt ($LBHOMEDIR und
+     * $LBPPLUGINDIR - so arbeiten die Pruefwerkzeuge mit ihrer Attrappe).
+     * Sonst ist das ein ausgepacktes Archiv oder ein Pruefordner.
+     *
+     * Bis 4.5.8 nahm ein Archiv mit gesetztem LBHOMEDIR - am Geraet steht es
+     * in /etc/environment - die Anlage: ihre Konfiguration mit dem
+     * Midea-Kennwort, und der Knopf "Dienst starten" rief das Startskript der
+     * Anlage (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, Fall P3). */
+    $gefunden = $home;
+    if ($home !== '') {
+        $soll = @realpath($home . '/webfrontend/htmlauth/plugins/' . basename(__DIR__));
+        $ist = @realpath(__DIR__);
+        $installiert = ($soll !== false && $ist !== false && $soll === $ist);
+        $ausdruecklich = $lbp_gilt && $home === rtrim((string) getenv('LBHOMEDIR'), '/');
+        if (!$installiert && !$ausdruecklich) { $home = ''; }
+    }
+    if ($home === '') {
+        /* Keine Wurzel (Entwicklung, ausgepacktes Archiv, fremder Baum):
+         * neben dem Plugin arbeiten, nie an der Laufwerkswurzel. Bis 4.5.8
+         * wurden die Pfade hier mit leerem home zusammengesetzt und lauteten
+         * /config/plugins/..., /data/plugins/..., /templates/plugins/... -
+         * absolute Pfade ausserhalb jedes LoxBerry (Faelle P1 und P6). Kein
+         * Startskript und keine venv: die gibt es nur in einer Anlage. */
+        $basis = dirname(dirname(__DIR__));
+        $p = array(
+            'home'      => '',
+            'plugin'    => $ordner,
+            'config'    => $basis . '/config/midea2lox.cfg',
+            'devices'   => $basis . '/config/devices.cfg',
+            'abo'       => $basis . '/config/mqtt_subscriptions.cfg',
+            'abos'      => '',
+            'abos_alt'  => '',
+            'log'       => $basis . '/log/midea2lox.log',
+            'datadir'   => $basis . '/data',
+            'sollmarke' => $basis . '/data/soll_laufen',
+            'marke'     => $basis . '/data.upgrade_laeuft',
+            'leben'     => $basis . '/data/lebenszeichen.json',
+            'automatik' => $basis . '/data/automatik.json',
+            'bin'       => $basis . '/bin',
+            'venv'      => '',
+            'daemon'    => '',
+            'general'   => '',
+            'lang'      => $basis . '/templates/lang',
+            'index'     => __DIR__ . '/index.php',
+            'dienst'    => $basis . '/data/midea2lox.py',
+            'leben_py'  => $basis . '/data/lebenszeichen.py',
+            'mqtt_py'   => $basis . '/data/mi_mqtt.py',
+            // Die gefundene Wurzel, wenn diese Datei NICHT darin installiert
+            // liegt (Archivmodus); sonst leer.
+            'archiv'    => $gefunden,
+        );
+        return $p;
     }
     $p = array(
         'home'    => $home,
@@ -88,6 +173,7 @@ function mi_paths()
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
         'daemon'  => $home . '/system/daemons/plugins/' . $ordner,
         'general' => $home . '/config/system/general.json',
+        'lang'    => $home . '/templates/plugins/' . $ordner . '/lang',
         // Der eigene Quelltext - die Selbstpruefung liest ihn, um Reiter,
         // Formularmerkmale und Themenliste gegen den Sendecode zu zaehlen.
         'index'   => __DIR__ . '/index.php',
@@ -98,6 +184,9 @@ function mi_paths()
         // Themenpruefung muss deshalb beide Dateien ansehen; sonst
         // meldet sie status/dienst dauerhaft als fehlend.
         'leben_py' => $home . '/data/plugins/' . $ordner . '/lebenszeichen.py',
+        // Ab 4.5.9: die Retain-Liste des Dienstes (MIT_RETAIN) liegt hier.
+        'mqtt_py'  => $home . '/data/plugins/' . $ordner . '/mi_mqtt.py',
+        'archiv'   => '',
     );
     return $p;
 }
@@ -139,8 +228,11 @@ function mi_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        $ordner = mi_paths()['home'] . '/templates/plugins/'
-                . mi_paths()['plugin'] . '/lang';
+        /* Seit 4.5.9 aus mi_paths()['lang']: ohne Wurzel ist das der
+         * Plugin-Ordner selbst. Bis 4.5.8 wurde hier home . '/templates/...'
+         * gebaut, und ohne Wurzel fragte das /templates/plugins/... an der
+         * Laufwerkswurzel (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, P6). */
+        $ordner = mi_paths()['lang'];
         /* Rueckfall auf den Plugin-Ordner. Ohne ihn findet das Plugin seine
          * Texte NUR am installierten Ort - wer es vor der Installation
          * pruefen will, sieht eine textlose Seite und haelt sie fuer kaputt.
@@ -926,7 +1018,8 @@ function mi_dienst_pid()
  *
  * Dieselbe Frist und dieselbe Bauart wie in daemon/daemon (marke_gilt):
  * nur eine Marke, die hoechstens 3600 Sekunden alt ist, zaehlt; aeltere,
- * unlesbare und in der Zukunft liegende gelten nicht. Rein lesend.
+ * unlesbare und mehr als 300 s in der Zukunft liegende gelten nicht. Rein
+ * lesend.
  */
 function mi_upgrade_alter()
 {
@@ -939,16 +1032,23 @@ function mi_upgrade_alter()
         return null;
     }
     $inhalt = trim($inhalt);
-    if ($inhalt === '' || !ctype_digit($inhalt)) {
+    // preg_match statt ctype_digit: ctype ist eine Erweiterung, die nicht
+    // garantiert geladen ist (Regeln/02), und der Inhalt wird VOR jeder
+    // Rechnung als Zahl geprueft (AUFTRAG_gemeinsam, Marke).
+    if (!preg_match('/^[0-9]{1,12}$/', $inhalt)) {
         return null;
     }
     return time() - (int) $inhalt;
 }
 
+/* Bis 300 s "aus der Zukunft" gilt die Marke noch - dieselbe Grenze wie
+ * marke_gilt() in daemon/daemon (seit 4.5.9; Muster 8 der Nachlese, Govee
+ * 0.9.20). Bis 4.5.8 galt jede Sekunde Zukunft als "keine Aktualisierung"
+ * (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, Fall M3). */
 function mi_upgrade_laeuft()
 {
     $alter = mi_upgrade_alter();
-    return ($alter !== null && $alter >= 0 && $alter < 3600);
+    return ($alter !== null && $alter >= -300 && $alter < 3600);
 }
 
 function mi_dienst($was)
@@ -1271,30 +1371,41 @@ function mi_automatik_werte()
 }
 
 /**
- * Themen, die NICHT zurueckbehalten werden - dieselbe Liste wie im Dienst.
+ * Themen, die zurueckbehalten werden - dieselbe Liste wie im Dienst.
  *
- * Hausstandard seit 03.09.2026: Zustaende retained, Messwerte mit Zeitbezug
- * nicht, das Lebenszeichen nie. Der Dienst fuehrt dieselbe Liste als
- * OHNE_RETAIN in data/midea2lox.py; dass beide gleich bleiben, prueft
- * mi_retain_probe() nach - zwei Listen ohne Waechter laufen auseinander.
+ * Seit 4.5.9 eine POSITIVLISTE: alles, was hier nicht steht, geht fluechtig
+ * hinaus. Bis 4.5.8 stand hier die Liste der Themen OHNE Retain, und ein
+ * neues Thema wurde still zurueckbehalten; online eines Geraets und die vier
+ * Themen der Automatik gingen retained, obwohl sie Aussagen des Dienstes
+ * sind bzw. eine Restzeit tragen (Regeln/07 Abschnitt 3; in WSL am
+ * empfangenen Paket gemessen, Pruefung-Midea2Lox-4.5.9, R5, R8-R13).
+ * Retained sind nur Geraetezustaende und der Letzte Wille connection/status.
+ * Der Dienst fuehrt dieselbe Liste als MIT_RETAIN in data/mi_mqtt.py; dass
+ * beide gleich bleiben, prueft mi_retain_probe() nach.
  */
-function mi_ohne_retain()
+function mi_mit_retain()
 {
     return array(
-        'status/ts', 'status/zaehler', 'status/ok', 'status/dienst',
-        'indoor_temperature', 'outdoor_temperature', 'indoor_humidity',
-        'total_energy_usage', 'current_energy_usage', 'real_time_power_usage',
+        'connection/status',
+        'power_state', 'audible_feedback', 'target_temperature',
+        'operational_mode', 'fan_speed', 'swing_mode', 'eco_mode', 'turbo_mode',
+        'display_on', 'target_humidity', 'filter_alert',
+        'horizontal_swing_angle', 'vertical_swing_angle', 'freeze_protection_mode',
+        'sleep_mode', 'follow_me', 'purifier', 'self_clean_active',
+        'rate_select', 'breeze_mode', 'ieco',
     );
 }
 
-/** Wird dieses Thema zurueckbehalten? Entschieden am hinteren Teil. */
+/** Wird dieses Thema zurueckbehalten? Mit Geraetenummer davor am hinteren Teil. */
 function mi_retain($thema)
 {
-    $t = (string) $thema;
-    $ohne = mi_ohne_retain();
-    if (in_array($t, $ohne, true)) { return false; }
-    $teile = explode('/', $t);
-    return !in_array(end($teile), $ohne, true);
+    $t = trim((string) $thema, '/');
+    $mit = mi_mit_retain();
+    if (in_array($t, $mit, true)) { return true; }
+    if (preg_match('#^[0-9]{10,19}/([a-z_]+)$#', $t, $m)) {
+        return in_array($m[1], $mit, true);
+    }
+    return false;
 }
 
 /**
@@ -1306,17 +1417,17 @@ function mi_retain($thema)
  */
 function mi_retain_probe()
 {
-    $datei = mi_paths()['dienst'];
+    $datei = mi_paths()['mqtt_py'];
     if (!is_readable($datei)) {
         return array(null, 0, array());
     }
     $q = (string) @file_get_contents($datei);
-    if (!preg_match('/OHNE_RETAIN\s*=\s*\((.*?)\)/s', $q, $m)) {
+    if (!preg_match('/MIT_RETAIN\s*=\s*\((.*?)\)/s', $q, $m)) {
         return array(null, 0, array());
     }
     preg_match_all("/'([A-Za-z0-9_\/]+)'/", $m[1], $t);
     $dienst = array_values(array_unique($t[1]));
-    $hier = mi_ohne_retain();
+    $hier = mi_mit_retain();
     $ab = array_merge(array_diff($dienst, $hier), array_diff($hier, $dienst));
     return array(count($dienst) > 0 && !$ab, count($dienst), array_values($ab));
 }

@@ -416,6 +416,9 @@ async def herzschlag():
                 ('status/zaehler', str(_zaehler)),
                 ('status/ok', str(_letzter_erfolg)),
             ])
+            # Ein gescheitertes Abraeumen der Altwerte wird von hier aus
+            # wiederholt (hoechstens alle zehn Minuten, siehe unten).
+            altlast_anstossen()
         except Exception as fehler:
             _LOGGER.error("Herzschlag gescheitert: %s", fehler)
         await asyncio.sleep(HERZTAKT)
@@ -1454,27 +1457,29 @@ async def _im_faden(arbeit):
 #
 # Am Broker gemessen (13.09.2026, Midea2Lox 4.5.3): fuenf retained Themen -
 # und vier davon waren das Lebenszeichen.
-
-OHNE_RETAIN = (
-    # Lebenszeichen - nie retained
-    'status/ts', 'status/zaehler', 'status/ok', 'status/dienst',
-    # Messwerte mit Zeitbezug
-    'indoor_temperature', 'outdoor_temperature', 'indoor_humidity',
-    'total_energy_usage', 'current_energy_usage', 'real_time_power_usage',
-)
-
-
+#
+# SEIT 4.5.9 EINE POSITIVLISTE, UND SIE STEHT IN mi_mqtt.py.
+#
+# Bis 4.5.8 stand hier die Liste der Themen OHNE Retain; alles andere ging
+# retained hinaus - ein neues Thema also still zurueckbehalten. Gemessen am
+# empfangenen Paket (Pruefung-Midea2Lox-4.5.9, Faelle R5, R8-R13): online
+# eines Geraets und die vier Themen der Automatik kamen retained an, obwohl
+# sie Aussagen des Dienstes sind (Regeln/07, Entscheidung 19.09.2026) bzw.
+# eine Restzeit tragen. Die Erreichbarkeit gehoert deshalb NICHT mehr zu den
+# Zustaenden oben: sie setzt der Dienst selbst (device._online = False in
+# send_to_midea), und retained stuende nach seinem Tod die letzte 1 da.
+# Die Liste steht in mi_mqtt.py, weil uninstall/uninstall sie ebenfalls
+# braucht (mi_mqtt.py --mqtt-leeren) und dieses Modul beim Import den ganzen
+# Dienst aufbaut. mi_mqtt wird unten mit den uebrigen Bibliotheken geladen.
 def retain_fuer(thema):
-    """Gehoert dieses Thema zurueckbehalten?
+    """Geht dieses Thema retained hinaus? Entscheidung: mi_mqtt.retain_fuer()."""
+    return mi_mqtt.retain_fuer(thema)
 
-    Das Thema kommt mit oder ohne Geraetenummer davor an
-    ("123456789012/indoor_temperature" oder "status/ts"). Entschieden wird
-    am hinteren Teil - die Geraetenummer aendert die Art des Wertes nicht.
-    """
-    t = str(thema)
-    if t in OHNE_RETAIN:
-        return False
-    return t.rsplit('/', 1)[-1] not in OHNE_RETAIN
+# Der zuletzt veroeffentlichte Wert je Thema (ohne Praefix). Gebraucht nur
+# beim einmaligen Abraeumen der Altwerte: unmittelbar nach der Loeschung geht
+# der gueltige Wert hinterher, denn das MQTT-Gateway reicht eine Loeschung
+# als leeren Wert an den Miniserver weiter (Regeln/07; Bauart APC-UPS 1.2.13).
+_ZULETZT = {}
 
 
 async def veroeffentlichen(paare, support_mode=0):
@@ -1482,6 +1487,9 @@ async def veroeffentlichen(paare, support_mode=0):
 
     paare ist eine Liste aus (Thema ohne Praefix, Wert).
     """
+    if support_mode == 0:
+        for thema, wert in paare:
+            _ZULETZT[thema] = wert
     if MQTT == 1 and support_mode == 0 and mqtt_error == 0:
         for thema, wert in paare:
             try:
@@ -1582,6 +1590,9 @@ def on_connect(client, userdata, flags, rc, properties=None):
                 except Exception as fehler:
                     _LOGGER.error("MQTT: %s liess sich nicht abonnieren: %s",
                                   _thema, fehler)
+        # Altwerte frueherer Fassungen - in einem eigenen Faden, auf einer
+        # eigenen Verbindung; dieser Rueckruf laeuft im Netzwerkfaden von paho.
+        altlast_anstossen()
     else:
         # Den Code als Zahl lesen, gleich welcher Rueckruffassung: paho 2.x
         # uebergibt ein ReasonCode-Objekt, paho 1.x eine Zahl.
@@ -1634,6 +1645,107 @@ def on_disconnect(client, userdata, *rest):
     _LOGGER.info("MQTT Disconnected (rc=%s)", rc)
 
 
+# ---------------------------------------------------------------------------
+# Altwerte frueherer Fassungen EINMAL abraeumen (ab 4.5.9)
+# ---------------------------------------------------------------------------
+#
+# Was bis 4.5.8 retained hinausging und heute fluechtig geht (online eines
+# Geraets, automatik/*; aus 4.5.3 und frueher auch das Lebenszeichen und die
+# Messwerte - Liste in mi_mqtt.py), liegt sonst fuer immer im Broker und
+# kommt nach jedem Neustart von Broker oder Gateway als frische Aussage beim
+# Miniserver an. Ein Wert verschwindet nicht dadurch, dass niemand ihn mehr
+# sendet (am Broker gemessen 13.09.2026, siehe README 4.5.4).
+#
+# Am Broker, nicht blind (mi_mqtt.broker_leeren): geloescht wird nur, was
+# wirklich retained liegt, danach wird NACHGELESEN, und erst dann faellt der
+# Merker. CONNACK ungleich 0 und SUBACK 0x80 heissen "nicht zu fragen" - kein
+# Merker, neuer Versuch nach zehn Minuten (aus dem Herzschlag) oder beim
+# naechsten Verbinden. Der Merker traegt Praefix und Themenliste
+# (mi_mqtt.altlast_kennung); eine Vorfassung hat keinen und kann nichts
+# vortaeuschen. Gemessen in WSL gegen einen eigenen Broker
+# (Pruefung-Midea2Lox-4.5.9, Faelle A1-A12).
+_ALTLAST = {'erledigt': '', 'naechster': 0.0, 'laeuft': False}
+
+
+def _altlast_merker():
+    return os.path.join(data_path, 'retain_altlast')
+
+
+def altlast_anstossen():
+    """Startet das Abraeumen in einem eigenen Faden, wenn es faellig ist.
+
+    Gefragt wird nach client und mqtt_error, nicht nach MQTT: on_connect kann
+    im Netzwerkfaden kommen, bevor der Modulrumpf die Zeile "MQTT = 1" hinter
+    loop_start() erreicht hat.
+    """
+    if client is None or mqtt_error != 0:
+        return
+    kennung = mi_mqtt.altlast_kennung(MQTT_PRAEFIX)
+    if _ALTLAST['erledigt'] == kennung or _ALTLAST['laeuft']:
+        return
+    try:
+        with open(_altlast_merker(), encoding='utf-8') as f:
+            if f.read().strip() == kennung:
+                _ALTLAST['erledigt'] = kennung
+                return
+    except OSError:
+        pass
+    jetzt = time.time()
+    if jetzt < _ALTLAST['naechster']:
+        return
+    _ALTLAST['naechster'] = jetzt + 600
+    _ALTLAST['laeuft'] = True
+    threading.Thread(target=_altlast_abraeumen, args=(kennung,), daemon=True).start()
+
+
+def _altlast_abraeumen(kennung):
+    try:
+        praefix = MQTT_PRAEFIX
+
+        def auswahl(thema):
+            return (thema.startswith(praefix + '/')
+                    and mi_mqtt.altlast_thema(thema[len(praefix) + 1:]))
+
+        def hinterher(geleert):
+            # Unmittelbar nach der Loeschung, noch vor dem Nachlesen, den
+            # gueltigen Wert fluechtig hinterher - sofern es schon einen gibt.
+            for thema in geleert:
+                unter = thema[len(praefix) + 1:]
+                if unter in _ZULETZT and client is not None and mqtt_error == 0:
+                    client.publish(thema, _ZULETZT[unter], qos=1,
+                                   retain=retain_fuer(unter))
+
+        zugang = {'host': MQTThost, 'port': int(MQTTport),
+                  'user': MQTTuser, 'pass': MQTTpass}
+        erg = mi_mqtt.broker_leeren(zugang, praefix, auswahl, nach_loeschen=hinterher)
+        if erg['rc'] == 0:
+            _ALTLAST['erledigt'] = kennung
+            if erg['geleert']:
+                _LOGGER.info("MQTT: %d zurueckbehaltene Altwerte frueherer Fassungen "
+                             "geloescht und nachgelesen (%s).", len(erg['geleert']),
+                             ', '.join(erg['geleert']))
+            try:
+                ziel = _altlast_merker()
+                with open(ziel + '.tmp', 'w', encoding='utf-8') as f:
+                    f.write(kennung + '\n')
+                os.replace(ziel + '.tmp', ziel)
+            except OSError as fehler:
+                _LOGGER.warning("MQTT: der Merker %s liess sich nicht schreiben (%s) - "
+                                "nach dem naechsten Start wird noch einmal nachgelesen.",
+                                _altlast_merker(), fehler)
+        elif erg['rc'] == 1:
+            _LOGGER.warning("MQTT: %d zurueckbehaltene Altwerte stehen nach dem Loeschen "
+                            "noch im Broker (zum Beispiel %s) - neuer Versuch in zehn "
+                            "Minuten.", len(erg['rest']), erg['rest'][0])
+        else:
+            _LOGGER.warning("MQTT: zurueckbehaltene Altwerte frueherer Fassungen nicht "
+                            "abgeraeumt - %s. Neuer Versuch in zehn Minuten.", erg['grund'])
+    except Exception as fehler:
+        _LOGGER.error("MQTT: Abraeumen der Altwerte gescheitert: %s", fehler, exc_info=True)
+    finally:
+        _ALTLAST['laeuft'] = False
+
+
 ##########
 
 try:
@@ -1648,6 +1760,9 @@ try:
     from msmart import __version__
     import requests
     import paho.mqtt.client as mqtt
+    # Retain-Liste und Abraeumen am Broker (ab 4.5.9), liegt neben diesem
+    # Programm im Datenordner.
+    import mi_mqtt
 
     # Ein Schloss um jede Unterhaltung mit einem Geraet. Damit bleibt die
     # Reihenfolge genau die, die bis 4.2.12 galt - siehe Kopfkommentar.

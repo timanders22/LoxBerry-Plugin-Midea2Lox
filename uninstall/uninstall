@@ -7,12 +7,19 @@
 # je nachdem, wohin LoxBerry diese Datei bei der Installation legt, sind es
 # drei oder vier Ebenen. Deshalb wird aufwaerts gesucht, bis ein
 # Verzeichnis gefunden ist, das nachweislich eine LoxBerry-Wurzel ist:
-# es traegt config/plugins UND data/plugins.
+# es traegt config/plugins, data/plugins UND config/system/general.json.
+#
+# general.json gehoert seit 4.5.9 dazu (Regeln/06, "Eine Wurzelsuche ...
+# trifft auf einem Pruefrechner das Laufwerk selbst"). Bis 4.5.8 genuegten
+# die beiden Ordner; in WSL gemessen (Pruefung-Midea2Lox-4.5.9, Fall U9):
+# in einem fremden Baum mit genau diesen Ordnern loeschte dieses Skript die
+# dortige venv und die Zweitschrift.
 lb_wurzel_suchen() {
     v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
     i=0
     while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
-        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ]; then
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
             echo "$v"; return 0
         fi
         v=$(dirname "$v"); i=$((i + 1))
@@ -21,8 +28,41 @@ lb_wurzel_suchen() {
 }
 
 # Wird beim Deinstallieren des Plugins ausgefuehrt.
+# Aufruf durch plugininstall.pl: <tempordner> <name> <ordner> <fassung> <wurzel>
 
-PDIR=$3
+# ---------- Wurzel und Ordner: GELESEN, nicht geraten ----------
+#
+# Bis 4.5.8 fiel ein fehlender Ordner auf "midea2lox" zurueck und eine
+# fehlende Wurzel auf die Suche oben - und blieb auch die leer, lauteten die
+# Pfade "/bin/plugins/midea2lox/venv" und "/config/plugins/midea2lox.backup.*"
+# (rm -rf ab der Laufwerkswurzel). Und ein Aufruf von Hand OHNE Argumente,
+# aber mit LBHOMEDIR - so steht es am Geraet in /etc/environment - griff aus
+# einem ausgepackten Archiv heraus in die Anlage: Startskript "stop", venv
+# weg (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, Fall U10).
+#
+# Jetzt gilt: der Ordner kommt vom Installer ($3) oder ausdruecklich aus
+# LBPPLUGINDIR (so rufen die Pruefwerkzeuge); ohne ihn wird nichts
+# angefasst. Die Wurzel kommt aus $5, sonst aus LBHOMEDIR, sonst aus der
+# Suche - und traegt config/plugins und data/plugins, sonst wird gewarnt statt
+# vollzogen. Bauart wie VolkswagenID 0.9.24 und Tibber 0.9.19.
+PDIR="${3:-}"
+if [ -z "$PDIR" ] && [ -n "${LBPPLUGINDIR:-}" ]; then
+    PDIR=$(basename "$LBPPLUGINDIR")
+fi
+BASE="${5:-${LBHOMEDIR:-}}"
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ] || [ ! -d "$BASE/data/plugins" ]; then
+    BASE=$(lb_wurzel_suchen) || BASE=""
+fi
+case "$PDIR" in
+    ''|.|..|*/*) PDIR="" ;;
+esac
+if [ -z "$PDIR" ] || [ -z "$BASE" ]; then
+    echo "<WARNING> Deinstallation ohne brauchbaren Plugin-Ordner oder ohne LoxBerry-Wurzel"
+    echo "<WARNING> (Ordner: '${PDIR}', Wurzel: '${BASE}'). Der Installer uebergibt beides;"
+    echo "<WARNING> ein Aufruf von Hand braucht die Argumente oder LBHOMEDIR UND LBPPLUGINDIR."
+    echo "<WARNING> Es wurde nichts angehalten, nichts geleert und nichts geloescht."
+    exit 0
+fi
 
 echo "<INFO> stoppe Midea2Lox"
 # Ueber die PID-Datei, nicht ueber killall: killall sucht nach dem
@@ -30,16 +70,14 @@ echo "<INFO> stoppe Midea2Lox"
 # Interpreter (python3). "killall midea2lox.py" hat deshalb nie etwas
 # beendet - der Dienst lief nach dem Deinstallieren weiter, bis zum
 # naechsten Neustart.
-BASE="${5:-$LBHOMEDIR}"
-[ -n "$BASE" ] && [ -d "$BASE" ] || BASE=$(lb_wurzel_suchen)
 # Zuerst ueber das Startskript: nur dessen "stop" beendet auch einen Dienst
 # ohne PID-Datei (gemessen in WSL, 17.09.2026: mit der PID-Datei allein lief
 # ein solcher Dienst nach dem Deinstallieren weiter). Der Installer ruft
 # dieses Skript, bevor er das Startskript loescht; es liegt unter dem
 # Pluginnamen ($2).
-PIDDATEI="$BASE/data/plugins/${PDIR:-midea2lox}/dienst.pid"
-PROGRAMM="$BASE/data/plugins/${PDIR:-midea2lox}/midea2lox.py"
-DAEMON="$BASE/system/daemons/plugins/${2:-Midea2Lox}"
+PIDDATEI="$BASE/data/plugins/$PDIR/dienst.pid"
+PROGRAMM="$BASE/data/plugins/$PDIR/midea2lox.py"
+DAEMON="$BASE/system/daemons/plugins/${2:-$PDIR}"
 
 # Erkennung wie in daemon/daemon (eigener_dienst): argv[0] ein
 # python-Interpreter, argv[1] gegen den Arbeitsordner des Prozesses
@@ -100,6 +138,51 @@ else
 	echo "<INFO> Kein laufender Dienst gefunden."
 fi
 
+# ---------- Zurueckbehaltene MQTT-Themen der Linie abraeumen ----------
+# Bis 4.5.8 blieben nach der Deinstallation connection/status mit dem
+# Letzten Willen "disconnected" und jeder Geraetezustand fuer immer im
+# Broker stehen; nach jedem Neustart von Broker oder Gateway bekam der
+# Miniserver sie als frische Werte (Regeln/07, Letzter Wille (c); in WSL
+# gemessen, Pruefung-Midea2Lox-4.5.9, Fall U1). Welche Themen, wie am Broker
+# gefragt und nachgelesen wird: mqtt_leeren() in data/mi_mqtt.py.
+#
+# Reihenfolge: NACH dem Anhalten - sonst schriebe der Dienst die Zustaende
+# gleich wieder hinein, und sein Letzter Wille faellt erst beim Beenden -
+# und VOR dem Entfernen der venv, denn paho liegt darin. Konfiguration
+# (Praefix) und Datenordner sind hier noch da; der Installer loescht sie
+# erst nach diesem Skript.
+#
+# Als loxberry, nicht als root: gebraucht wird nur Lesezugriff auf die
+# Konfiguration und auf general.json. stdin geschlossen, damit su nie auf
+# eine Eingabe wartet.
+#
+# 'timeout -k 5 60': ohne -k schickt timeout nach 60 s nur SIGTERM, und ein
+# Programm, das es nicht annimmt, hielte die Deinstallation an (Befund aus
+# Sprachsteuerung 0.11.10, dort ueber acht Stunden; Vorbild Weissware 0.9.34
+# und APC-UPS 1.2.13). Rueckgabe 124/137/sonst ueber 2 wird als WARNING
+# gemeldet, nicht verschluckt. Gemessen mit einem SIGTERM-festen
+# Platzhalter (Pruefung-Midea2Lox-4.5.9, Fall U7).
+MQ_PY="$BASE/bin/plugins/$PDIR/venv/bin/python3"
+MQ_SKRIPT="$BASE/data/plugins/$PDIR/mi_mqtt.py"
+MQ_RC=0
+if [ -x "$MQ_PY" ] && [ -f "$MQ_SKRIPT" ] && command -v timeout >/dev/null 2>&1; then
+	if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+		su -s /bin/bash loxberry -c "$(printf '%q ' env PYTHONDONTWRITEBYTECODE=1 \
+			timeout -k 5 60 "$MQ_PY" "$MQ_SKRIPT" --mqtt-leeren)" < /dev/null 2>&1 || MQ_RC=$?
+	else
+		env PYTHONDONTWRITEBYTECODE=1 timeout -k 5 60 "$MQ_PY" "$MQ_SKRIPT" --mqtt-leeren \
+			< /dev/null 2>&1 || MQ_RC=$?
+	fi
+	case "$MQ_RC" in
+		0|1|2) ;;
+		124) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen wurde nach 60 s abgebrochen - unter dem Praefix der Linie kann noch etwas im Broker stehen. Von Hand: mosquitto_pub -r -n -t <thema>" ;;
+		137) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen reagierte nach 60 s nicht auf SIGTERM und wurde hart beendet (SIGKILL) - unter dem Praefix der Linie kann noch etwas im Broker stehen. Von Hand: mosquitto_pub -r -n -t <thema>" ;;
+		*) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen endete unerwartet (Rueckgabe $MQ_RC) - unter dem Praefix der Linie kann noch etwas im Broker stehen." ;;
+	esac
+else
+	echo "<WARNING> MQTT: $MQ_PY, $MQ_SKRIPT oder timeout fehlt - die zurueckbehaltenen Themen der Linie wurden nicht geleert. Von Hand: mosquitto_pub -r -n -t <thema>"
+fi
+
 # Die virtuelle Python-Umgebung liegt unter bin/plugins/<Ordner>/venv und
 # belegt je nach Fassung 60 bis 100 MB. LoxBerry entfernt das Verzeichnis
 # beim Deinstallieren zwar in aller Regel selbst - schaden kann es nicht,
@@ -112,7 +195,7 @@ fi
 # Die Bedingung pruefte damit auf "/<ordner>/venv", also auf einen Pfad
 # direkt unter der Wurzel. Der existiert nie, der Block lief nie, und die
 # 60 bis 100 MB blieben bei jedem betroffenen System liegen.
-VENV="$BASE/bin/plugins/${PDIR:-midea2lox}/venv"
+VENV="$BASE/bin/plugins/$PDIR/venv"
 if [ -d "$VENV" ]; then
 	echo "<INFO> entferne die virtuelle Python-Umgebung ($VENV)"
 	rm -rf "$VENV"
@@ -132,7 +215,7 @@ fi
 # Fassung noch herumliegen hat, wird ihn jetzt los.
 for BK_NAME in backup.json backup.devices.cfg backup.midea2lox.cfg \
                backup.mqtt_subscriptions.cfg; do
-	BK="$BASE/config/plugins/${PDIR:-midea2lox}.$BK_NAME"
+	BK="$BASE/config/plugins/$PDIR.$BK_NAME"
 	if [ -f "$BK" ]; then
 		rm -f "$BK" && echo "<OK> Zweitschrift $BK_NAME entfernt."
 	fi
@@ -144,10 +227,13 @@ echo "<INFO> Der minuetliche Waechter wird mit dem Cron-Eintrag von LoxBerry ent
 # data/plugins/<ordner>.upgrade_sicherung liegt AUSSERHALB des Ordners, den
 # LoxBerry beim Deinstallieren loescht - genau deshalb uebersteht er ein
 # Update. Wer ihn hier nicht abraeumt, laesst Zugangsdaten liegen.
-UN_FOLDER="${3:-}"
-UN_BASE="${5:-$LBHOMEDIR}"
+UN_FOLDER="$PDIR"
+UN_BASE="$BASE"
 if [ -n "$UN_FOLDER" ] && [ -n "$UN_BASE" ] && [ -d "$UN_BASE/data/plugins" ]; then
     rm -rf "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung" 2>/dev/null
+    # Zwischenstaende aus preupgrade.sh (neu bauen, dann umbenennen); sie
+    # bleiben nur liegen, wenn ein Lauf mittendrin endete - mit Zugangsdaten.
+    rm -rf "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung.neu" \n           "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung.alt" 2>/dev/null
     # Dasselbe gilt fuer die Marke aus preupgrade.sh (seit 4.5.7). Sie liegt
     # aus demselben Grund neben dem Ordner und bliebe sonst liegen - eine
     # abgebrochene Aktualisierung, gefolgt von einer Deinstallation, liesse

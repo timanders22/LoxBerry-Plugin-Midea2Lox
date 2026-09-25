@@ -55,6 +55,8 @@ chmod +x "$PDATA/discover.py" 2>/dev/null
 # Lebenszeichen zu senden. Ohne Ausfuehrungsrecht schweigt es - und zwar
 # stillschweigend, weil der Cron seine Ausgabe verwirft.
 chmod +x "$PDATA/lebenszeichen.py" 2>/dev/null
+# Ab 4.5.9: uninstall/uninstall ruft es mit --mqtt-leeren auf.
+chmod +x "$PDATA/mi_mqtt.py" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 # 1. Virtuelle Python-Umgebung anlegen
@@ -155,15 +157,8 @@ echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
 rm -rf "$VENV_VORHER"
 
 # ---------------------------------------------------------------------------
-
-/bin/echo "#############################################################################################"
-/bin/echo "#  Nach der Installation bitte die Einstellungen zu allen MiniServern anpassen und speichern."
-/bin/echo "#  Danach den Dienst starten."
-/bin/echo "#"
-/bin/echo "#  Der Reiter \"Einbindung in Loxone\" im Plugin enthaelt eine Schritt-fuer-Schritt-"
-/bin/echo "#  Anleitung samt kompletter Baustein-Liste zum Nachbauen."
-/bin/echo "#############################################################################################"
-
+# Die Erstanleitung steht seit 4.5.9 am Ende: erst nach dem Zurueckspielen
+# aus der Zweitschrift ist bekannt, ob schon eingerichtet ist.
 
 # ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
 # Zurueckspielen aus der Zweitschrift - aber NUR, wenn die Datei des Nutzers
@@ -281,5 +276,38 @@ netz_zurueck() {
 netz_zurueck "devices.cfg"
 netz_zurueck "midea2lox.cfg"
 netz_zurueck "mqtt_subscriptions.cfg"
+
+# ---------------------------------------------------------------------------
+# Erstanleitung NUR, wenn noch nichts eingerichtet ist (seit 4.5.9)
+# ---------------------------------------------------------------------------
+#
+# postinstall.sh laeuft bei der Erstinstallation UND bei jedem Update
+# (plugininstall.pl uebergibt kein Kennzeichen). Bis 4.5.8 stand die
+# Anleitung "Einstellungen anpassen und speichern, danach den Dienst
+# starten" unbedingt da - auch nach einem gelungenen Update, bei dem die
+# Einstellungen gerade zurueckgespielt wurden und postupgrade.sh den Dienst
+# gleich wieder startet (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, Faelle
+# I2 und I4). Entscheidung des Hausherrn vom 24.09.2026, gemeinsamer
+# Auftrag Bestand-2026-09-18/AUFTRAG_postinstall-hinweis_2026-09-24.md.
+#
+# "Eingerichtet" entscheidet der INHALT (mi_inhalt oben, dieselbe Pruefung
+# wie fuer die Zweitschrift): midea2lox.cfg oder devices.cfg tragen Eigenes.
+# Liegt das Eigene erst in der Sicherung dieses Updates, holt postupgrade.sh
+# es gleich zurueck - auch dann keine Erstanleitung.
+MI_SICHER_CFG="$NETZ_BASE/data/plugins/$NETZ_PDIR.upgrade_sicherung/config"
+if mi_inhalt midea2lox.cfg "$NETZ_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$NETZ_CFG/devices.cfg"; then
+	echo "<OK> Die Einstellungen sind uebernommen - nach einer Aktualisierung ist nichts weiter zu tun."
+elif mi_inhalt midea2lox.cfg "$MI_SICHER_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$MI_SICHER_CFG/devices.cfg"; then
+	echo "<INFO> Die Einstellungen liegen in der Sicherung dieser Aktualisierung; postupgrade.sh"
+	echo "<INFO> spielt sie gleich zurueck und startet den Dienst."
+else
+	/bin/echo "#############################################################################################"
+	/bin/echo "#  Nach der Installation bitte die Einstellungen zu allen MiniServern anpassen und speichern."
+	/bin/echo "#  Danach den Dienst starten."
+	/bin/echo "#"
+	/bin/echo "#  Der Reiter \"Einbindung in Loxone\" im Plugin enthaelt eine Schritt-fuer-Schritt-"
+	/bin/echo "#  Anleitung samt kompletter Baustein-Liste zum Nachbauen."
+	/bin/echo "#############################################################################################"
+fi
 
 exit 0

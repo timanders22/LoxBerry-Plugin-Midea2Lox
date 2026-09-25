@@ -9,7 +9,42 @@ PDIR=$3
 # Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
 # Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
 LBHOMEDIR="${LBHOMEDIR:-$5}"
-LBHOME=$5
+
+# DIE WURZEL: GELESEN, NICHT GERATEN (seit 4.5.9). Bis 4.5.8 stand hier
+# "LBHOME=$5" ohne Pruefung; blieb $5 leer, lauteten alle Pfade ab der
+# Laufwerkswurzel, und das Skript versuchte /system/daemons/plugins/<ordner>
+# zu starten (in WSL gemessen, Pruefung-Midea2Lox-4.5.9, Fall W2). Bauart
+# wie preupgrade.sh: $5, sonst LBHOMEDIR, sonst Suche mit general.json;
+# ohne Wurzel oder Ordner wird gewarnt statt vollzogen.
+mi_wurzel_suchen() {
+    mi_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd) || return 1
+    mi_i=0
+    while [ -n "$mi_v" ] && [ "$mi_v" != "/" ] && [ "$mi_i" -lt 8 ]; do
+        if [ -d "$mi_v/config/plugins" ] && [ -d "$mi_v/data/plugins" ] \
+           && [ -f "$mi_v/config/system/general.json" ]; then
+            echo "$mi_v"
+            return 0
+        fi
+        mi_v=$(dirname "$mi_v")
+        mi_i=$((mi_i + 1))
+    done
+    return 1
+}
+LBHOME="${5:-$LBHOMEDIR}"
+if [ -z "$LBHOME" ] || [ ! -d "$LBHOME/config/plugins" ] || [ ! -d "$LBHOME/data/plugins" ]; then
+    LBHOME=$(mi_wurzel_suchen) || LBHOME=""
+fi
+case "$PDIR" in
+    ''|.|..|*/*) PDIR="" ;;
+esac
+if [ -z "$LBHOME" ] || [ -z "$PDIR" ]; then
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis oder kein Plugin-Ordner"
+    echo "<WARNING> gefunden (Ordner: '$PDIR', Wurzel: '$LBHOME'). Es wurde nichts"
+    echo "<WARNING> zurueckgestellt und kein Dienst gestartet."
+    exit 1
+fi
+LBHOMEDIR=$LBHOME
+set -- "$1" "$2" "$PDIR" "$4" "$LBHOME"
 
 # ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
 # Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
@@ -90,9 +125,10 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
 # jetzt mit 'cp -a quelle/. ziel/' den Inhalt - ohne die Zwischenebene.
 SICHER="$LBHOME/data/plugins/$PDIR.upgrade_sicherung"
 
-mi_abweichend() {  # $1 Quellordner, $2 Kopie -> Dateien, die in der Kopie fehlen oder abweichen
+mi_abweichend() {  # $1 Quellordner, $2 Kopie, $3 Ausnahmen -> Dateien, die in der Kopie fehlen oder abweichen
     [ -d "$1" ] || return 0
     ( cd "$1" && find . -type f | while IFS= read -r mi_f; do
+          case " $3 " in *" ${mi_f#./} "*) continue ;; esac
           cmp -s "$mi_f" "$2/$mi_f" || printf '%s ' "${mi_f#./}"
       done ) 2>/dev/null || echo "(nicht lesbar: $1)"
 }
@@ -106,14 +142,39 @@ echo "<INFO> Stelle die gesicherten Konfigurationsdateien wieder her"
 # war danach nirgends mehr heil). Jetzt wird jede Datei der Sicherung
 # byteweise im Konfigordner nachgesehen; weicht eine ab, bleibt die
 # Sicherung liegen.
+#
+# NACH INHALT, NICHT BLIND (seit 4.5.9). Bis 4.5.8 legte das cp die GANZE
+# Sicherung ueber den Konfigordner. Trug die Sicherung nur die Vorgabe - die
+# Einstellungen waren schon vor dem Update verloren - oder eine abgeschnittene
+# Datei, ueberschrieb sie, was postinstall.sh eben aus der heilen Zweitschrift
+# zurueckgeholt hatte, und meldete "zurueckgestellt" (in WSL gemessen,
+# Pruefung-Midea2Lox-4.5.9, Faelle S1 und S3). Jetzt bleibt eine Datei des
+# Konfigordners stehen, wenn SIE Eigenes traegt und ihre Fassung in der
+# Sicherung nicht (mi_inhalt oben); alles andere kommt wie bisher aus der
+# Sicherung. Die Sicherung faellt danach nur, wenn jede zurueckgestellte Datei
+# byteweise angekommen ist - das ist die Rueckholung nach Inhalt.
 MI_BEHALTEN=0
 if [ -d "$SICHER/config" ] && [ -n "$(ls -A "$SICHER/config" 2>/dev/null)" ]; then
-	mkdir -p "$LBHOME/config/plugins/$PDIR" 2>/dev/null
-	cp -a "$SICHER/config/." "$LBHOME/config/plugins/$PDIR/" 2>/dev/null
-	MI_RC=$?
-	MI_ABW=$(mi_abweichend "$SICHER/config" "$LBHOME/config/plugins/$PDIR")
+	MI_ZIEL="$LBHOME/config/plugins/$PDIR"
+	mkdir -p "$MI_ZIEL" 2>/dev/null
+	MI_RC=0
+	MI_BEHIELT=""
+	for mi_q in "$SICHER"/config/* "$SICHER"/config/.[!.]*; do
+		[ -e "$mi_q" ] || continue
+		mi_n=${mi_q##*/}
+		if [ -f "$mi_q" ] && ! mi_inhalt "$mi_n" "$mi_q" && mi_inhalt "$mi_n" "$MI_ZIEL/$mi_n"; then
+			MI_BEHIELT="$MI_BEHIELT $mi_n"
+			continue
+		fi
+		cp -a "$mi_q" "$MI_ZIEL/" 2>/dev/null || MI_RC=$?
+	done
+	MI_ABW=$(mi_abweichend "$SICHER/config" "$MI_ZIEL" "$MI_BEHIELT")
 	if [ "$MI_RC" -eq 0 ] && [ -z "$MI_ABW" ]; then
 		echo "<OK> Konfiguration zurueckgestellt."
+		if [ -n "$MI_BEHIELT" ]; then
+			echo "<INFO> Beibehalten, weil die Sicherung dort nichts Eigenes traegt, die"
+			echo "<INFO> Konfiguration aber schon (aus der Zweitschrift):$MI_BEHIELT"
+		fi
 	else
 		MI_BEHALTEN=1
 		echo "<WARNING> Die Konfiguration liess sich NICHT vollstaendig zurueckstellen"

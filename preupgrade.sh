@@ -8,6 +8,53 @@ ARGV5=$5 # Fifth argument is Base folder of LoxBerry
 LBHOMEDIR="${LBHOMEDIR:-$5}"
 
 # ===================================================================
+# DIE WURZEL: GELESEN, NICHT GERATEN (seit 4.5.9)
+# ===================================================================
+#
+# Bis 4.5.8 wurde $5 ungeprueft benutzt. Blieb es leer, lautete die erste
+# Zeile unten "mkdir -p /data/plugins" - ein Pfad ausserhalb jedes LoxBerry,
+# und dieses Skript laeuft am Geraet als root; Marke, Sicherung und
+# Zweitschrift folgten ab der Laufwerkswurzel (in WSL gemessen,
+# Pruefung-Midea2Lox-4.5.9, Fall W1: zwei mkdir-Aufrufe ab /).
+#
+# Jetzt: $5, sonst LBHOMEDIR - beide nur, wenn config/plugins und
+# data/plugins darunter liegen; sonst Suche aufwaerts nach config/plugins,
+# data/plugins UND config/system/general.json (Regeln/06). Ohne Wurzel oder
+# ohne Ordnernamen ($3) wird gewarnt statt vollzogen: keine Marke, keine
+# Sicherung, kein Dienst angehalten - die Aktualisierung laeuft mit dem
+# alten Risiko weiter. Bauart wie VolkswagenID 0.9.24.
+mi_wurzel_suchen() {
+    mi_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd) || return 1
+    mi_i=0
+    while [ -n "$mi_v" ] && [ "$mi_v" != "/" ] && [ "$mi_i" -lt 8 ]; do
+        if [ -d "$mi_v/config/plugins" ] && [ -d "$mi_v/data/plugins" ] \
+           && [ -f "$mi_v/config/system/general.json" ]; then
+            echo "$mi_v"
+            return 0
+        fi
+        mi_v=$(dirname "$mi_v")
+        mi_i=$((mi_i + 1))
+    done
+    return 1
+}
+MI_BASE="${5:-$LBHOMEDIR}"
+if [ -z "$MI_BASE" ] || [ ! -d "$MI_BASE/config/plugins" ] || [ ! -d "$MI_BASE/data/plugins" ]; then
+    MI_BASE=$(mi_wurzel_suchen) || MI_BASE=""
+fi
+case "$ARGV3" in
+    ''|.|..|*/*) ARGV3="" ;;
+esac
+if [ -z "$MI_BASE" ] || [ -z "$ARGV3" ]; then
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis oder kein Plugin-Ordner"
+    echo "<WARNING> gefunden (Ordner: '$ARGV3', Wurzel: '$MI_BASE'). Es wurde nichts"
+    echo "<WARNING> angelegt, nichts gesichert und kein Dienst angehalten."
+    exit 1
+fi
+ARGV5=$MI_BASE
+LBHOMEDIR=$MI_BASE
+set -- "$1" "$2" "$ARGV3" "$4" "$MI_BASE"
+
+# ===================================================================
 # DIE MARKE - ALS ALLERERSTES
 # ===================================================================
 #

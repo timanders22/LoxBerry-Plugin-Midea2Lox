@@ -50,6 +50,20 @@
 
 datadir=REPLACELBPDATADIR
 logdir=REPLACELBPLOGDIR
+
+# Aus einem ausgepackten Archiv heraus (die Platzhalter oben sind nicht
+# ersetzt, also kein absoluter Pfad) gibt es keinen Dienst dieser Anlage:
+# nichts starten, nichts anhalten, nichts anlegen. Bis 4.5.8 legte schon
+# "status" die beiden Platzhalter als Ordner im Arbeitsverzeichnis an (in
+# WSL gemessen, Pruefung-Midea2Lox-4.5.9, Faelle D1 und D2).
+mi_installiert=1
+case "$datadir" in /*) ;; *) mi_installiert=0 ;; esac
+case "$logdir" in /*) ;; *) mi_installiert=0 ;; esac
+if [ "$mi_installiert" != 1 ]; then
+    echo "Dieses Startskript liegt nicht in einer LoxBerry-Installation (Pfade nicht"
+    echo "eingesetzt). Es wurde nichts gestartet, angehalten oder angelegt."
+    exit 1
+fi
 piddatei="$datadir/dienst.pid"
 # Merkdatei fuer den minuetlichen Waechter (cron/cron.01min): Sie sagt, ob
 # der Dienst laufen SOLL. Ohne sie wuerde der Waechter einen bewusst
@@ -137,8 +151,8 @@ melde_log() {  # $1 Stufe, $2 Text
 #    laeuft der Dienst mitten in der Aktualisierung mit der
 #    Vorgabekonfiguration an. Nur eine Marke, die hoechstens 3600 s alt
 #    ist, zaehlt: eine abgebrochene Installation darf den Dienst nicht fuer
-#    immer stilllegen. Aeltere, unlesbare und in der Zukunft liegende
-#    gelten nicht. Ohne lesbare Uhr faellt die Pruefung GESCHLOSSEN aus
+#    immer stilllegen. Aeltere, unlesbare und mehr als 300 s in der
+#    Zukunft liegende gelten nicht. Ohne lesbare Uhr faellt die Pruefung GESCHLOSSEN aus
 #    (CLAUDE.md Abschnitt 4) - liefert "date" nichts, gilt die Marke.
 #    MI_START_TROTZ_MARKE=1 setzt nur postupgrade.sh: dort ist die Marke
 #    die eigene, und der Start ist der letzte Schritt der Installation.
@@ -163,7 +177,13 @@ marke_gilt() {
         ''|*[!0-9]*) return 0 ;;
     esac
     alter=$(( jetzt - seit ))
-    [ "$alter" -ge 0 ] && [ "$alter" -lt 3600 ]
+    # Bis 300 s "aus der Zukunft" gilt die Marke noch: die Uhr kann ein Stueck
+    # zurueckspringen, nachdem preupgrade.sh sie gesetzt hat (Muster 8 der
+    # Nachlese, Govee 0.9.20, Sprachsteuerung 0.11.9). Bis 4.5.8 galt jede
+    # Sekunde Zukunft als "gilt nicht" - in WSL gemessen
+    # (Pruefung-Midea2Lox-4.5.9, Fall M1): Marke 120 s voraus, der Dienst
+    # startete mitten in der Aktualisierung. Weiter voraus gilt sie nicht (M2).
+    [ "$alter" -ge -300 ] && [ "$alter" -lt 3600 ]
 }
 
 # $1: 1 = der Dienst soll laufen. Bei "restart" wird das VOR dem Anhalten

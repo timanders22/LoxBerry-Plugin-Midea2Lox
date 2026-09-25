@@ -10,6 +10,136 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.9
+
+### Nach der Deinstallation blieb `connection/status` für immer im Broker
+
+`<präfix>/connection/status` ist der Letzte Wille des Dienstes: beim
+Verbinden sendet er `connected`, bricht die Verbindung ab, setzt der Broker
+selbst `disconnected` — beides zurückbehalten (retained). Das ist richtig,
+solange das Plugin installiert ist, und es gilt auch nach jeder
+Neuverbindung (gemessen: nach einem Netzabriss kommt `connected` erneut
+zurückbehalten). Bis 4.5.8 räumte die Deinstallation das Thema aber nicht
+ab: `disconnected` stand danach für immer im Broker, ebenso jeder
+zurückbehaltene Gerätezustand, und nach jedem Neustart von Broker oder
+Gateway bekam der Miniserver diese Werte als frische Meldung.
+
+Jetzt leert `uninstall` die zurückbehaltenen Themen dieser Linie unter dem
+eingestellten Präfix — `connection/status`, die Gerätezustände und die
+Altlasten früherer Fassungen — und liest danach beim Broker nach, ob sie
+wirklich weg sind. Ein fremdes Thema unter demselben Präfix bleibt stehen.
+Lehnt der Broker die Anmeldung ab, verweigert er das Lesen oder steht nach
+dem Löschen noch etwas da, steht das als Warnung im
+Deinstallationsprotokoll, samt dem Befehl, mit dem man es von Hand erledigt.
+Der Schritt ist auf 60 Sekunden begrenzt und wird danach hart beendet.
+
+**Die Werte bleiben Text.** `connection/status` meldet weiterhin `connected`
+und `disconnected`, nicht `1`/`0` wie die Lebenszeichen neuerer Plugins.
+Eine Umstellung würde jede bestehende Loxone-Konfiguration brechen, die auf
+diese Wörter hört. Wer das Thema in Loxone auswerten will, legt einen
+Texteingang an oder vergleicht auf `connected`.
+
+### Erreichbarkeit und Automatik gehen nicht mehr zurückbehalten hinaus
+
+Bis 4.5.8 stand im Dienst eine Liste der Themen **ohne** Retain; alles
+andere ging zurückbehalten hinaus — auch ein Thema, das später dazukommt.
+Jetzt ist es umgekehrt: zurückbehalten werden nur noch die Zustände des
+Geräts (`power_state`, `operational_mode`, `target_temperature`,
+`fan_speed`, die Komfortschalter, `filter_alert` …) und
+`connection/status`. Alles andere geht flüchtig hinaus. Die Liste steht in
+`data/mi_mqtt.py`; der Reiter „MQTT“ zeigt sie, und eine Zeile im Reiter
+„Test“ hält Oberfläche und Dienst gegeneinander.
+
+Neu flüchtig sind damit:
+
+* `<gerät>/online` — die Erreichbarkeit stellt der Dienst aus seiner
+  eigenen Abfrage fest (er setzt sie bei einem Fehlschlag selbst auf 0).
+  Stirbt der Dienst, stünde eine zurückbehaltene `1` für immer da.
+* `automatik/aktiv`, `automatik/grund`, `automatik/gesperrt`,
+  `automatik/geraete` — `grund` und `gesperrt` tragen eine Restzeit
+  („seit 120 s nichts mehr“, „noch 5 min“), `aktiv` und `geraete` sagen, was
+  die Automatik des Dienstes gerade tut. Beides ist falsch, sobald der Dienst
+  steht.
+
+Nach einem Neustart von Broker oder Gateway fehlen diese Werte deshalb bis
+zur nächsten Meldung des Dienstes. Wer in Loxone auf sie hört, sollte das
+Lebenszeichen `status/ts` mit auswerten.
+
+Was frühere Fassungen zurückbehalten gesendet haben und heute flüchtig
+geht, räumt der Dienst beim ersten Verbinden **einmal** ab: direkt am Broker,
+danach nachgelesen, und erst dann merkt er sich das (Datei
+`retain_altlast` im Datenordner, mit Präfix und Themenliste). Der gültige
+Wert geht unmittelbar hinterher, damit der Miniserver nicht lange einen
+leeren Wert sieht. Scheitert das Nachlesen oder verweigert der Broker das
+Lesen, wird nichts gemerkt, und der Dienst versucht es nach zehn Minuten
+wieder.
+
+### Ohne erkennbare LoxBerry-Wurzel wird nichts mehr angefasst
+
+* `uninstall` suchte eine Wurzel nur an `config/plugins` und
+  `data/plugins` und fiel ohne Ordnernamen auf `midea2lox` zurück; im
+  schlimmsten Fall lauteten die Pfade `/bin/plugins/midea2lox/venv` ab der
+  Laufwerkswurzel. Von Hand aus einem ausgepackten Archiv aufgerufen, griff
+  es mit gesetztem `LBHOMEDIR` (am LoxBerry steht es in `/etc/environment`)
+  in die Anlage: Dienst anhalten, Python-Umgebung löschen. Jetzt gehört
+  `config/system/general.json` zur Wurzel, und ohne Ordnernamen vom
+  Installer (oder `LBPPLUGINDIR`) wird nur gewarnt.
+* `preupgrade.sh` legte bei fehlendem Wurzelverzeichnis `/data/plugins` an,
+  `postupgrade.sh` versuchte `/system/daemons/plugins/…` zu starten. Beide
+  warnen jetzt und tun nichts.
+* Die Oberfläche fiel auf einen fest eingetragenen Pfad zurück und setzte
+  ohne Wurzel Pfade ab `/` zusammen (`/config/plugins/…`,
+  `/templates/plugins/…`). Aus einem ausgepackten Archiv heraus arbeitet sie
+  jetzt nur in dessen eigenem Ordner; die Anlage nimmt sie nur, wenn sie dort
+  installiert liegt oder `LBHOMEDIR` **und** `LBPPLUGINDIR` gesetzt sind. Der
+  Knopf „Dienst starten“ ruft aus einem Archiv heraus kein Startskript der
+  Anlage mehr.
+* Das Startskript aus einem Archiv legte schon bei `status` zwei Ordner im
+  Arbeitsverzeichnis an; jetzt meldet es, dass es nicht installiert ist.
+
+### Die Aktualisierungsmarke darf ein wenig in der Zukunft liegen
+
+Springt die Uhr zurück, nachdem `preupgrade.sh` die Marke gesetzt hat, galt
+sie bis 4.5.8 nicht mehr, und der Dienst konnte mitten in der
+Aktualisierung starten. Jetzt gilt sie auch bis 300 Sekunden „voraus“ — im
+Startskript und in der Oberfläche gleich.
+
+### Die Sicherung überschrieb eine eben gerettete Konfiguration
+
+Waren die Einstellungen schon **vor** einem Update verloren (die
+Konfiguration war die Vorgabe oder abgeschnitten), holte `postinstall.sh`
+sie aus der Zweitschrift zurück — und `postupgrade.sh` legte danach die
+Sicherung darüber, die nur die Vorgabe bzw. die abgeschnittene Datei trug,
+und meldete „zurückgestellt“. Jetzt bleibt eine Datei stehen, wenn sie
+eigene Einstellungen trägt und ihre Fassung in der Sicherung nicht; das
+Protokoll nennt sie.
+
+### Nach einem Update keine Erstanleitung mehr
+
+`postinstall.sh` riet am Ende immer dazu, die Einstellungen anzupassen und
+den Dienst zu starten — auch nach einem gelungenen Update, bei dem beides
+gerade übernommen wurde. Die Anleitung erscheint jetzt nur noch, wenn keine
+eingerichtete Konfiguration vorliegt; sonst steht dort, dass nichts weiter
+zu tun ist.
+
+### Grenzen
+
+* Wer das Themenpräfix geändert hat, findet unter dem **alten** Präfix
+  noch zurückbehaltene Werte; `uninstall` und das einmalige Abräumen kennen
+  nur das eingestellte. Von Hand: `mosquitto_pub -r -n -t <thema>`.
+* Wie msmart die Erreichbarkeit im Einzelnen bildet, ist nicht gelesen; die
+  Einordnung stützt sich auf die Stellen, an denen der Dienst sie selbst
+  setzt.
+
+### Wie das geprüft ist
+
+In WSL/Ubuntu gemessen, **nicht** am Gerät: der echte Dienst mit echtem
+paho 1.6.1 gegen einen eigenen kleinen Broker mit Retain-Speicher und
+Letztem Willen, der jedes empfangene Paket mit seinem Retain-Kennzeichen
+aufschreibt, eine Verbindung kappen, eine Anmeldung abweisen und ein
+Abonnement verweigern kann; msmart ist eine Attrappe. Der Prüfstand liegt
+unter `Pruefung-Midea2Lox-4.5.9/` im Arbeitsordner des Hauses.
+
 ## Neu in 4.5.8
 
 ### Ein zweiter Aktualisierungsversuch löschte die einzige Sicherung
