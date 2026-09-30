@@ -10,6 +10,61 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.10
+
+Durchgang vom 30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer, MQTT).
+Gemessen an Attrappen für Klimagerät, Broker und Gateway unter PHP 7.4, 8.3 und
+8.5 sowie Python 3.12 mit paho 1.6.1; nicht am Gerät. Befunde mit Datei:Zeile:
+`Pruefung-Durchgang-2026-09-29/Midea2Lox_BEFUNDE_UND_VERBESSERUNGEN.md`.
+Die Abschnitte zu älteren Fassungen darunter beschreiben den damaligen Stand.
+
+**Dienst und Befehle**
+
+* **Befehle per UDP nimmt der Dienst nur noch vom Miniserver und vom LoxBerry
+  selbst an.** Bisher schaltete jeder Rechner im Netz die Klimageräte und
+  setzte dabei die Automatik außer Kraft. Fremde Absender stehen im Protokoll.
+* Die Automatik reagiert nicht mehr auf einen alten, im Broker
+  zurückbehaltenen Wert, sondern wartet auf einen frisch gesendeten.
+* Ungültige Solltemperaturen (`nan`, außerhalb des Gerätebereichs) werden
+  abgewiesen statt still geklemmt.
+* Eine neue Geräteadresse aus der Suche wirkt sofort, ohne Neustart.
+* Kein doppelter Dienst mehr, wenn der Wächter nach dem Hochfahren Minuten
+  nachholt, und kein falsches „disconnected“ im Broker.
+
+**MQTT**
+
+* Ein Präfixwechsel räumt die zurückbehaltenen Themen des alten Präfixes ab;
+  die Deinstallation räumt alle je benutzten Präfixe ab.
+* Ein entferntes Gerät und ein Zustand, den ein Abruf nicht liefert, werden
+  einmal als `-` gemeldet.
+* Nach dem Wiederverbinden mit dem Broker gehen alle Zustände erneut hinaus.
+* Das Lebenszeichen erkennt eine abgewiesene Anmeldung und weicht auf HTTP aus.
+* `connection/status` (Letzter Wille) steht in der Themenliste.
+
+**Oberfläche**
+
+* Midea-Kennwörter mit `;` oder Anführungszeichen überstehen das Speichern
+  anderer Reiter; bisher wurden sie still gekürzt.
+* Neuladen (F5) wiederholt keinen Vorgang mehr. Fehlschläge stehen unter einer
+  passenden Überschrift und in passender Farbe.
+* Die Selbstprüfung läuft nur im Reiter Test; die anderen Reiter laden ohne
+  Python-Start.
+* Der Reiter „Einbindung in Loxone“ verlangt keinen virtuellen UDP-Eingang mehr.
+* Sicherungen mit doppelter Gerätenummer oder mit Listen statt Text werden
+  abgewiesen.
+
+**Installation**
+
+* Eine Neuinstallation spielt keine alten Einstellungen (Konto, Kennwort,
+  Geräte) mehr ein; sie gehen nach `.alt` (neu: `preinstall.sh`).
+* Ein bewusst angehaltener Dienst bleibt nach einem Update aus.
+* Ein Update ohne Internet behält die Einstellungen, nennt den Befehl zum
+  Nachholen, und der Dienst startet von selbst, sobald die Umgebung vollständig
+  ist.
+* Die Deinstallation löscht keine fremde Datei `n` mehr (ein Tippfehler in
+  `uninstall` machte daraus ein zusätzliches Argument für `rm -rf`).
+* Einstellungen werden unteilbar mit Rechten 0600 geschrieben.
+
 ## Neu in 4.5.9
 
 ### Nach der Deinstallation blieb `connection/status` für immer im Broker
@@ -1092,8 +1147,8 @@ in beiden Sprachen.
 
 Auf dem LoxBerry läuft ein UDP-Dienst. Er nimmt Befehle vom Miniserver entgegen
 und schickt sie an die Klimageräte im lokalen Netz — **ohne Umweg über die
-Wolke des Herstellers**. Umgekehrt meldet er deren Zustand zurück: per UDP und,
-falls das MQTT-Gateway installiert ist, zusätzlich per MQTT.
+Wolke des Herstellers**. Umgekehrt meldet er deren Zustand über MQTT zurück;
+Loxone liest ihn über das MQTT-Gateway.
 
 Die Zugangsdaten des Hersteller-Kontos werden **nur einmal** gebraucht, um beim
 Suchen der Geräte Token und Schlüssel abzuholen. Danach läuft alles lokal.

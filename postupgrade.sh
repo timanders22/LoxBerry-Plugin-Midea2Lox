@@ -46,6 +46,12 @@ fi
 LBHOMEDIR=$LBHOME
 set -- "$1" "$2" "$PDIR" "$4" "$LBHOME"
 
+# I3 (ab 4.5.10): die Marke faellt in JEDEM Fall, auch wenn dieses Skript
+# unterwegs aussteigt (trap; unten wird sie wie bisher nach dem Start
+# entfernt und gemeldet). Regeln/06.
+MI_MARKE="$LBHOME/data/plugins/$PDIR.upgrade_laeuft"
+trap 'if [ -f "$MI_MARKE" ]; then rm -f "$MI_MARKE" 2>/dev/null; fi' EXIT
+
 # ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
 # Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
 # wird nach dem INHALT, nicht nach der Groesse. Bis 4.5.7 stand an diesen
@@ -236,18 +242,30 @@ fi
 # eigenen startet; an Chromecast4lox 1.3.10 mit 400 Waechterlaeufen im
 # Abstand von 0,02 s gemessen (17.09.2026). Mit der Ausnahme oben ist das
 # Fenster ganz geschlossen: die Marke liegt waehrend des ganzen Starts.
-echo "<INFO> Starte Midea2Lox"
-STARTAUS=$(MI_START_TROTZ_WILLE=1 MI_START_TROTZ_MARKE=1 \
-	"$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)
-STARTRC=$?
-if [ "$STARTRC" -eq 0 ]; then
-	echo "<OK> Midea2Lox laeuft."
+#
+# I2 (ab 4.5.10): gestartet wird NUR, wenn der Dienst vor dem Update lief
+# (Merker data/plugins/<ordner>.lief_vorher aus preupgrade.sh). Ein bewusst
+# angehaltener Dienst bleibt angehalten (Regeln/06 Z. 353). Bis 4.5.9 lief er
+# nach jedem Update wieder (Bericht installer Befund 2, Fall A).
+MI_LIEF="$LBHOME/data/plugins/$PDIR.lief_vorher"
+if [ -f "$MI_LIEF" ]; then
+	echo "<INFO> Starte Midea2Lox"
+	STARTAUS=$(MI_START_TROTZ_WILLE=1 MI_START_TROTZ_MARKE=1 \
+		"$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)
+	STARTRC=$?
+	if [ "$STARTRC" -eq 0 ]; then
+		echo "<OK> Midea2Lox laeuft."
+	else
+		echo "$STARTAUS" | sed 's/^/<WARNING> /'
+		echo "<WARNING> Midea2Lox laeuft nach dem Update nicht. Der minuetliche"
+		echo "<WARNING> Waechter versucht es weiter; der Grund steht in"
+		echo "<WARNING> log/plugins/$PDIR/midea2lox.log."
+	fi
 else
-	echo "$STARTAUS" | sed 's/^/<WARNING> /'
-	echo "<WARNING> Midea2Lox laeuft nach dem Update nicht. Der minuetliche"
-	echo "<WARNING> Waechter versucht es weiter; der Grund steht in"
-	echo "<WARNING> log/plugins/$PDIR/midea2lox.log."
+	echo "<INFO> Midea2Lox war vor dem Update angehalten und bleibt aus. Starten: Knopf"
+	echo "<INFO> \"Dienst starten\" im Reiter Einstellungen."
 fi
+rm -f "$MI_LIEF" 2>/dev/null
 
 # Die Marke der Aktualisierung faellt hier - postupgrade.sh ist in dieser
 # Linie das letzte Hakenskript, das LoxBerry ruft (es gibt kein

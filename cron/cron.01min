@@ -77,6 +77,26 @@ if "$DAEMON" status >/dev/null 2>&1; then
     exit 0
 fi
 
+# I3 (Durchgang 30.09.2026): OHNE VOLLSTAENDIGE UMGEBUNG WIRD NICHT GEZAEHLT.
+# Scheitert beim Update pip (kein Internet), liegt keine brauchbare venv da;
+# postinstall.sh sagt, wie sie nachzuholen ist. Bis 4.5.9 haette der Waechter
+# in dieser Lage fuenfmal vergeblich gestartet und dann aufgegeben - wer die
+# Umgebung danach nachholte, musste den Dienst noch von Hand starten. Jetzt
+# wartet er still (eine Zeile im Protokoll) und startet in der ersten Minute,
+# in der sich msmart und paho laden lassen. Die Probe kostet einen
+# Python-Start je Minute, und nur, solange der Dienst laufen soll, aber nicht
+# laeuft.
+VENV_MERKER="$PDATA/umgebung_fehlt"
+if [ ! -x "$VENV" ] || ! "$VENV" -c "import msmart.device, paho.mqtt.client" >/dev/null 2>&1; then
+    if [ ! -f "$VENV_MERKER" ]; then
+        melde "WARNING" "Die Python-Umgebung $VENV fehlt oder ist unvollstaendig (msmart/paho nicht ladbar). Der Dienst wird gestartet, sobald sie vollstaendig ist - wie sie nachzuholen ist, steht im Installationsprotokoll."
+        : > "$VENV_MERKER"
+    fi
+    rm -f "$ZAEHLER"
+    exit 0
+fi
+[ -f "$VENV_MERKER" ] && rm -f "$VENV_MERKER"
+
 # Laeuft nicht.
 N=0
 [ -f "$ZAEHLER" ] && N=$(cat "$ZAEHLER" 2>/dev/null)

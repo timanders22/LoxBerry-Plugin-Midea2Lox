@@ -22,6 +22,7 @@ Lebenszeichen genau in der Lage stumm, in der das Plugin ohne MQTT laeuft.
 """
 import json
 import os
+import re
 import sys
 
 cfg_path = 'REPLACELBPCONFIGDIR' #### REPLACE LBPCONFIGDIR ####
@@ -30,6 +31,7 @@ home_path = 'REPLACELBHOMEDIR' #### REPLACE LBHOMEDIR ####
 
 import configparser
 import logging
+import threading
 import time
 
 logging.basicConfig(
@@ -37,6 +39,14 @@ logging.basicConfig(
     format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
     datefmt='%d.%m %H:%M')
 _LOGGER = logging.getLogger("lebenszeichen.py")
+
+
+# Klartext der CONNACK-Codes (MQTT 3.1.1: 1-5; paho 2.x: 132-136).
+CONNACK_TEXT = {1: 'Protokollfassung abgelehnt', 2: 'Client-Kennung abgelehnt',
+                3: 'Broker nicht verfuegbar', 4: 'Benutzername oder Kennwort falsch',
+                5: 'nicht berechtigt', 132: 'Protokollfassung abgelehnt',
+                133: 'Client-Kennung abgelehnt', 134: 'Benutzername oder Kennwort falsch',
+                135: 'nicht berechtigt', 136: 'Broker nicht verfuegbar'}
 
 
 def wert(cfg, schluessel, vorgabe=''):
@@ -81,25 +91,51 @@ def main(argv):
         else:
             c = mqtt.Client(client_id='Midea2Lox_leben')
         c.username_pw_set(m['Brokeruser'], m['Brokerpass'])
+        # M5 (Durchgang 30.09.2026): die Antwort des Brokers AUSWERTEN. Bis
+        # 4.5.9 wurde nach connect() einfach gesendet; wies der Broker die
+        # Anmeldung ab (CONNACK 5), endete das Skript mit 0 und schrieb
+        # "Lebenszeichen ... =1" ins Protokoll, der HTTP-Rueckfall wurde nie
+        # versucht (in WSL gemessen, Bericht mqtt M5; Regeln/07 "Eine
+        # abgelehnte Anmeldung sieht aus wie eine gelungene").
+        antwort = {'rc': None}
+        angemeldet = threading.Event()
+
+        def bei_verbindung(_c, _u, _f, rc, *_rest):
+            try:
+                antwort['rc'] = int(getattr(rc, 'value', rc))
+            except (TypeError, ValueError):
+                antwort['rc'] = -1
+            angemeldet.set()
+
+        c.on_connect = bei_verbindung
         c.connect(m['Brokerhost'], int(m['Brokerport']), keepalive=15)
         c.loop_start()
-        # NICHT retained. Dieses Thema ist das Lebenszeichen des Dienstes;
-        # retained stuende es nach einem Neustart des Miniservers sofort
-        # wieder da und meldete "laeuft", auch wenn der Dienst tot ist.
-        # Hausstandard seit 03.09.2026.
-        info = c.publish(thema, laeuft, qos=1, retain=False)
         try:
-            info.wait_for_publish(timeout=5)
-        except TypeError:
-            info.wait_for_publish()
-        c.loop_stop()
-        c.disconnect()
+            if not angemeldet.wait(3):
+                raise RuntimeError('der Broker hat binnen 3 s nicht auf die Anmeldung geantwortet')
+            if antwort['rc'] != 0:
+                raise RuntimeError('der Broker hat die Anmeldung abgewiesen (CONNACK %s: %s)' % (
+                    antwort['rc'], CONNACK_TEXT.get(antwort['rc'], 'unbekannter Grund')))
+            # NICHT retained. Dieses Thema ist das Lebenszeichen des Dienstes;
+            # retained stuende es nach einem Neustart des Miniservers sofort
+            # wieder da und meldete "laeuft", auch wenn der Dienst tot ist.
+            # Hausstandard seit 03.09.2026.
+            info = c.publish(thema, laeuft, qos=1, retain=False)
+            try:
+                info.wait_for_publish(timeout=5)
+            except TypeError:
+                info.wait_for_publish()
+            if not info.is_published():
+                raise RuntimeError('der Broker hat das Lebenszeichen nicht binnen 5 s bestaetigt')
+        finally:
+            c.loop_stop()
+            c.disconnect()
         if grund:
             _LOGGER.info('Lebenszeichen %s=%s (%s)', thema, laeuft, grund)
         return 0
     except Exception as fehler:
-        _LOGGER.debug('Lebenszeichen ueber MQTT nicht moeglich (%s) - '
-                      'es wird HTTP versucht.', fehler)
+        _LOGGER.warning('Lebenszeichen %s=%s ueber MQTT nicht zugestellt (%s) - '
+                        'es wird HTTP versucht.', thema, laeuft, fehler)
 
     # 2. HTTP an den virtuellen Eingang
     try:
@@ -118,9 +154,13 @@ def main(argv):
             _LOGGER.warning('Lebenszeichen: Miniserver antwortete mit %s auf '
                             '%s_status_dienst.', r.status_code, praefix)
             return 1
+        _LOGGER.info('Lebenszeichen %s_status_dienst=%s ueber HTTP zugestellt.', praefix, laeuft)
         return 0
     except Exception as fehler:
-        _LOGGER.debug('Lebenszeichen ueber HTTP nicht moeglich: %s', fehler)
+        # Ehrlich: weder MQTT noch HTTP haben es zugestellt (M5). Zugangsdaten
+        # einer Adresse ("//benutzer:kennwort@") kommen nie ins Protokoll.
+        _LOGGER.warning('Lebenszeichen %s=%s auch ueber HTTP nicht zugestellt: %s',
+                        thema, laeuft, re.sub(r'//[^/@\s]*@', '//***@', str(fehler)))
         return 1
 
 

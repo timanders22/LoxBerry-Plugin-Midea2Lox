@@ -41,7 +41,10 @@ function mi_pruefungen($cfg)
      * Zeile darunter einen Strich: zwei verschiedene Urteile fuer EINE
      * Ursache, und das Kreuz schickte den Anwender auf eine Neuinstallation
      * wegen einer Frage, die gar nicht gestellt werden konnte. */
-    $msmart = mi_msmart_version();
+    /* O9 (ab 4.5.10): EINMAL messen und ablegen - der Reiter Einstellungen
+     * zeigt diesen Stand, ohne selbst Python zu starten. */
+    $fs = mi_fassungen(true);
+    $msmart = $fs['msmart'];
     $z[] = array(mi_e(mi_t('PRUEF.MSMART')),
         $msmart !== '' ? 1 : ($venv ? 0 : 2),
         $msmart !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($msmart))
@@ -52,7 +55,7 @@ function mi_pruefungen($cfg)
      * Fall gar nichts - der Grundsatz im Kopf dieser Funktion ("was nicht
      * gemessen werden konnte, sagt das") wurde ausgerechnet hier nicht
      * eingehalten. */
-    $py = mi_python_version();
+    $py = $fs['python'];
     $z[] = array(mi_e(mi_t('PRUEF.PYTHON')), $py !== '' ? 1 : 2,
         $py !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($py))
                    : mi_t('UI.NICHT_FESTSTELLBAR'));
@@ -63,7 +66,7 @@ function mi_pruefungen($cfg)
      * seit 4.3.0 uebergibt sie, wenn die Bibliothek sie kennt; diese Zeile
      * macht die Fassung sichtbar, damit die Frage beantwortbar wird, statt
      * offen zu bleiben. postinstall.sh klemmt paho auf < 2.0.0. */
-    $paho = mi_paho_version();
+    $paho = $fs['paho'];
     $z[] = array(mi_e(mi_t('PRUEF.PAHO')), $paho !== '' ? 1 : 2,
         $paho !== '' ? sprintf(mi_t('UI.FASSUNG_IST'), mi_e($paho))
                      : mi_t('UI.NICHT_FESTSTELLBAR'));
@@ -304,13 +307,13 @@ function mi_pruefungen($cfg)
     return $z;
 }
 
-/** Geraetesuche anstossen. */
+/** Geraetesuche anstossen. Rueckgabe seit 4.5.10: array(Text, gelungen). */
 function mi_discover()
 {
     $p = mi_paths();
     $skript = $p['datadir'] . '/discover.py';
     if (!is_readable($skript)) {
-        return sprintf(mi_t('UI.DISCOVER_FEHLT'), $skript);
+        return array(sprintf(mi_t('UI.DISCOVER_FEHLT'), $skript), false);
     }
     $alt = getcwd();
     @chdir($p['datadir']);
@@ -323,10 +326,15 @@ function mi_discover()
      * kein "nichts gefunden", sondern das Gegenteil. */
     $text = trim($aus);
     if ($code !== 0) {
-        return sprintf(mi_t('UI.DISCOVER_ABBRUCH'), (int) $code) . "\n\n"
-             . ($text !== '' ? $text : mi_t('UI.DISCOVER_OHNE_AUSGABE'));
+        // O2 (ab 4.5.10): eine abgebrochene Suche steht nicht mehr im gruenen
+        // Kasten (Bericht Oberflaeche Befund 4).
+        return array(sprintf(mi_t('UI.DISCOVER_ABBRUCH'), (int) $code) . "\n\n"
+             . ($text !== '' ? $text : mi_t('UI.DISCOVER_OHNE_AUSGABE')), false);
     }
-    return $text !== '' ? $text : mi_t('UI.DISCOVER_OHNE_AUSGABE');
+    // C4 (ab 4.5.10): der Dienst uebernimmt geaenderte Angaben aus
+    // devices.cfg beim naechsten Befehl, ohne Neustart - das wird gesagt.
+    return array(($text !== '' ? $text : mi_t('UI.DISCOVER_OHNE_AUSGABE'))
+                 . "\n\n" . mi_t('UI.DISCOVER_OHNE_NEUSTART'), true);
 }
 
 /**
@@ -408,12 +416,18 @@ function mi_schalten($cfg, $id, $befehl, $trocken)
 {
     $titel = $trocken ? mi_t('UI.T_TROCKEN') : mi_t('UI.T_SCHALTEN');
 
+    /* O2 (ab 4.5.10): drittes Element "gelungen". Bis 4.5.9 stand ueber jeder
+     * Antwort der gruene Kasten "Befehl gesendet" - auch ueber "Es wurde
+     * nichts gesendet" (Bericht Oberflaeche Befund 4). Der Titel sagt jetzt,
+     * was geschah, und die Farbe folgt dem Ergebnis. */
+    $nicht = mi_t('UI.T_SCHALTEN_NICHT');
+
     // Beide Enden pruefen: die Geraete-ID muss eine der hinterlegten sein,
     // der Befehl einer aus der Liste. Fail closed.
     $ids = array();
     foreach (mi_devices() as $d) { $ids[] = (string) $d['id']; }
     if (!in_array((string) $id, $ids, true)) {
-        return array($titel, mi_block(mi_t('UI.SCHALT_ID_UNBEKANNT')));
+        return array($trocken ? $titel : $nicht, mi_block(mi_t('UI.SCHALT_ID_UNBEKANNT')), false);
     }
     $erlaubt = array();
     foreach (mi_befehle() as $b) {
@@ -421,7 +435,7 @@ function mi_schalten($cfg, $id, $befehl, $trocken)
         if ($b[2] !== null)  { $erlaubt[] = $b[2]; }
     }
     if (!in_array((string) $befehl, $erlaubt, true)) {
-        return array($titel, mi_block(mi_t('UI.SCHALT_BEFEHL_UNBEKANNT')));
+        return array($trocken ? $titel : $nicht, mi_block(mi_t('UI.SCHALT_BEFEHL_UNBEKANNT')), false);
     }
 
     $ip   = mi_cfg($cfg, 'LoxberryIP', '127.0.0.1');
@@ -433,34 +447,38 @@ function mi_schalten($cfg, $id, $befehl, $trocken)
 
     if ($trocken) {
         $text .= "\n" . mi_t('UI.SCHALT_TROCKEN_HINWEIS');
-        return array($titel, mi_block($text));
+        return array($titel, mi_block($text), true);
     }
 
     $s = @fsockopen('udp://' . $ip, $port, $errno, $errstr, 3);
     if (!$s) {
         $text .= "\n" . sprintf(mi_t('UI.SCHALT_FEHLER'), (int) $errno, $errstr);
-        return array($titel, mi_block($text));
+        return array($nicht, mi_block($text), false);
     }
     stream_set_timeout($s, 3);
     $n = @fwrite($s, $paket);
     fclose($s);
-    $text .= "\n" . ($n === false
+    $gesendet = ($n !== false && (int) $n === strlen($paket));
+    $text .= "\n" . (!$gesendet
         ? mi_t('UI.SCHALT_NICHT_GESENDET')
         : sprintf(mi_t('UI.SCHALT_GESENDET'), (int) $n));
     $text .= "\n" . mi_t('UI.SCHALT_NACHSEHEN');
-    return array($titel, mi_block($text));
+    return array($gesendet ? $titel : $nicht, mi_block($text), $gesendet);
 }
 
-/** Eine Aktion des Reiters Test ausfuehren. */
+/** Eine Aktion des Reiters Test ausfuehren.
+ *  Rueckgabe seit 4.5.10: array(Titel, HTML, gelungen) - O2. */
 function mi_test_ausfuehren($was, $cfg)
 {
     switch ($was) {
         case 'discover':
-            return array(mi_t('UI.T_SUCHE'), mi_block(mi_discover()));
+            list($mi_suchtext, $mi_suche_gut) = mi_discover();
+            return array(mi_t('UI.T_SUCHE'), mi_block($mi_suchtext), $mi_suche_gut);
         case 'status':
-            return array(mi_t('UI.T_STATUS'), mi_block(mi_status()));
+            return array(mi_t('UI.T_STATUS'), mi_block(mi_status()), true);
         case 'themen':
-            return array(mi_t('UI.T_THEMEN'), mi_block(mi_themen_bericht()));
+            list($mi_thok) = mi_themen_probe();
+            return array(mi_t('UI.T_THEMEN'), mi_block(mi_themen_bericht()), $mi_thok === true);
         case 'umgebung':
             $p = mi_paths();
             $z = array();
@@ -494,8 +512,8 @@ function mi_test_ausfuehren($was, $cfg)
             $z[] = sprintf('%-20s: %s', mi_t('UI.U_REGION'),
                 mi_cfg($cfg, 'region', '') . ' -> '
                 . (mi_region_msmart(mi_cfg($cfg, 'region', '')) ?: '?'));
-            return array(mi_t('UI.T_UMGEBUNG'), mi_block(implode("\n", $z)));
+            return array(mi_t('UI.T_UMGEBUNG'), mi_block(implode("\n", $z)), true);
     }
     return array(mi_t('UI.T_UNBEKANNT'),
-        '<p class="sm-small">' . mi_e(mi_t('UI.T_UNBEKANNT_TEXT')) . '</p>');
+        '<p class="sm-small">' . mi_e(mi_t('UI.T_UNBEKANNT_TEXT')) . '</p>', false);
 }

@@ -85,6 +85,12 @@ set -- "$1" "$2" "$ARGV3" "$4" "$MI_BASE"
 # fork scheitert - eine Marke, die nicht wirkt.
 MARKE="$ARGV5/data/plugins/$ARGV3.upgrade_laeuft"
 mkdir -p "$ARGV5/data/plugins" 2>/dev/null
+# Lag die Marke schon, bevor dieses Skript lief, ist ein frueheres Update
+# abgebrochen (I5, Entscheidung 1 und 8): dessen Sicherung, Zweitschriften
+# und Merker sind dann die einzige Abschrift und bleiben. Ohne sie raeumt
+# dieses Skript einen Bestand aus einem FRUEHEREN Vorgang weg (unten).
+MI_MARKE_VORHER=0
+[ -e "$MARKE" ] && MI_MARKE_VORHER=1
 MARKE_ZEIT=$(date +%s 2>/dev/null)
 case "$MARKE_ZEIT" in
     ''|*[!0-9]*) MARKE_ZEIT="" ;;
@@ -209,6 +215,33 @@ mi_sicherung_traegt() {  # $1 Konfigordner einer Sicherung -> 0, wenn dort Eigen
 MI_NEU="$SICHER.neu"
 MI_QCFG="$ARGV5/config/plugins/$ARGV3"
 
+# ===================================================================
+# ALTER BESTAND (ab 4.5.10, I5 - Entscheidung 1, Bauart EVCC 0.9.34 I1)
+# ===================================================================
+#
+# Traegt die Konfiguration nichts Eigenes (sie fehlt, ist die Vorgabe oder
+# unvollstaendig), blieb bis 4.5.9 eine vorhandene Sicherung aus einem
+# FRUEHEREN Vorgang liegen, und postupgrade.sh spielte sie ein - auch eine
+# beliebig alte (in WSL gemessen, Bericht installer Befund 5, Fall V6).
+# Entscheidung 1: "preupgrade.sh raeumt einen alten Bestand weg, bevor es
+# einen neuen anlegt". Er geht nach <name>.alt und wird einmal gemeldet.
+# AUSNAHME: lag die Marke schon (MI_MARKE_VORHER, oben), ist ein Update
+# abgebrochen, und die Sicherung ist dessen einzige Abschrift - sie bleibt.
+MI_BEISEITE=""
+MI_FEST=""
+mi_beiseite() {  # $1 Pfad -> nach $1.alt (Datei 0600, Ordner 0700)
+    rm -rf "${1:?}.alt" 2>/dev/null
+    if mv -T "$1" "$1.alt" 2>/dev/null; then
+        if [ -d "$1.alt" ]; then chmod 0700 "$1.alt" 2>/dev/null; else chmod 0600 "$1.alt" 2>/dev/null; fi
+        MI_BEISEITE="$MI_BEISEITE $1.alt"
+    else
+        MI_FEST="$MI_FEST $1"
+    fi
+}
+if [ "$MI_MARKE_VORHER" != 1 ] && [ -e "$SICHER" ] && ! mi_sicherung_traegt "$MI_QCFG"; then
+    mi_beiseite "$SICHER"
+fi
+
 echo "<INFO> Creating backup folder for upgrading $SICHER"
 rm -rf "$MI_NEU" 2>/dev/null
 mkdir -p "$MI_NEU/config" 2>/dev/null
@@ -240,17 +273,19 @@ if [ "$MI_OK" = 1 ] && ! mi_sicherung_traegt "$MI_NEU/config" \
     MI_GRUND="$MI_GRUND die Einstellungen tragen nichts Eigenes, die vorhandene Sicherung schon;"
 fi
 
+# Der Zwischenname beim Austausch heisst seit 4.5.10 ".vorig": ".alt" ist
+# seit Entscheidung 1 der Name fuer "beiseitegelegt, wird nie eingespielt".
 if [ "$MI_OK" = 1 ]; then
-    rm -rf "$SICHER.alt" 2>/dev/null
-    if [ -e "$SICHER" ] && ! mv -T "$SICHER" "$SICHER.alt" 2>/dev/null; then
+    rm -rf "$SICHER.vorig" 2>/dev/null
+    if [ -e "$SICHER" ] && ! mv -T "$SICHER" "$SICHER.vorig" 2>/dev/null; then
         rm -rf "$MI_NEU" 2>/dev/null
         echo "<WARNING> Die bisherige Sicherung liess sich nicht beiseitelegen; sie bleibt"
         echo "<WARNING> unangetastet: $SICHER"
     elif mv -T "$MI_NEU" "$SICHER" 2>/dev/null; then
-        rm -rf "$SICHER.alt" 2>/dev/null
+        rm -rf "$SICHER.vorig" 2>/dev/null
         echo "<OK> Konfiguration gesichert (Rechte 0700)."
     else
-        [ -e "$SICHER.alt" ] && mv -T "$SICHER.alt" "$SICHER" 2>/dev/null
+        [ -e "$SICHER.vorig" ] && mv -T "$SICHER.vorig" "$SICHER" 2>/dev/null
         rm -rf "$MI_NEU" 2>/dev/null
         echo "<WARNING> Die neue Sicherung liess sich nicht an ihren Platz bringen."
         echo "<WARNING> Platz und Rechte in $ARGV5/data/plugins pruefen."
@@ -260,6 +295,39 @@ else
     echo "<WARNING> Die Einstellungen wurden NICHT neu gesichert:$MI_GRUND"
     if [ -d "$SICHER" ]; then
         echo "<WARNING> Die bisherige Sicherung bleibt unangetastet: $SICHER"
+    fi
+fi
+
+# ===================================================================
+# LIEF DER DIENST? (ab 4.5.10, I2 - Regeln/06 "Nach einem Update laeuft
+# wieder, was lief")
+# ===================================================================
+#
+# Bis 4.5.9 startete postupgrade.sh den Dienst nach JEDEM Update mit
+# MI_START_TROTZ_WILLE=1 - auch einen bewusst angehaltenen, und der neu
+# angelegte Merker soll_laufen hielt ihn danach am Leben (in WSL gemessen,
+# Bericht installer Befund 2, Fall A). Jetzt wird VOR dem Anhalten gefragt:
+# laeuft er ("status" 0) oder soll er laufen (Merker soll_laufen - ein
+# abgestuerzter Dienst, den der Waechter gleich wieder holen wuerde)? Dann
+# liegt data/plugins/<ordner>.lief_vorher NEBEN dem Ordner (purge raeumt ihn
+# sonst ab), und postupgrade.sh startet nur damit. Lag die Marke schon, ist
+# der Merker des abgebrochenen Updates die einzige Auskunft und bleibt.
+MI_LIEF="$ARGV5/data/plugins/$ARGV3.lief_vorher"
+MI_DAEMON="$ARGV5/system/daemons/plugins/$ARGV3"
+if [ "$MI_MARKE_VORHER" = 1 ] && [ -f "$MI_LIEF" ]; then
+    echo "<INFO> Der Merker eines abgebrochenen Updates bleibt: der Dienst lief vorher."
+else
+    rm -f "$MI_LIEF" 2>/dev/null
+    if { [ -x "$MI_DAEMON" ] && "$MI_DAEMON" status >/dev/null 2>&1; } \
+       || [ -f "$ARGV5/data/plugins/$ARGV3/soll_laufen" ]; then
+        if : > "$MI_LIEF" 2>/dev/null; then
+            echo "<INFO> Der Dienst lief - er wird nach dem Update wieder gestartet."
+        else
+            echo "<WARNING> Der Merker $MI_LIEF liess sich nicht anlegen - der Dienst"
+            echo "<WARNING> startet nach dem Update erst auf Knopfdruck."
+        fi
+    else
+        echo "<INFO> Der Dienst war bewusst angehalten - er bleibt nach dem Update aus."
     fi
 fi
 
@@ -364,9 +432,13 @@ mi_zweitschrift() {  # $1 Dateiname im Konfigordner
             echo "<WARNING> Die Zweitschrift von $1 liess sich nicht anlegen;"
             echo "<WARNING> eine vorhandene bleibt unveraendert: $z"
         fi
-    elif [ -f "$z" ]; then
+    elif [ -f "$z" ] && [ "$MI_MARKE_VORHER" = 1 ]; then
         echo "<WARNING> $1 fehlt, ist unvollstaendig oder die mitgelieferte Vorgabe -"
-        echo "<WARNING> die vorhandene Zweitschrift bleibt unveraendert: $z"
+        echo "<WARNING> die Zweitschrift des abgebrochenen Updates bleibt unveraendert: $z"
+    elif [ -f "$z" ]; then
+        # I5: eine Zweitschrift aus einem FRUEHEREN Vorgang wird nicht
+        # eingespielt (Entscheidung 1), sondern beiseitegelegt.
+        mi_beiseite "$z"
     else
         echo "<INFO> $1 traegt keine eigenen Einstellungen - keine Zweitschrift angelegt."
     fi
@@ -374,5 +446,13 @@ mi_zweitschrift() {  # $1 Dateiname im Konfigordner
 mi_zweitschrift devices.cfg
 mi_zweitschrift midea2lox.cfg
 mi_zweitschrift mqtt_subscriptions.cfg
+
+# Genau EINE Meldung fuer alles, was beiseitegelegt wurde (I5).
+if [ -n "$MI_BEISEITE" ] || [ -n "$MI_FEST" ]; then
+    MI_T="<WARNING> Ein Bestand aus einem frueheren Vorgang wird NICHT eingespielt."
+    [ -n "$MI_BEISEITE" ] && MI_T="$MI_T Beiseitegelegt:$MI_BEISEITE (die Deinstallation raeumt es ab)."
+    [ -n "$MI_FEST" ] && MI_T="$MI_T Nicht zu verschieben:$MI_FEST"
+    echo "$MI_T"
+fi
 
 exit 0

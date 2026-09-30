@@ -347,6 +347,39 @@ waisen_beenden() {
     return 0
 }
 
+# ===================================================================
+# DIE STARTSPERRE (ab 4.5.10, C6)
+# ===================================================================
+#
+# Zwischen "laeuft er schon?" und "nohup" stand bis 4.5.9 nichts, was einen
+# zweiten Aufrufer haette aufhalten koennen. Zwei Waechterlaeufe in derselben
+# Sekunde (cron.01min holt nach dem Uhrsprung beim Booten Minuten nach)
+# starteten beide; der zweite Dienst scheiterte am UDP-Port, hatte aber
+# vorher die PID-Datei ueberschrieben: "status" meldete gestoppt, der
+# Waechter sendete status/dienst = 0, und der unterlegene Prozess loeste den
+# Letzten Willen "disconnected" aus (in WSL gemessen, Bericht code Befund 6,
+# fuenf Laeufe). Jetzt sperrt dieses Skript auf sich selbst (flock auf
+# Deskriptor 8, bis 15 s warten): der zweite Aufrufer wartet, bis der erste
+# seinen Start samt Nachsehen hinter sich hat, und fragt DANACH, ob schon
+# einer laeuft. Der Dienst erbt den Deskriptor NICHT (8<&- beim Start) -
+# sonst hielte er die Sperre, solange er laeuft, und kein Neustart kaeme
+# mehr durch (Regeln/03, "Sperre vererbt sich an Kinder"). Ohne flock bleibt
+# es beim Verhalten bis 4.5.9. Bauform Matter2Lox 0.9.30 (bin/dienst.sh).
+MI_SPERRE_GEHALTEN=0
+startsperre_nehmen() {
+    [ "$MI_SPERRE_GEHALTEN" = "1" ] && return 0
+    command -v flock >/dev/null 2>&1 || return 0
+    [ -r "$0" ] || return 0
+    exec 8<"$0"
+    if flock -w 15 8; then
+        MI_SPERRE_GEHALTEN=1
+        return 0
+    fi
+    echo "Die Startsperre ($0) wurde binnen 15 s nicht frei - es wurde nichts getan."
+    melde_log "WARNING" "Die Startsperre wurde binnen 15 s nicht frei - ein anderer Start oder Halt lief noch. Es wurde nichts getan."
+    return 1
+}
+
 start_dienst() {
     local p w n
     if p=$(laufende_pid); then
@@ -420,10 +453,11 @@ start_dienst() {
         # Versuchen auf; und "stop", preupgrade.sh und uninstall konnten den
         # Prozess nie mehr erreichen - er ueberlebte Update und
         # Deinstallation.
-        su loxberry -c "cd '$datadir' && { nohup ./midea2lox.py >/dev/null 2>&1 & echo \$! > '$piddatei'; }"
+        # 8<&-: der Dienst erbt die Startsperre nicht (C6).
+        su loxberry -c "cd '$datadir' && { nohup ./midea2lox.py >/dev/null 2>&1 & echo \$! > '$piddatei'; }" 8<&-
         uebereignen "$piddatei"
     else
-        nohup ./midea2lox.py >/dev/null 2>&1 &
+        nohup ./midea2lox.py >/dev/null 2>&1 8<&- &
         echo $! > "$piddatei"
     fi
     # Die WIRKUNG pruefen, nicht den Aufruf.
@@ -489,6 +523,12 @@ stop_dienst() {
 # Rueckgabewert 0. Die Oberflaeche (mi_dienst in mi_lib.php) fragt genau
 # diesen Wert ab und meldete deshalb "Der Dienst wurde neu gestartet".
 rueck=0
+# C6: start, stop, restart und waechter laufen unter der Startsperre;
+# status bleibt rein lesend und ungesperrt.
+case "$1" in
+    'start'|''|'stop'|'restart'|'waechter')
+        startsperre_nehmen || exit 1 ;;
+esac
 case "$1" in
     'start'|'')
         if wille_liegt; then wille=1; else wille=0; fi

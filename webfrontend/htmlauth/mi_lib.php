@@ -133,6 +133,9 @@ function mi_paths()
             'dienst'    => $basis . '/data/midea2lox.py',
             'leben_py'  => $basis . '/data/lebenszeichen.py',
             'mqtt_py'   => $basis . '/data/mi_mqtt.py',
+            'praefixe'  => $basis . '/config.mqtt_praefixe',
+            'einmal'    => $basis . '/data/einmalmeldung.json',
+            'fassungen' => $basis . '/data/fassungen.json',
             // Die gefundene Wurzel, wenn diese Datei NICHT darin installiert
             // liegt (Archivmodus); sonst leer.
             'archiv'    => $gefunden,
@@ -186,6 +189,13 @@ function mi_paths()
         'leben_py' => $home . '/data/plugins/' . $ordner . '/lebenszeichen.py',
         // Ab 4.5.9: die Retain-Liste des Dienstes (MIT_RETAIN) liegt hier.
         'mqtt_py'  => $home . '/data/plugins/' . $ordner . '/mi_mqtt.py',
+        // Ab 4.5.10 (M1): die Praefixe, unter denen die Linie gesendet hat -
+        // NEBEN dem Konfigordner, damit die Liste ein Update uebersteht.
+        'praefixe' => $home . '/config/plugins/' . $ordner . '.mqtt_praefixe',
+        // Ab 4.5.10 (O1): das Ergebnis eines POST fuer das folgende GET.
+        'einmal'   => $home . '/data/plugins/' . $ordner . '/einmalmeldung.json',
+        // Ab 4.5.10 (O9): die zuletzt im Reiter Test ermittelten Fassungen.
+        'fassungen' => $home . '/data/plugins/' . $ordner . '/fassungen.json',
         'archiv'   => '',
     );
     return $p;
@@ -327,18 +337,10 @@ function mi_merkwort()
     if (!is_dir(dirname($datei))) {
         @mkdir(dirname($datei), 0775, true);
     }
-    // Rechte VOR dem Inhalt.
-    $tmp = $datei . '.tmp';
-    $abgelegt = false;
-    if (@file_put_contents($tmp, $neu) !== false) {
-        @chmod($tmp, 0600);
-        if (@rename($tmp, $datei)) {
-            @chmod($datei, 0600);
-            $abgelegt = true;
-        } else {
-            @unlink($tmp);
-        }
-    }
+    /* Rechte VOR dem Inhalt - seit 4.5.10 wirklich (C9). Bis 4.5.9 stand
+     * dieser Satz hier, und darunter kam chmod erst NACH file_put_contents
+     * (Bericht code Befund 9). Jetzt ueber mi_datei_schreiben(). */
+    $abgelegt = mi_datei_schreiben($datei, $neu, 0600);
     /* Laesst sich das Merkwort NICHT ablegen, gibt es nichts, woran ein
      * spaeterer Aufruf es wiedererkennen koennte: jeder Seitenaufbau
      * erzeugte bis 4.3.2 ein anderes, jeder POST scheiterte am Vergleich,
@@ -597,7 +599,16 @@ function mi_wert_pruefen($schluessel, $wert)
         case 'MideaUser':
         case 'MideaPassword':
             // Freitext. Geprueft wird nur, was mi_wert_taugt() ohnehin
-            // prueft; ein Kennwort darf jedes druckbare Zeichen enthalten.
+            // prueft; ein Kennwort darf jedes druckbare Zeichen enthalten -
+            // seit 4.5.10 (C3) auch ';' und Anfuehrungszeichen, die
+            // mi_ini_lesen() woertlich liest wie der Dienst.
+            // Nur Leerzeichen am RAND kann die Datei nicht halten:
+            // configparser schneidet sie ab, und der Dienst meldete sich mit
+            // einem anderen Kennwort an, als eingegeben wurde. Abweisen
+            // statt still kuerzen (Regeln/05).
+            if ((string) $wert !== trim((string) $wert)) {
+                return sprintf(mi_t('UI.PRUEF_RANDLEER'), mi_e($schluessel));
+            }
             return '';
     }
     return sprintf(mi_t('UI.PRUEF_UNBEKANNT'), mi_e($schluessel));
@@ -623,7 +634,7 @@ function mi_cfg_fehlende()
     if (!is_readable($datei)) {
         return array();
     }
-    $roh = @parse_ini_file($datei, true, INI_SCANNER_RAW);
+    $roh = mi_ini_lesen($datei);
     if (!is_array($roh) || !isset($roh['default']) || !is_array($roh['default'])) {
         return array();
     }
@@ -636,13 +647,85 @@ function mi_cfg_fehlende()
     return $fehlt;
 }
 
+/**
+ * midea2lox.cfg lesen wie Pythons configparser.RawConfigParser (ab 4.5.10, C3).
+ *
+ * Bis 4.5.9 las die Oberflaeche die Datei mit parse_ini_file(...,
+ * INI_SCANNER_RAW). Das schneidet an ';' ab und nimmt umschliessende
+ * Anfuehrungszeichen weg - der Dienst und discover.py (RawConfigParser) lesen
+ * beides woertlich. Ein Midea-Kennwort "abc;def" wurde damit beim naechsten
+ * Speichern IRGENDEINES Reiters still zu "abc" (gemessen unter 7.4, 8.4 und
+ * 8.5, Bericht code Befund 3, Bericht Oberflaeche Befund 5).
+ *
+ * Jetzt dieselben Regeln wie configparser: Kommentar nur als GANZE Zeile
+ * ('#' oder ';' am Anfang), Schluessel bis zum ersten '=' oder ':', Wert
+ * ohne Rand-Leerzeichen, sonst woertlich. Was configparser abweisen wuerde -
+ * eine Zeile ohne Trenner, ein Wert vor dem ersten Abschnitt, eine
+ * eingerueckte Fortsetzungszeile, ein doppelter Schluessel oder Abschnitt -,
+ * ergibt null: der Dienst startet mit einer solchen Datei nicht, und die
+ * Oberflaeche sagt dann "kaputt" statt eines halben Standes.
+ *
+ * Rueckgabe: array(abschnitt => array(schluessel => wert)) oder null.
+ */
+function mi_ini_lesen($datei)
+{
+    $roh = @file_get_contents($datei);
+    if ($roh === false) {
+        return null;
+    }
+    if (strncmp($roh, "\xEF\xBB\xBF", 3) === 0) {
+        $roh = substr($roh, 3);
+    }
+    $aus = array();
+    $klein = array();
+    $ab = null;
+    foreach (preg_split('/\r\n|\n|\r/', $roh) as $zeile) {
+        $t = trim($zeile);
+        if ($t === '' || $t[0] === '#' || $t[0] === ';') {
+            continue;
+        }
+        if ($zeile[0] === ' ' || $zeile[0] === "\t") {
+            return null;
+        }
+        if (preg_match('/^\[([^\]]+)\]$/', $t, $m)) {
+            if (isset($aus[$m[1]])) {
+                return null;
+            }
+            $ab = $m[1];
+            $aus[$ab] = array();
+            $klein[$ab] = array();
+            continue;
+        }
+        if ($ab === null) {
+            return null;
+        }
+        $pos = false;
+        foreach (array('=', ':') as $trenner) {
+            $p = strpos($t, $trenner);
+            if ($p !== false && ($pos === false || $p < $pos)) {
+                $pos = $p;
+            }
+        }
+        if ($pos === false) {
+            return null;
+        }
+        $k = rtrim(substr($t, 0, $pos));
+        if ($k === '' || isset($klein[$ab][strtolower($k)])) {
+            return null;
+        }
+        $klein[$ab][strtolower($k)] = true;
+        $aus[$ab][$k] = trim((string) substr($t, $pos + 1));
+    }
+    return $aus;
+}
+
 /** midea2lox.cfg lesen. Aufbau: INI mit dem Abschnitt [default]. */
 function mi_config_read()
 {
     $cfg = mi_vorgaben();
     $datei = mi_paths()['config'];
     if (is_readable($datei)) {
-        $roh = @parse_ini_file($datei, true, INI_SCANNER_RAW);
+        $roh = mi_ini_lesen($datei);
         if (is_array($roh) && isset($roh['default']) && is_array($roh['default'])) {
             foreach ($cfg as $k => $v) {
                 if (isset($roh['default'][$k])) {
@@ -687,7 +770,7 @@ function mi_cfg_lage()
     if (filesize($datei) === 0) {
         return array('leer', mi_t('UI.LAGE_LEER'));
     }
-    $roh = @parse_ini_file($datei, true, INI_SCANNER_RAW);
+    $roh = mi_ini_lesen($datei);
     if (!is_array($roh) || !isset($roh['default']) || !is_array($roh['default'])) {
         return array('kaputt', mi_t('UI.LAGE_KAPUTT'));
     }
@@ -700,6 +783,55 @@ function mi_cfg_lage()
             sprintf(mi_t('UI.LAGE_UNVOLLSTAENDIG'), mi_e(implode(', ', $fehlt))));
     }
     return array('ok', mi_t('UI.LAGE_OK'));
+}
+
+/**
+ * Eine Datei unteilbar schreiben - Rechte VOR dem Inhalt (ab 4.5.10, C9).
+ *
+ * Bis 4.5.9 schrieben mi_config_write(), mi_merkwort(), die beiden
+ * Geraetedateiwege und die Abo-Datei jeweils eigene Nebendateien "<ziel>.tmp"
+ * mit der Umask des Webservers; chmod kam erst NACH dem Inhalt oder gar erst
+ * nach dem Umbenennen. Unter "ulimit -f 1" (volle Karte) blieb
+ * midea2lox.cfg.tmp mit 1024 Byte und Rechten 644 liegen - darin das
+ * Midea-Kennwort (in WSL gemessen, Bericht code Befund 9; Regeln/03
+ * "atomar schreiben").
+ *
+ * Jetzt: Nebendatei <ziel>.neu.<pid> exklusiv anlegen, Rechte setzen, DANN
+ * schreiben, die geschriebene Laenge mit der Soll-Laenge vergleichen, erst
+ * danach umbenennen. Bei jedem Fehlschlag wird die Nebendatei entfernt.
+ */
+function mi_datei_schreiben($ziel, $inhalt, $rechte = 0600)
+{
+    $inhalt = (string) $inhalt;
+    if (!is_dir(dirname($ziel))) {
+        @mkdir(dirname($ziel), 0775, true);
+    }
+    $tmp = $ziel . '.neu.' . getmypid();
+    if (file_exists($tmp)) {
+        @unlink($tmp);   // Rest eines abgebrochenen Laufs mit derselben PID
+    }
+    $fh = @fopen($tmp, 'x');
+    if ($fh === false) {
+        return false;
+    }
+    @chmod($tmp, $rechte);
+    $laenge = strlen($inhalt);
+    $geschrieben = 0;
+    while ($geschrieben < $laenge) {
+        $n = @fwrite($fh, substr($inhalt, $geschrieben));
+        if ($n === false || $n === 0) {
+            break;
+        }
+        $geschrieben += $n;
+    }
+    $ok = ($geschrieben === $laenge) && @fflush($fh);
+    @fclose($fh);
+    if (!$ok || !@rename($tmp, $ziel)) {
+        @unlink($tmp);
+        return false;
+    }
+    @chmod($ziel, $rechte);
+    return true;
 }
 
 /**
@@ -728,20 +860,9 @@ function mi_config_write($cfg)
         $v = str_replace(array("\r", "\n"), '', (string) $v);
         $z .= $k . '=' . $v . "\n";
     }
-    $datei = mi_paths()['config'];
-    if (!is_dir(dirname($datei))) {
-        @mkdir(dirname($datei), 0775, true);
-    }
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $z) === false) {
-        return false;
-    }
-    if (!@rename($tmp, $datei)) {
-        @unlink($tmp);
-        return false;
-    }
-    @chmod($datei, 0600);   // enthaelt das Midea-Passwort
-    return true;
+    // Seit 4.5.10 ueber mi_datei_schreiben() (C9): Rechte vor dem Inhalt,
+    // Laenge verglichen, keine Nebendatei mit dem Kennwort bleibt liegen.
+    return mi_datei_schreiben(mi_paths()['config'], $z, 0600);   // enthaelt das Midea-Passwort
 }
 
 /** Einen Wert lesen, mit Vorgabe. */
@@ -909,17 +1030,8 @@ function mi_devices_bezeichnung_schreiben(array $zuordnung)
         $aus[] = 'bezeichnung = ' . $zuordnung[$id];
     }
     $inhalt = rtrim(implode("\n", $aus), "\n") . "\n";
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $inhalt) === false) {
-        return false;
-    }
-    @chmod($tmp, 0600);
-    if (!@rename($tmp, $datei)) {
-        @unlink($tmp);
-        return false;
-    }
-    @chmod($datei, 0600);
-    return true;
+    // Seit 4.5.10 ueber mi_datei_schreiben() (C9).
+    return mi_datei_schreiben($datei, $inhalt, 0600);
 }
 
 /** Die ID fuer die Beispiele in den Befehlstabellen. */
@@ -1196,25 +1308,91 @@ function mi_python($argumente)
     return array($code, rtrim($text, "\n"));
 }
 
+/* Die drei Fassungen werden je Seitenaufruf hoechstens EINMAL ermittelt
+ * (ab 4.5.10, O9): der Reiter Test fragte sie in der Selbstpruefung und im
+ * Knopf "Umgebung" erneut. */
 function mi_msmart_version()
 {
-    list($code, $aus) = mi_python(array('-c', 'import msmart; print(msmart.__version__)'));
-    return ($code === 0) ? trim($aus) : '';
+    static $w = null;
+    if ($w === null) {
+        list($code, $aus) = mi_python(array('-c', 'import msmart; print(msmart.__version__)'));
+        $w = ($code === 0) ? trim($aus) : '';
+    }
+    return $w;
 }
 
 function mi_python_version()
 {
-    list($code, $aus) = mi_python(
-        array('-c', "import sys; print('%d.%d.%d' % sys.version_info[:3])"));
-    return ($code === 0) ? trim($aus) : '';
+    static $w = null;
+    if ($w === null) {
+        list($code, $aus) = mi_python(
+            array('-c', "import sys; print('%d.%d.%d' % sys.version_info[:3])"));
+        $w = ($code === 0) ? trim($aus) : '';
+    }
+    return $w;
 }
 
 /** Die Fassung von paho-mqtt in der Umgebung - '' heisst nicht ermittelbar. */
 function mi_paho_version()
 {
-    list($code, $aus) = mi_python(
-        array('-c', 'import paho.mqtt as p; print(getattr(p, "__version__", ""))'));
-    return ($code === 0) ? trim($aus) : '';
+    static $w = null;
+    if ($w === null) {
+        list($code, $aus) = mi_python(
+            array('-c', 'import paho.mqtt as p; print(getattr(p, "__version__", ""))'));
+        $w = ($code === 0) ? trim($aus) : '';
+    }
+    return $w;
+}
+
+/**
+ * Die Fassungen von msmart-ng, Python und paho - frisch gemessen oder aus
+ * dem Zwischenspeicher (ab 4.5.10, O9).
+ *
+ * Bis 4.5.9 startete JEDER Seitenaufruf die venv-Python fuenfmal, zweimal
+ * davon mit "import msmart" - auch auf den Reitern, die nichts davon zeigen
+ * (in WSL gemessen, Bericht Oberflaeche Befund 11: 1,5 s je Seite mit einer
+ * Attrappe von 0,3 s je Start). Jetzt misst nur der Reiter Test ($frisch)
+ * und legt das Ergebnis ab; der Reiter Einstellungen zeigt den abgelegten
+ * Stand, solange die Umgebung dieselbe ist (Zeitstempel von pyvenv.cfg und
+ * site-packages - ein neues venv oder ein pip-Lauf aendert sie). Sonst steht
+ * dort "unbekannt" und der Hinweis auf den Reiter Test.
+ *
+ * Rueckgabe: array('msmart', 'python', 'paho', 'zwischenspeicher' => bool).
+ */
+function mi_fassungen($frisch = false)
+{
+    $p = mi_paths();
+    $kennung = '';
+    if ($p['venv'] !== '' && is_file($p['venv'])) {
+        $wurzel = dirname(dirname($p['venv']));
+        $sp = glob($wurzel . '/lib/python3*/site-packages');
+        $kennung = (string) @filemtime($wurzel . '/pyvenv.cfg') . ':'
+                 . (($sp && isset($sp[0])) ? (string) @filemtime($sp[0]) : '');
+    }
+    $leer = array('msmart' => '', 'python' => '', 'paho' => '', 'zwischenspeicher' => false);
+    if (!$frisch) {
+        clearstatcache(true, $p['fassungen']);
+        $d = is_readable($p['fassungen'])
+           ? json_decode((string) @file_get_contents($p['fassungen']), true) : null;
+        if ($kennung === '' || !is_array($d) || !isset($d['kennung']) || $d['kennung'] !== $kennung) {
+            return $leer;
+        }
+        $aus = array('zwischenspeicher' => true);
+        foreach (array('msmart', 'python', 'paho') as $k) {
+            $aus[$k] = (isset($d[$k]) && is_string($d[$k])) ? $d[$k] : '';
+        }
+        return $aus;
+    }
+    $aus = array('msmart' => mi_msmart_version(), 'python' => mi_python_version(),
+                 'paho' => mi_paho_version());
+    if ($kennung !== '') {
+        $js = json_encode($aus + array('kennung' => $kennung, 'zeit' => time()));
+        if ($js !== false) {
+            mi_datei_schreiben($p['fassungen'], $js, 0644);
+        }
+    }
+    $aus['zwischenspeicher'] = false;
+    return $aus;
 }
 
 /* ==================================================================
@@ -1347,6 +1525,12 @@ function mi_status_werte()
         'status/ts'      => array('s',       'WERT.ST_TS',      array('false', '0', '4000000000', '<v.0>')),
         'status/zaehler' => array('&mdash;', 'WERT.ST_ZAEHLER', array('false', '0', '999',      '<v.0>')),
         'status/dienst'  => array('&mdash;', 'WERT.ST_DIENST',  array('false', '0', '1',        '<v.0>')),
+        // M4 (ab 4.5.10): der Letzte Wille - connected bei jedem Verbinden,
+        // disconnected vom Broker, beide retained (das Paar aus Regeln/07).
+        // Bis 4.5.9 stand das Thema in keiner Tabelle, obwohl die
+        // Deinstallation es eigens abraeumt (Bericht mqtt M4). Ein Text,
+        // deshalb ohne Vorlagenangabe.
+        'connection/status' => array('Text', 'WERT.ST_VERBINDUNG', null),
     );
 }
 
@@ -1491,18 +1675,21 @@ function mi_localip()
  */
 function mi_regionen()
 {
+    /* Die Namen sind seit 4.5.10 Sprachschluessel (O11): bis 4.5.9 standen
+     * sie deutsch im PHP, und die englische Oberflaeche zeigte
+     * "Deutschland - server DE" (Bericht Oberflaeche Befund 13). */
     return array(
-        'DE' => array('Deutschland',        'DE'),
-        'AT' => array('Österreich',         'DE'),
-        'CH' => array('Schweiz',            'DE'),
-        'NL' => array('Niederlande',        'DE'),
-        'IT' => array('Italien',            'DE'),
-        'ES' => array('Spanien',            'DE'),
-        'FR' => array('Frankreich',         'DE'),
-        'PL' => array('Polen',              'DE'),
-        'GB' => array('Großbritannien',     'DE'),
-        'US' => array('USA',                'US'),
-        'KR' => array('Südkorea',           'KR'),
+        'DE' => array('REGION.DE', 'DE'),
+        'AT' => array('REGION.AT', 'DE'),
+        'CH' => array('REGION.CH', 'DE'),
+        'NL' => array('REGION.NL', 'DE'),
+        'IT' => array('REGION.IT', 'DE'),
+        'ES' => array('REGION.ES', 'DE'),
+        'FR' => array('REGION.FR', 'DE'),
+        'PL' => array('REGION.PL', 'DE'),
+        'GB' => array('REGION.GB', 'DE'),
+        'US' => array('REGION.US', 'US'),
+        'KR' => array('REGION.KR', 'KR'),
     );
 }
 
@@ -1938,7 +2125,8 @@ function mi_abo_datei_schreiben($cfg = null)
     if (!is_dir(dirname($datei))) {
         @mkdir(dirname($datei), 0775, true);
     }
-    return @file_put_contents($datei, mi_mqtt_topic($cfg) . '/#') !== false;
+    // Seit 4.5.10 ueber mi_datei_schreiben() (C9); kein Geheimnis, deshalb 0644.
+    return mi_datei_schreiben($datei, mi_mqtt_topic($cfg) . '/#', 0644);
 }
 
 /* ==================================================================
@@ -1991,7 +2179,12 @@ function mi_formularprobe()
     }
     $q = (string) @file_get_contents($datei);
     $formulare = preg_match_all('/<form\b[^>]*method=["\']post["\']/i', $q);
-    $merkmale  = preg_match_all('/mi_fmt\(\)/', $q);
+    /* Gezaehlt wird die AUSGABE des Merkmals (O6, ab 4.5.10). Bis 4.5.9 zaehlte
+     * das Muster jedes "mi_fmt()" - und das Formular "Automatik" schrieb sein
+     * Feld von Hand: 16 Formulare, 15 Treffer, ein Kreuz bei jedem Aufruf,
+     * obwohl gerendert 16 von 16 das Merkmal trugen (Bericht Oberflaeche
+     * Befund 8). Jetzt benutzt jedes Formular mi_fmt(). */
+    $merkmale  = preg_match_all('/echo\s+mi_fmt\(\)\s*;/', $q);
     return array($formulare > 0 && $merkmale >= $formulare, $formulare, $merkmale);
 }
 
@@ -2044,6 +2237,14 @@ function mi_themen_probe()
     preg_match_all("/'(automatik\\/[a-z]+)'/", $q, $ma);
     $gesendet = array_merge($gesendet, array_values(array_unique($ma[1])));
 
+    /* M4 (ab 4.5.10): das Thema, das der Dienst woertlich an das Praefix
+     * haengt (MQTT_PRAEFIX + '/connection/status', Letzter Wille). Bis 4.5.9
+     * trafen die Muster oben es nicht, und die Zeile meldete Gleichstand,
+     * waehrend es in keiner Tabelle stand. Geeicht: Zeile aus
+     * mi_status_werte() genommen -> rot. */
+    preg_match_all("/MQTT_PRAEFIX\\s*\\+\\s*'\\/([a-z_]+\\/[a-z_]+)'/", $q, $mc);
+    $gesendet = array_merge($gesendet, array_values(array_unique($mc[1])));
+
     $genannt = array_merge(array_keys(mi_werte()), array_keys(mi_status_werte()),
                            array_keys(mi_automatik_werte()));
     $fehlt = array_values(array_diff($gesendet, $genannt));
@@ -2087,9 +2288,9 @@ function mi_sprache_probe()
         if (mi_t($b[0]) === $b[0]) { $fehlt[] = $b[0]; }
     }
     foreach (mi_regionen() as $r) {
-        $anzahl++;   // Regionsnamen stehen nicht in der Sprachdatei, sondern
-                     // sind Eigennamen - hier wird nur mitgezaehlt, damit die
-                     // Zahl der angesehenen Stellen stimmt.
+        // Seit 4.5.10 stehen die Laendernamen in der Sprachdatei (O11).
+        $anzahl++;
+        if (mi_t($r[0]) === $r[0]) { $fehlt[] = $r[0]; }
     }
     return array(!$fehlt, $anzahl, $fehlt);
 }
@@ -2320,10 +2521,32 @@ function mi_sicherung_lesen($roh)
     // eine geratene Zeichenkette dort ist dasselbe wie eine geratene
     // Registeradresse.
     $geraete = array();
+    $ids_gesehen = array();
     foreach ($roh_ger as $i => $g) {
         $nr = (int) $i + 1;
         if (!is_array($g)) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_FORM'), $nr);
+            continue;
+        }
+        /* C8 (ab 4.5.10): JEDES Feld muss eine Zeichenkette sein (Nummer und
+         * Port duerfen auch eine ganze Zahl sein), BEVOR es umgewandelt wird.
+         * Bis 4.5.9 machte (string) aus einer Liste "Array": Bezeichnung und
+         * Typ wurden als "Array" uebernommen, samt PHP-Meldung "Array to
+         * string conversion" (gemessen unter 7.4, 8.4 und 8.5, Bericht code
+         * Befund 8; Fehlerklasse 10 des Auftrags). */
+        $mi_falsch = '';
+        foreach (array('id', 'typ', 'ip', 'port', 'bezeichnung', 'token', 'key') as $mi_feld) {
+            if (!isset($g[$mi_feld]) || is_string($g[$mi_feld])) {
+                continue;
+            }
+            if (($mi_feld === 'id' || $mi_feld === 'port') && is_int($g[$mi_feld])) {
+                continue;
+            }
+            $mi_falsch = $mi_feld;
+            break;
+        }
+        if ($mi_falsch !== '') {
+            $mangel[] = sprintf(mi_t('UI.SICH_GERAET_FELDTYP'), $nr, mi_e($mi_falsch));
             continue;
         }
         $id = isset($g['id']) ? trim((string) $g['id']) : '';
@@ -2333,6 +2556,16 @@ function mi_sicherung_lesen($roh)
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_ID'), $nr);
             continue;
         }
+        /* C7 (ab 4.5.10): eine Geraetenummer nur einmal. Bis 4.5.9 schrieb
+         * mi_devices_write() sie zweimal als [Midea_<id>] - Pythons
+         * configparser wirft darauf DuplicateSectionError, und danach waren
+         * ALLE Geraete stumm, waehrend die Oberflaeche beide anzeigte
+         * (gemessen, Bericht code Befund 7). Die ganze Datei gilt dann nicht. */
+        if (isset($ids_gesehen[$id])) {
+            $mangel[] = sprintf(mi_t('UI.SICH_GERAET_DOPPELT'), $nr, mi_e($id), $ids_gesehen[$id]);
+            continue;
+        }
+        $ids_gesehen[$id] = $nr;
         $ip = isset($g['ip']) ? trim((string) $g['ip']) : '';
         if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP) === false) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_IP'), $nr);
@@ -2421,15 +2654,78 @@ function mi_devices_write(array $geraete)
         if ($g['key'] !== '')         { $z .= 'key = ' . $g['key'] . "\n"; }
         $z .= "\n";
     }
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $z) === false) {
-        return false;
+    // Seit 4.5.10 ueber mi_datei_schreiben() (C9).
+    return mi_datei_schreiben($datei, $z, 0600);
+}
+
+/* ==================================================================
+ * Einmalmeldung nach der Umleitung (ab 4.5.10, O1)
+ *
+ * Jeder POST endet seit 4.5.10 mit einer Umleitung 303 auf
+ * index.php?form=<reiter> (Regeln/04). Bis 4.5.9 wurde die Seite unmittelbar
+ * nach dem POST gerendert, und F5 wiederholte Speichern, Dienst-Neustart,
+ * Anhalten, Zurueckspielen, Geraetesuche und "Befehl senden" (gemessen:
+ * zweimal HTTP 200, zweimal geschrieben - Bericht Oberflaeche Befund 1).
+ * Das Ergebnis reist in data/plugins/<ordner>/einmalmeldung.json (0600),
+ * gelesen und geloescht NUR beim GET, verworfen nach 120 s (Regeln/04,
+ * Nachtrag Raumklima 0.11.8). Keine Zugangsdaten: Geraetetoken und
+ * -schluessel (128 bzw. 64 Hexziffern), wie sie die Geraetesuche ausgeben
+ * kann, werden vor dem Ablegen unkenntlich gemacht.
+ * ================================================================== */
+function mi_einmal_ablegen(array $daten)
+{
+    $daten['zeit'] = time();
+    array_walk_recursive($daten, function (&$w) {
+        if (is_string($w)) {
+            $w = preg_replace('/(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{64}){1,2}(?![0-9A-Fa-f])/', '***', $w);
+        }
+    });
+    $js = json_encode($daten, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+                              | JSON_INVALID_UTF8_SUBSTITUTE);
+    return $js !== false && mi_datei_schreiben(mi_paths()['einmal'], $js, 0600);
+}
+
+function mi_einmal_abholen()
+{
+    $f = mi_paths()['einmal'];
+    clearstatcache(true, $f);
+    if (!is_file($f)) {
+        return null;
     }
-    @chmod($tmp, 0600);
-    if (!@rename($tmp, $datei)) {
-        @unlink($tmp);
-        return false;
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || abs(time() - (int) $d['zeit']) > 120) {
+        return null;
     }
-    @chmod($datei, 0600);
-    return true;
+    return $d;
+}
+
+/* ==================================================================
+ * Die Praefixe, unter denen die Linie gesendet hat (ab 4.5.10, M1)
+ *
+ * Aendert der Anwender das Themenpraefix (Reiter MQTT oder Zurueckspielen),
+ * wird das bisherige hier vermerkt. Der Dienst raeumt nach dem Verbinden
+ * jedes gemerkte Praefix ausser seinem eigenen am Broker ab - ueber TCP, mit
+ * Nachlesen (data/mi_mqtt.py, praefixe_abraeumen) - und die Deinstallation
+ * alle. Dieselbe Datei und dasselbe Format wie im Dienst: eine Zeile je
+ * Praefix, neben dem Konfigordner.
+ * ================================================================== */
+function mi_praefix_merken($praefix)
+{
+    $datei = mi_paths()['praefixe'];
+    $liste = array();
+    if (is_readable($datei)) {
+        foreach (preg_split('/\R/', (string) @file_get_contents($datei)) as $z) {
+            $z = trim($z, " \t/");
+            if ($z !== '' && mi_wert_pruefen('mqtt_praefix', $z) === ''
+                && !in_array($z, $liste, true)) {
+                $liste[] = $z;
+            }
+        }
+    }
+    if (in_array($praefix, $liste, true)) {
+        return true;
+    }
+    $liste[] = $praefix;
+    return mi_datei_schreiben($datei, implode("\n", $liste) . "\n", 0644);
 }

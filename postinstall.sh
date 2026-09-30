@@ -58,107 +58,21 @@ chmod +x "$PDATA/lebenszeichen.py" 2>/dev/null
 # Ab 4.5.9: uninstall/uninstall ruft es mit --mqtt-leeren auf.
 chmod +x "$PDATA/mi_mqtt.py" 2>/dev/null
 
-# ---------------------------------------------------------------------------
-# 1. Virtuelle Python-Umgebung anlegen
-# ---------------------------------------------------------------------------
-
-echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
-
-# Die bisherige Umgebung wird BEISEITEGELEGT, nicht weggeworfen.
+# ===================================================================
+# DIE MARKE DER AKTUALISIERUNG (ab 4.5.10, I1/I3)
+# ===================================================================
 #
-# Bis 4.3.2 stand hier "rm -rf $VENV" vor jeder Pruefung. Ein
-# Aktualisierungsversuch ohne Internet - pip_install bricht dann mit
-# Rueckgabewert 2 ab - liess damit eine leere Umgebung zurueck und machte
-# aus einem laufenden Plugin ein totes. Jetzt wird zurueckgerollt, und der
-# Anwender behaelt den Stand, mit dem er vorher gearbeitet hat.
-#
-# Verschoben statt kopiert, und zwar an den Ort und wieder zurueck: in einem
-# venv stehen absolute Pfade (pyvenv.cfg und jede Shebang-Zeile unter bin/).
-# Eine an einem anderen Namen gebaute Umgebung waere nach dem Umbenennen
-# kaputt - deshalb entsteht die neue immer unter dem endgueltigen Namen.
-VENV_VORHER="$PBIN/venv.vorher"
-rm -rf "$VENV_VORHER"
-if [ -d "$VENV" ]; then
-	mv "$VENV" "$VENV_VORHER" 2>/dev/null || rm -rf "$VENV"
-fi
-
-zurueckrollen() {
-	if [ -d "$VENV_VORHER" ]; then
-		rm -rf "$VENV"
-		if mv "$VENV_VORHER" "$VENV" 2>/dev/null; then
-			echo "<WARNING> Die bisherige Umgebung wurde wiederhergestellt."
-			echo "<WARNING> Das Plugin arbeitet mit dem Stand von vorher weiter."
-		fi
-	fi
-}
-
-if ! python3 -m venv "$VENV"; then
-	echo "<FAIL> Die virtuelle Python-Umgebung konnte nicht angelegt werden."
-	echo "<FAIL> Meist fehlt dafuer das Paket python3-venv. Es steht in dpkg/apt;"
-	echo "<FAIL> wenn der Paketschritt fehlgeschlagen ist, bitte im"
-	echo "<FAIL> Installationsprotokoll weiter oben nachsehen."
-	exit 2
-fi
-
-if [ ! -x "$PIP" ]; then
-	echo "<FAIL> In der neuen Umgebung ist kein pip3 vorhanden ($PIP)."
-	zurueckrollen
-	exit 2
-fi
-
-echo "<OK> Virtuelle Umgebung angelegt."
-
-# ---------------------------------------------------------------------------
-# 2. Module hineininstallieren - jeder Schritt wird geprueft
-# ---------------------------------------------------------------------------
-
-# piwheels liefert fertige Pakete fuer den Raspberry Pi. Auf x86 ist der
-# zusaetzliche Index unschaedlich, dort greift PyPI.
-PIPOPTS="--extra-index-url https://www.piwheels.org/simple --prefer-binary"
-
-pip_install() {
-	local paket="$1"
-	echo "<INFO> Installiere $paket ..."
-	# "$PIP" in Anfuehrungszeichen - $PIPOPTS soll zerfallen, der Pfad nicht.
-	if ! "$PIP" install $PIPOPTS "$paket"; then
-		echo "<FAIL> Die Installation von '$paket' ist fehlgeschlagen."
-		echo "<FAIL> Ohne dieses Modul kann Midea2Lox nicht arbeiten."
-		echo "<FAIL> Haeufigste Ursache: keine Internetverbindung waehrend der Installation."
-		zurueckrollen
-		exit 2
-	fi
-	echo "<OK> $paket installiert."
-}
-
-echo "<INFO> Aktualisiere pip in der Umgebung..."
-"$PIP" install --upgrade pip setuptools wheel >/dev/null 2>&1 || \
-	echo "<WARNING> pip liess sich nicht aktualisieren - wird fortgesetzt."
-
-pip_install "requests"
-pip_install "paho-mqtt${PAHO_VERSION}"
-pip_install "ifaddr"
-pip_install "msmart-ng==${MSMART_VERSION}"
-
-# ---------------------------------------------------------------------------
-# 3. Gegenprobe: laesst sich msmart in der Umgebung wirklich laden?
-# ---------------------------------------------------------------------------
-
-echo "<INFO> Pruefe die Umgebung gegen..."
-if ! "$VENV/bin/python3" -c "from msmart.device import AirConditioner; import paho.mqtt.client" 2>&1; then
-	echo "<FAIL> Die Module liessen sich zwar installieren, aber nicht laden."
-	zurueckrollen
-	exit 2
-fi
-
-INSTALLED=$("$VENV/bin/python3" -c "import msmart; print(msmart.__version__)" 2>/dev/null)
-echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
-
-# Erst JETZT ist die alte Umgebung entbehrlich.
-rm -rf "$VENV_VORHER"
-
-# ---------------------------------------------------------------------------
-# Die Erstanleitung steht seit 4.5.9 am Ende: erst nach dem Zurueckspielen
-# aus der Zweitschrift ist bekannt, ob schon eingerichtet ist.
+# Liegt data/plugins/<ordner>.upgrade_laeuft (preupgrade.sh legt sie als
+# Erstes an, kein Altersvergleich), ist es eine Aktualisierung. Endet dieses
+# Skript NICHT mit 0, entfernt der trap die Marke (Regeln/06: sonst sperrt sie
+# den Dienst nach einem Abbruch eine Stunde lang, und die Oberflaeche zeigt
+# "Aktualisierung laeuft"). Bei 0 raeumt postupgrade.sh sie ab. Gemessen
+# (bash 5.2): Kommandoersetzung und Unterschale loesen den EXIT-trap nicht aus.
+MI_MARKE="$PDATA.upgrade_laeuft"
+MI_LIEF="$PDATA.lief_vorher"
+MI_UPDATE=0
+[ -f "$MI_MARKE" ] && MI_UPDATE=1
+trap 'mi_rc=$?; if [ "$mi_rc" != 0 ] && [ -f "$MI_MARKE" ]; then rm -f "$MI_MARKE" 2>/dev/null && echo "<INFO> Marke der Aktualisierung entfernt (postinstall.sh endet mit $mi_rc)."; fi' EXIT
 
 # ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
 # Zurueckspielen aus der Zweitschrift - aber NUR, wenn die Datei des Nutzers
@@ -273,9 +187,157 @@ netz_zurueck() {
         echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
     fi
 }
-netz_zurueck "devices.cfg"
-netz_zurueck "midea2lox.cfg"
-netz_zurueck "mqtt_subscriptions.cfg"
+# I1 (Entscheidung 1): zurueckgespielt wird NUR bei einer Aktualisierung
+# (Marke liegt). Bei einer Neuinstallation hat preinstall.sh liegengebliebene
+# Zweitschriften schon nach .alt gelegt; hier wird dann nichts eingespielt.
+# I3: dieser Block steht seit 4.5.10 VOR dem Anlegen der Umgebung - scheitert
+# pip (kein Internet), ist die Konfiguration trotzdem zurueck.
+if [ "$MI_UPDATE" = 1 ]; then
+	netz_zurueck "devices.cfg"
+	netz_zurueck "midea2lox.cfg"
+	netz_zurueck "mqtt_subscriptions.cfg"
+fi
+
+# ===================================================================
+# UPDATE OHNE INTERNET (ab 4.5.10, I3)
+# ===================================================================
+#
+# Bis 4.5.9 brach postinstall.sh beim Update mit 2 ab, sobald pip scheiterte
+# (kein Internet). Das "Zurueckrollen" darunter konnte nie greifen:
+# purge_installation hatte bin/plugins/<ordner>/ samt venv schon geloescht.
+# Danach war das Plugin tot - Vorgabekonfiguration, halbe venv, Marke noch
+# eine Stunde gueltig, kein soll_laufen (in WSL gemessen, Bericht installer
+# Befund 3, Fall V). Jetzt, NUR bei einer Aktualisierung: die Konfiguration
+# ist schon zurueckgespielt (oben), eine unbrauchbare Umgebung wird entfernt,
+# der Befehl zum Nachholen steht im Protokoll, der Merker soll_laufen folgt
+# dem Stand vor dem Update, und das Skript endet mit 1 (Warnung) - die
+# Marke raeumt der trap ab. Der Waechter (cron.01min) startet den Dienst in
+# der ersten Minute, in der sich die Umgebung laden laesst.
+# Bei einer Neuinstallation bleibt es beim Abbruch mit 2.
+mi_nachholen() {  # $1 Grund
+	[ "$MI_UPDATE" = 1 ] || return 0
+	zurueckrollen
+	if ! "$VENV/bin/python3" -c "import msmart.device, paho.mqtt.client" >/dev/null 2>&1; then
+		rm -rf "${VENV:?}" 2>/dev/null
+	fi
+	echo "<WARNING> Die Aktualisierung ist unvollstaendig: $1"
+	echo "<WARNING> Die Einstellungen sind zurueckgespielt. Der Dienst startet von selbst, sobald die"
+	echo "<WARNING> Python-Umgebung vollstaendig ist. Nachholen, sobald der LoxBerry Internet hat"
+	echo "<WARNING> (als Benutzer loxberry, in einer Zeile):"
+	echo "<WARNING>   python3 -m venv '$VENV' && '$PIP' install --extra-index-url https://www.piwheels.org/simple --prefer-binary requests 'paho-mqtt${PAHO_VERSION}' ifaddr 'msmart-ng==${MSMART_VERSION}'"
+	if [ -f "$MI_LIEF" ]; then
+		mkdir -p "$PDATA" 2>/dev/null && : > "$PDATA/soll_laufen" 2>/dev/null
+		echo "<INFO> Der Dienst lief vor dem Update und startet, sobald die Umgebung vollstaendig ist."
+	fi
+	exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 1. Virtuelle Python-Umgebung anlegen
+# ---------------------------------------------------------------------------
+
+echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
+
+# Die bisherige Umgebung wird BEISEITEGELEGT, nicht weggeworfen.
+#
+# Bis 4.3.2 stand hier "rm -rf $VENV" vor jeder Pruefung. Ein
+# Aktualisierungsversuch ohne Internet - pip_install bricht dann mit
+# Rueckgabewert 2 ab - liess damit eine leere Umgebung zurueck und machte
+# aus einem laufenden Plugin ein totes. Jetzt wird zurueckgerollt, und der
+# Anwender behaelt den Stand, mit dem er vorher gearbeitet hat.
+#
+# Verschoben statt kopiert, und zwar an den Ort und wieder zurueck: in einem
+# venv stehen absolute Pfade (pyvenv.cfg und jede Shebang-Zeile unter bin/).
+# Eine an einem anderen Namen gebaute Umgebung waere nach dem Umbenennen
+# kaputt - deshalb entsteht die neue immer unter dem endgueltigen Namen.
+VENV_VORHER="$PBIN/venv.vorher"
+rm -rf "$VENV_VORHER"
+if [ -d "$VENV" ]; then
+	mv "$VENV" "$VENV_VORHER" 2>/dev/null || rm -rf "$VENV"
+fi
+
+zurueckrollen() {
+	if [ -d "$VENV_VORHER" ]; then
+		rm -rf "$VENV"
+		if mv "$VENV_VORHER" "$VENV" 2>/dev/null; then
+			echo "<WARNING> Die bisherige Umgebung wurde wiederhergestellt."
+			echo "<WARNING> Das Plugin arbeitet mit dem Stand von vorher weiter."
+		fi
+	fi
+}
+
+if ! python3 -m venv "$VENV"; then
+	mi_nachholen "die virtuelle Python-Umgebung liess sich nicht anlegen (python3-venv fehlt?)."
+	echo "<FAIL> Die virtuelle Python-Umgebung konnte nicht angelegt werden."
+	echo "<FAIL> Meist fehlt dafuer das Paket python3-venv. Es steht in dpkg/apt;"
+	echo "<FAIL> wenn der Paketschritt fehlgeschlagen ist, bitte im"
+	echo "<FAIL> Installationsprotokoll weiter oben nachsehen."
+	exit 2
+fi
+
+if [ ! -x "$PIP" ]; then
+	mi_nachholen "in der neuen Umgebung ist kein pip3 vorhanden ($PIP)."
+	echo "<FAIL> In der neuen Umgebung ist kein pip3 vorhanden ($PIP)."
+	zurueckrollen
+	exit 2
+fi
+
+echo "<OK> Virtuelle Umgebung angelegt."
+
+# ---------------------------------------------------------------------------
+# 2. Module hineininstallieren - jeder Schritt wird geprueft
+# ---------------------------------------------------------------------------
+
+# piwheels liefert fertige Pakete fuer den Raspberry Pi. Auf x86 ist der
+# zusaetzliche Index unschaedlich, dort greift PyPI.
+PIPOPTS="--extra-index-url https://www.piwheels.org/simple --prefer-binary"
+
+pip_install() {
+	local paket="$1"
+	echo "<INFO> Installiere $paket ..."
+	# "$PIP" in Anfuehrungszeichen - $PIPOPTS soll zerfallen, der Pfad nicht.
+	if ! "$PIP" install $PIPOPTS "$paket"; then
+		mi_nachholen "'$paket' liess sich nicht installieren (haeufigste Ursache: keine Internetverbindung)."
+		echo "<FAIL> Die Installation von '$paket' ist fehlgeschlagen."
+		echo "<FAIL> Ohne dieses Modul kann Midea2Lox nicht arbeiten."
+		echo "<FAIL> Haeufigste Ursache: keine Internetverbindung waehrend der Installation."
+		zurueckrollen
+		exit 2
+	fi
+	echo "<OK> $paket installiert."
+}
+
+echo "<INFO> Aktualisiere pip in der Umgebung..."
+"$PIP" install --upgrade pip setuptools wheel >/dev/null 2>&1 || \
+	echo "<WARNING> pip liess sich nicht aktualisieren - wird fortgesetzt."
+
+pip_install "requests"
+pip_install "paho-mqtt${PAHO_VERSION}"
+pip_install "ifaddr"
+pip_install "msmart-ng==${MSMART_VERSION}"
+
+# ---------------------------------------------------------------------------
+# 3. Gegenprobe: laesst sich msmart in der Umgebung wirklich laden?
+# ---------------------------------------------------------------------------
+
+echo "<INFO> Pruefe die Umgebung gegen..."
+if ! "$VENV/bin/python3" -c "from msmart.device import AirConditioner; import paho.mqtt.client" 2>&1; then
+	mi_nachholen "die Module liessen sich zwar installieren, aber nicht laden."
+	echo "<FAIL> Die Module liessen sich zwar installieren, aber nicht laden."
+	zurueckrollen
+	exit 2
+fi
+
+INSTALLED=$("$VENV/bin/python3" -c "import msmart; print(msmart.__version__)" 2>/dev/null)
+echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
+
+# Erst JETZT ist die alte Umgebung entbehrlich.
+rm -rf "$VENV_VORHER"
+
+# ---------------------------------------------------------------------------
+# Die Erstanleitung steht seit 4.5.9 am Ende: erst nach dem Zurueckspielen
+# aus der Zweitschrift ist bekannt, ob schon eingerichtet ist.
+
 
 # ---------------------------------------------------------------------------
 # Erstanleitung NUR, wenn noch nichts eingerichtet ist (seit 4.5.9)
@@ -295,9 +357,14 @@ netz_zurueck "mqtt_subscriptions.cfg"
 # Liegt das Eigene erst in der Sicherung dieses Updates, holt postupgrade.sh
 # es gleich zurueck - auch dann keine Erstanleitung.
 MI_SICHER_CFG="$NETZ_BASE/data/plugins/$NETZ_PDIR.upgrade_sicherung/config"
-if mi_inhalt midea2lox.cfg "$NETZ_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$NETZ_CFG/devices.cfg"; then
+# Das Schlusswort "nach einer Aktualisierung" nur NACH einer (I1): bis 4.5.9
+# stand es auch nach einer Neuinstallation, die alte Zweitschriften
+# eingespielt hatte (Bericht installer Befund 1).
+if [ "$MI_UPDATE" = 1 ] && { mi_inhalt midea2lox.cfg "$NETZ_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$NETZ_CFG/devices.cfg"; }; then
 	echo "<OK> Die Einstellungen sind uebernommen - nach einer Aktualisierung ist nichts weiter zu tun."
-elif mi_inhalt midea2lox.cfg "$MI_SICHER_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$MI_SICHER_CFG/devices.cfg"; then
+elif [ "$MI_UPDATE" != 1 ] && { mi_inhalt midea2lox.cfg "$NETZ_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$NETZ_CFG/devices.cfg"; }; then
+	echo "<INFO> Im Konfigurationsordner liegen schon eigene Einstellungen."
+elif [ "$MI_UPDATE" = 1 ] && { mi_inhalt midea2lox.cfg "$MI_SICHER_CFG/midea2lox.cfg" || mi_inhalt devices.cfg "$MI_SICHER_CFG/devices.cfg"; }; then
 	echo "<INFO> Die Einstellungen liegen in der Sicherung dieser Aktualisierung; postupgrade.sh"
 	echo "<INFO> spielt sie gleich zurueck und startet den Dienst."
 else

@@ -67,6 +67,31 @@ $mi_tab = preg_match($mi_muster, $mi_wunsch) ? $mi_wunsch : 'tab-settings';
 
 $mi_test_titel = '';
 $mi_test_text  = '';
+// O2 (ab 4.5.10): Farbe des Testkastens nach Ergebnis, und eine eigene Liste
+// fuer Vorgaenge, die nichts speichern (Dienstknoepfe) oder halb gelangen.
+$mi_test_ok    = true;
+$mi_misslungen = array();
+
+/* O1 (ab 4.5.10): das Ergebnis des vorigen POST - NUR beim GET gelesen
+ * (Regeln/04: beim POST ist die Fehlerliste zugleich der Sammler der
+ * Eingabepruefung, eine alte Meldung darin verhinderte das naechste
+ * Speichern). mi_einmal_abholen() loescht die Datei beim Lesen. */
+if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    $mi_em = mi_einmal_abholen();
+    if (is_array($mi_em)) {
+        $mi_emliste = function ($s) use ($mi_em) {
+            return (isset($mi_em[$s]) && is_array($mi_em[$s]))
+                ? array_values(array_filter($mi_em[$s], 'is_string')) : array();
+        };
+        $mi_fehler     = array_merge($mi_fehler, $mi_emliste('fehler'));
+        $mi_misslungen = $mi_emliste('misslungen');
+        $mi_hinweise   = array_values(array_unique(array_merge($mi_hinweise, $mi_emliste('hinweise'))));
+        $mi_meldung    = (isset($mi_em['meldung']) && is_string($mi_em['meldung'])) ? $mi_em['meldung'] : '';
+        $mi_test_titel = (isset($mi_em['test_titel']) && is_string($mi_em['test_titel'])) ? $mi_em['test_titel'] : '';
+        $mi_test_text  = (isset($mi_em['test_text']) && is_string($mi_em['test_text'])) ? $mi_em['test_text'] : '';
+        $mi_test_ok    = !empty($mi_em['test_ok']);
+    }
+}
 
 /* GENAU EINE Aktion je Anfrage.
  *
@@ -203,8 +228,13 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
                  * Dienst auf dem alten - der Python-Teil liest den Port nur
                  * beim Start - und einen Reiter Loxone, der ab sofort den
                  * neuen dokumentierte. */
+                /* C4 (ab 4.5.10): ERST suchen, DANN neu starten. Bis 4.5.9
+                 * stand der Neustart vor der Suche - eine neu gefundene
+                 * Adresse kam damit erst beim naechsten Neustart im Dienst
+                 * an (Bericht code Befund 4). Der Dienst uebernimmt eine
+                 * geaenderte devices.cfg inzwischen auch selbst. */
+                list($mi_test_titel, $mi_test_text, $mi_test_ok) = mi_test_ausfuehren('discover', $mi_cfg);
                 $was = mi_dienst('restart');
-                list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren('discover', $mi_cfg);
                 $mi_meldung = ($was === '')
                     ? mi_t('UI.GESPEICHERT_SUCHE')
                     : mi_t('UI.GESPEICHERT_SUCHE_OHNE_DIENST');
@@ -239,9 +269,23 @@ if (isset($_POST['mqtt_speichern'])) {
             $mi_fehler[] = $f;
         } else {
             $neu = $mi_cfg;
+            $mi_alt_praefix = mi_mqtt_topic($mi_cfg);
             $neu['mqtt_praefix'] = $roh;
             if (mi_config_write($neu)) {
                 $mi_cfg = mi_config_read();
+                /* M1 (ab 4.5.10): das bisherige Praefix merken. Der Dienst
+                 * raeumt es nach dem Neustart am Broker ab (mit Nachlesen),
+                 * die Deinstallation spaetestens. Bis 4.5.9 blieben 19
+                 * retained Themen darunter stehen, auch connection/status
+                 * (Bericht mqtt M1). */
+                if ($mi_alt_praefix !== mi_mqtt_topic($mi_cfg)) {
+                    if (mi_praefix_merken($mi_alt_praefix)) {
+                        $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_ALT_ABRAEUMEN'), mi_e($mi_alt_praefix));
+                    } else {
+                        $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_LISTE_FEHLER'),
+                                                 mi_e($mi_p['praefixe']), mi_e($mi_alt_praefix));
+                    }
+                }
                 /* Das Abo wandert mit. Wer das Praefix aendert und die
                  * mqtt_subscriptions.cfg stehen laesst, abonniert danach
                  * einen Zweig, in den niemand mehr schreibt.
@@ -373,7 +417,9 @@ if (isset($_POST['dienst'])) {
     } elseif ($ergebnis === 'fehlt') {
         // Bis 4.2.12 meldeten BEIDE Faelle "Startskript fehlt" - auch der,
         // in dem gar keine gueltige Aktion angefordert war.
-        $mi_fehler[] = sprintf(mi_t('UI.DIENST_SKRIPT_FEHLT'), mi_e($mi_p['daemon']));
+        // O2 (ab 4.5.10): ein Dienstknopf speichert nichts - sein Scheitern
+        // steht nicht unter "Es wurde nichts gespeichert".
+        $mi_misslungen[] = sprintf(mi_t('UI.DIENST_SKRIPT_FEHLT'), mi_e($mi_p['daemon']));
     } elseif ($ergebnis === 'aktualisierung') {
         // Seit 4.5.7: waehrend einer Aktualisierung startet das Startskript
         // nicht und endet trotzdem mit 0. Ohne diesen Zweig stuende hier
@@ -383,9 +429,9 @@ if (isset($_POST['dienst'])) {
         // Seit 4.4.0 unterscheidbar: das Startskript LIEF, hat aber mit
         // einem Fehler geendet. Bis dahin meldete die Oberflaeche in diesem
         // Fall gruen "Der Dienst wurde gestartet".
-        $mi_fehler[] = mi_t('UI.DIENST_FEHLGESCHLAGEN');
+        $mi_misslungen[] = mi_t('UI.DIENST_FEHLGESCHLAGEN');
     } else {
-        $mi_fehler[] = mi_t('UI.DIENST_UNBEKANNT');
+        $mi_misslungen[] = mi_t('UI.DIENST_UNBEKANNT');
     }
     $mi_tab = 'tab-settings';
 }
@@ -394,7 +440,7 @@ if (isset($_POST['dienst'])) {
 if (isset($_POST['test'])) {
     require_once __DIR__ . '/mi_test.php';
     $was = is_string($_POST['test']) ? $_POST['test'] : '';
-    list($mi_test_titel, $mi_test_text) = mi_test_ausfuehren($was, $mi_cfg);
+    list($mi_test_titel, $mi_test_text, $mi_test_ok) = mi_test_ausfuehren($was, $mi_cfg);
     $mi_tab = 'tab-test';
 }
 if (isset($_POST['schalten'])) {
@@ -402,7 +448,7 @@ if (isset($_POST['schalten'])) {
     $id  = isset($_POST['schalt_id'])  && is_string($_POST['schalt_id'])  ? $_POST['schalt_id']  : '';
     $bef = isset($_POST['schalt_bef']) && is_string($_POST['schalt_bef']) ? $_POST['schalt_bef'] : '';
     $trocken = isset($_POST['schalten']) && $_POST['schalten'] === 'trocken';
-    list($mi_test_titel, $mi_test_text) = mi_schalten($mi_cfg, $id, $bef, $trocken);
+    list($mi_test_titel, $mi_test_text, $mi_test_ok) = mi_schalten($mi_cfg, $id, $bef, $trocken);
     $mi_tab = 'tab-test';
 }
 
@@ -454,7 +500,7 @@ if (isset($_SERVER['REQUEST_METHOD'])
         echo $mi_js;
         exit;
     }
-    $mi_fehler[] = mi_t('UI.SICH_DL_FEHLER');
+    $mi_misslungen[] = mi_t('UI.SICH_DL_FEHLER');
 }
 
 /* ---------------- Einstellungen zurueckspielen ----------------
@@ -479,6 +525,7 @@ if (isset($_SERVER['REQUEST_METHOD'])
     } elseif ((int) $_FILES['mi_sicherung']['size'] > 262144) {
         $mi_fehler[] = mi_t('UI.SICH_ZU_GROSS');
     } else {
+        $mi_alt_praefix = mi_mqtt_topic($mi_cfg);
         $mi_erg = mi_sicherung_lesen(
             (string) @file_get_contents($_FILES['mi_sicherung']['tmp_name']));
         list($mi_neu, $mi_mangel, $mi_n, $mi_ng) = $mi_erg;
@@ -505,7 +552,9 @@ if (isset($_SERVER['REQUEST_METHOD'])
              * dann auch. */
             $mi_fehler[] = mi_t('UI.SICH_GERAETE_SCHREIBFEHLER');
         } elseif (!mi_config_write($mi_neu[0])) {
-            $mi_fehler[] = mi_t('UI.SICH_HALB');
+            // O2: die Geraetedatei IST geschrieben - das gehoert nicht unter
+            // "Es wurde nichts gespeichert".
+            $mi_misslungen[] = mi_t('UI.SICH_HALB');
         } else {
             /* DIE KONFIGURATION NEU LESEN. Ohne diese Zeile zeigte das
              * Formular darunter weiter den alten Stand; zusammen mit der
@@ -515,6 +564,16 @@ if (isset($_SERVER['REQUEST_METHOD'])
              * halb zurueckgespielte Konfiguration, die mi_sicherung_lesen()
              * verhindern soll. Gemessen. */
             $mi_cfg = mi_config_read();
+            // M1 (ab 4.5.10): ein anderes Praefix aus der Sicherung - das
+            // bisherige merken, der Dienst raeumt es nach dem Neustart ab.
+            if ($mi_alt_praefix !== mi_mqtt_topic($mi_cfg)) {
+                if (mi_praefix_merken($mi_alt_praefix)) {
+                    $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_ALT_ABRAEUMEN'), mi_e($mi_alt_praefix));
+                } else {
+                    $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_LISTE_FEHLER'),
+                                             mi_e($mi_p['praefixe']), mi_e($mi_alt_praefix));
+                }
+            }
             if (!mi_abo_datei_schreiben($mi_cfg)) {
                 $mi_hinweise[] = sprintf(mi_t('UI.ABO_SCHREIBFEHLER'),
                                          mi_e($mi_p['abo']));
@@ -552,6 +611,33 @@ if (isset($_SERVER['REQUEST_METHOD'])
     $mi_tab = 'tab-settings';
 }
 
+/* ---------------------------------------------------------------- *
+ * O1 (ab 4.5.10): JEDER POST endet mit einer Umleitung 303 (Regeln/04).
+ *
+ * Bis 4.5.9 wurde die Seite unmittelbar nach dem POST gerendert (HTTP 200,
+ * kein Location); F5 wiederholte Speichern, Dienst-Neustart, Anhalten,
+ * Zurueckspielen, Geraetesuche und "Befehl senden" (Bericht Oberflaeche
+ * Befund 1). Das Ergebnis reist als Einmalmeldung. Die Downloads (Vorlage,
+ * Sicherung) haben oben schon mit exit geendet. Laesst sich die Meldung
+ * nicht ablegen, wird wie bisher unmittelbar geantwortet - sonst ginge das
+ * Ergebnis verloren -, und der Hinweis sagt es.
+ * ---------------------------------------------------------------- */
+if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $mi_abgelegt = mi_einmal_ablegen(array(
+        'meldung'    => $mi_meldung,
+        'fehler'     => $mi_fehler,
+        'misslungen' => $mi_misslungen,
+        'hinweise'   => $mi_hinweise,
+        'test_titel' => $mi_test_titel,
+        'test_text'  => $mi_test_text,
+        'test_ok'    => $mi_test_ok ? 1 : 0,
+    ));
+    if ($mi_abgelegt && !headers_sent()) {
+        header('Location: index.php?form=' . substr($mi_tab, 4), true, 303);
+        exit;
+    }
+    $mi_hinweise[] = sprintf(mi_t('UI.EINMAL_UNABLEGBAR'), mi_e($mi_p['einmal']));
+}
 
 $mi_pid     = mi_dienst_pid();
 $mi_geraete = mi_devices();
@@ -575,6 +661,14 @@ if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion'
  * Bis 4.2.12 bot die Liste elf Regionen an; msmart-ng kennt drei. */
 if (!array_key_exists($mi_cfg['region'], mi_regionen())) {
     $mi_hinweise[] = sprintf(mi_t('UI.REGION_UNBEKANNT'), mi_e($mi_cfg['region']));
+}
+/* O4 (ab 4.5.10): ein Miniserver, den es im LoxBerry nicht (mehr) gibt,
+ * bekommt denselben Hinweis wie eine unbekannte Region. Bis 4.5.9 stand die
+ * Auswahl dann ohne gewaehlte Option da, und das naechste Speichern schrieb
+ * still MINISERVER1 (Bericht Oberflaeche Befund 6). */
+$mi_msf = mi_wert_pruefen('MINISERVER', $mi_cfg['MINISERVER']);
+if ($mi_msf !== '') {
+    $mi_hinweise[] = $mi_msf . ' ' . mi_t('UI.MINISERVER_WAEHLEN');
 }
 
 LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
@@ -672,7 +766,13 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 <div class="sm-alert sm-warn"><b><?php echo mi_t('UI.NICHT_GESPEICHERT'); ?></b><ul>
 <?php foreach ($mi_fehler as $f) { echo '<li>' . $f . '</li>'; } ?>
 </ul></div>
-<?php } elseif ($mi_meldung !== '') { ?>
+<?php } ?>
+<?php if ($mi_misslungen) { ?>
+<div class="sm-alert sm-warn"><b><?php echo mi_t('UI.VORGANG_MISSLUNGEN'); ?></b><ul>
+<?php foreach ($mi_misslungen as $f) { echo '<li>' . $f . '</li>'; } ?>
+</ul></div>
+<?php } ?>
+<?php if (!$mi_fehler && !$mi_misslungen && $mi_meldung !== '') { ?>
 <div class="sm-alert sm-ok"><?php echo $mi_meldung; ?></div>
 <?php } ?>
 <?php foreach ($mi_hinweise as $h) { ?>
@@ -722,13 +822,19 @@ if ($mi_pid !== null) {
     echo sprintf(mi_t('UI.DIENST_GESTOPPT_SIEHE'), mi_te('COMMON.LABEL_LOG'));
 }
 ?></p>
+<?php
+/* O9 (ab 4.5.10): KEIN Python-Start fuer diese Zeile. Bis 4.5.9 startete
+ * jeder Seitenaufruf die venv-Python fuenfmal (Bericht Oberflaeche Befund
+ * 11); jetzt steht hier der Stand, den der Reiter Test zuletzt gemessen hat. */
+$mi_fs = mi_fassungen(false);
+?>
 <p class="sm-small"><?php echo mi_t('UI.MSMART_NG'); ?> <span class="sm-mono"><?php
-  echo mi_e(mi_msmart_version() ?: mi_t('UI.UNBEKANNT')); ?></span> <?php echo mi_t('UI.PYTHON'); ?> <span class="sm-mono"><?php
-  echo mi_e(mi_python_version() ?: mi_t('UI.UNBEKANNT')); ?></span></p>
+  echo mi_e($mi_fs['msmart'] !== '' ? $mi_fs['msmart'] : mi_t('UI.UNBEKANNT')); ?></span> <?php echo mi_t('UI.PYTHON'); ?> <span class="sm-mono"><?php
+  echo mi_e($mi_fs['python'] !== '' ? $mi_fs['python'] : mi_t('UI.UNBEKANNT')); ?></span><?php
+  if (!$mi_fs['zwischenspeicher']) { echo ' ' . mi_t('UI.FASSUNG_IM_TEST'); } ?></p>
 
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?php echo mi_t('UI.LEG_LESEN'); ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?php echo mi_t('UI.LEG_TECHNIK'); ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
 </div>
 <div class="sm-knopfreihe">
@@ -771,6 +877,12 @@ if (!$mi_liste) {
         echo '<option value="' . mi_e($wert) . '"'
            . ($mi_cfg['MINISERVER'] === $wert ? ' selected' : '') . '>'
            . mi_e($name) . ($ip !== '' ? ' (' . mi_e($ip) . ')' : '') . '</option>';
+    }
+    // O4: den eingetragenen, aber nicht vorhandenen Miniserver zeigen und
+    // waehlen - das Speichern weist ihn ab, statt still MINISERVER1 zu nehmen.
+    if (!isset($mi_liste[(int) substr($mi_cfg['MINISERVER'], 10)])) {
+        echo '<option value="' . mi_e($mi_cfg['MINISERVER']) . '" selected>'
+           . mi_e(sprintf(mi_t('UI.MINISERVER_NICHT_DA'), $mi_cfg['MINISERVER'])) . '</option>';
     }
 }
 ?>
@@ -816,7 +928,7 @@ if (!$mi_liste) {
 <?php foreach (mi_regionen() as $k => $v) { ?>
     <option value="<?php echo mi_e($k); ?>"<?php
       echo $mi_cfg['region'] === $k ? ' selected' : ''; ?>><?php
-      echo mi_e($v[0]) . ' &ndash; ' . mi_e(sprintf(mi_t('UI.REGION_SERVER'), $v[1])); ?></option>
+      echo mi_e(mi_t($v[0])) . ' &ndash; ' . mi_e(sprintf(mi_t('UI.REGION_SERVER'), $v[1])); ?></option>
 <?php } ?>
   </select>
   <p class="sm-small"><?php echo mi_t('UI.REGION_HILFE'); ?></p>
@@ -877,7 +989,7 @@ if (!$mi_liste) {
 </table>
 </div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="bez_speichern" value="1"><?php echo mi_t('UI.BEZ_SPEICHERN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="bez_speichern" value="1"><?php echo mi_t('UI.BEZ_SPEICHERN'); ?></button>
 </div>
 </form>
 <p class="sm-small"><?php echo mi_t('UI.GERAETE_DATEI'); ?>
@@ -1015,7 +1127,7 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <p class="sm-small"><?php echo mi_t('UI.EINBINDUNG_EINLEITUNG'); ?></p>
 
 <?php if (!$mi_geraete) { ?>
-<div class="sm-alert sm-warn"><?php echo sprintf(mi_t('UI.EINBINDUNG_OHNE_GERAETE'), '123456789'); ?></div>
+<div class="sm-alert sm-warn"><?php echo sprintf(mi_t('UI.EINBINDUNG_OHNE_GERAETE'), mi_e($mi_bsp)); ?></div>
 <?php } ?>
 
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT1'); ?></b><br><br>
@@ -1042,9 +1154,12 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 </table>
 </div>
 <?php } ?>
-<p class="sm-small"><?php echo sprintf(mi_t('UI.UDP_WEG'), mi_e($mi_port)); ?></p>
-<pre class="sm-pre">\i<?php echo mi_e($mi_topic); ?>/<?php echo mi_e($mi_bsp); ?>/indoor_temperature,\i\v</pre>
-<p class="sm-small"><?php echo mi_t('UI.UDP_MUSTER_ERKLAERUNG'); ?></p>
+<?php /* M7 (ab 4.5.10): hier stand die Anleitung fuer einen virtuellen
+          UDP-Eingang auf dem Befehlsport. Auf diesem Port horcht der Dienst
+          selbst; einen UDP-Sender Richtung Miniserver gibt es im Plugin nicht
+          (Bericht mqtt M7). Wer der Anleitung folgte, legte einen Eingang an,
+          der nie einen Wert bekam. */ ?>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.UDP_WEG'), mi_e($mi_port), mi_e($mi_topic)); ?></p>
 </div>
 
 <?php if ($mi_geraete) { ?>
@@ -1138,7 +1253,13 @@ $mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
 <div class="sm-kacheln">
   <div class="sm-kachel">
     <b><span class="sm-scheibe <?php echo $mi_apunkt[$mi_al]; ?>"></span><?php
-      echo mi_te('UI.AUTO_LAGE_' . strtoupper($mi_al)); ?></b>
+      /* O5 (ab 4.5.10): "alt" traegt eine Zahl - bis 4.5.9 stand hier
+       * woertlich "seit %d s kein Durchgang" (Bericht Oberflaeche Befund 7). */
+      if ($mi_al === 'alt') {
+          echo mi_e(sprintf(mi_t('UI.AUTO_LAGE_ALT'), (int) $mi_aalter));
+      } else {
+          echo mi_te('UI.AUTO_LAGE_' . strtoupper($mi_al));
+      } ?></b>
     <?php echo mi_te('UI.AUTO_K_LAGE'); ?>
   </div>
   <div class="sm-kachel">
@@ -1153,7 +1274,7 @@ $mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
 </div>
 
 <form method="post" action="index.php">
-<input data-role="none" type="hidden" name="fmt" value="<?php echo mi_e(mi_formtoken()); ?>">
+<?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-automatik">
 
 <div class="sm-step">
@@ -1264,11 +1385,19 @@ foreach (mi_automatik_werte() as $mi_t1 => $mi_t2) { ?>
 </div>
 
 <?php if ($mi_test_titel !== '') { ?>
-<div class="sm-alert sm-ok"><b><?php echo $mi_test_titel; ?></b></div>
+<div class="sm-alert <?php echo $mi_test_ok ? 'sm-ok' : 'sm-warn'; ?>"><b><?php echo $mi_test_titel; ?></b></div>
 <?php echo $mi_test_text; ?>
 <?php } ?>
 
 <h2><?php echo mi_te('TEST.HEAD_SELFCHECK'); ?></h2>
+<?php
+/* O9 (ab 4.5.10): die Selbstpruefung (drei Python-Starts) laeuft nur, wenn
+ * der Reiter Test angefordert ist. Der Reiter ist deshalb ein echter Verweis
+ * (siehe Skript am Seitenende); auf den anderen Reitern steht hier nur der
+ * Hinweis. */
+if ($mi_tab !== 'tab-test') { ?>
+<p class="sm-small"><?php echo mi_t('UI.PRUEFUNG_NUR_IM_TEST'); ?></p>
+<?php } else { ?>
 <div class="sm-rollen">
 <table class="sm-tbl">
 <tr><th style="width:44%"><?php echo mi_te('UI.FRAGE'); ?></th><th><?php echo mi_te('UI.ANTWORT'); ?></th></tr>
@@ -1283,6 +1412,7 @@ foreach (mi_pruefungen($mi_cfg) as $c) {
 <?php } ?>
 </table>
 </div>
+<?php } ?>
 
 <h2><?php echo mi_te('UI.H_NACHSEHEN'); ?></h2>
 <div class="sm-knopfreihe">
@@ -1417,6 +1547,9 @@ $mi_zeilen = mi_log_tail();
     }
     for (var k = 0; k < reiter.length; k++) {
         reiter[k].addEventListener('click', function (e) {
+            // O9: der Reiter Test wird vom Server gerechnet - dorthin folgt
+            // der Browser dem Verweis, statt nur umzuschalten.
+            if (this.getAttribute('data-ziel') === 'tab-test') { return; }
             e.preventDefault();
             zeige(this.getAttribute('data-ziel'));
         });

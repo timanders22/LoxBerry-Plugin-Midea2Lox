@@ -180,12 +180,23 @@ def mi_wort(gruppe, aufzaehlung):
 # darauf weiterlaeuft, waere schlimmer als gar keine.
 
 ABO_SCHLOSS = threading.Lock()
-ABO_WERTE = {}          # Thema -> (roher Text, Zeitpunkt des Eintreffens)
+ABO_WERTE = {}          # Thema -> (roher Text, Zeitpunkt des Eintreffens | None)
+
+# C2 (Durchgang 30.09.2026): ein Wert, der beim Abonnieren aus dem Speicher
+# des Brokers kommt (Retain-Merkmal gesetzt), hat KEIN bekanntes Alter. Bis
+# 4.5.9 bekam er den Zeitpunkt des Eintreffens - ein beliebig alter Wert
+# einer Quelle, die laengst nicht mehr sendet, galt damit nach jedem Start
+# und jedem Wiederverbinden bis auf_max_alter als frisch, und die Automatik
+# griff (in WSL gemessen, Bericht code Befund 2: "Automatik greift ... 21.0
+# -> 19.0" ohne einen einzigen frischen Wert). Jetzt traegt er None als
+# Zeitpunkt und zaehlt nicht, bis die Quelle wieder sendet: live
+# weitergereichte Nachrichten kommen nach MQTT 3.1.1 immer OHNE
+# Retain-Merkmal an, auch wenn der Sender retained schickt.
 
 
-def abo_merken(thema, text):
+def abo_merken(thema, text, zurueckbehalten=False):
     with ABO_SCHLOSS:
-        ABO_WERTE[thema] = (text, time.time())
+        ABO_WERTE[thema] = (text, None if zurueckbehalten else time.time())
 
 
 def abo_stand():
@@ -195,11 +206,13 @@ def abo_stand():
 
 
 def abo_holen(thema, hoechstalter):
-    """(Text, Alter) - oder (None, Alter) wenn zu alt, (None, None) wenn nie.
+    """(Text, Alter) - oder (None, Alter) wenn zu alt, (None, None) wenn nie,
+    (None, -1) wenn bisher nur ein zurueckbehaltener Wert unbekannten Alters
+    kam (C2).
 
-    Die beiden Nein-Faelle sind ABSICHTLICH unterscheidbar: "nie etwas
-    bekommen" ist ein Einrichtungsfehler, "zu alt" ein Betriebsfehler, und
-    der Anwender muss verschiedene Dinge tun.
+    Die Nein-Faelle sind ABSICHTLICH unterscheidbar: "nie etwas bekommen" ist
+    ein Einrichtungsfehler, "zu alt" ein Betriebsfehler, "nur ein alter Wert
+    aus dem Broker" heisst: die Quelle sendet gerade nicht.
     """
     if not thema:
         return None, None
@@ -208,6 +221,8 @@ def abo_holen(thema, hoechstalter):
     if not eintrag:
         return None, None
     text, wann = eintrag
+    if wann is None:
+        return None, -1
     alter = time.time() - wann
     if hoechstalter > 0 and alter > hoechstalter:
         return None, alter
@@ -227,6 +242,92 @@ def abo_zahl(text):
         return float(str(text).strip().replace(',', '.'))
     except (TypeError, ValueError):
         return None
+
+
+# ===========================================================================
+# Wer darf Befehle schicken? (ab 4.5.10, C1)
+# ===========================================================================
+#
+# Bis 4.5.9 pruefte datagram_received nur die Laenge. Ein Datagramm von
+# 127.0.0.2 bei einem Miniserver auf 192.0.2.10 wurde ausgefuehrt (in WSL
+# gemessen, Bericht code Befund 1): jeder Rechner im Netz konnte die
+# Klimageraete schalten und die Automatik fuer auto_sperrzeit sperren.
+# Entscheidung 8 vom 30.09.2026: angenommen wird nur, was von den
+# Miniserver-Adressen aus general.json und von 127.0.0.1 kommt. Bauform wie
+# Chromecast4lox 1.3.13 (miniserver_adressen, fremd_melden).
+#
+# Dazu die eigene Adresse aus LoxberryIP: der Knopf "Senden" im Reiter Test
+# schickt an LoxberryIP, und ein Paket vom LoxBerry an seine eigene
+# LAN-Adresse traegt diese als Absender, nicht 127.0.0.1. Von aussen kommt
+# ein solches Paket nicht an: Linux verwirft auf einer Netzschnittstelle
+# Pakete mit einer eigenen Adresse als Absender (accept_local=0).
+
+_FREMDE_ABSENDER = {}   # Adresse -> [zuletzt gemeldet, seither verworfen]
+
+
+def miniserver_adressen():
+    """127.0.0.1, die eigene Adresse und alle Miniserver-Adressen.
+
+    Gelesen aus general.json (Miniserver.*.Ipaddress) und aus den
+    MINISERVER-Abschnitten der general.cfg, die cfg oben schon eingelesen
+    hat. Ein Name statt einer Adresse wird EINMAL aufgeloest; laesst er sich
+    nicht aufloesen, fehlt er in der Liste, und das steht im Protokoll.
+    """
+    roh = set()
+    try:
+        with open(home_path + '/config/system/general.json', encoding='utf-8') as f:
+            allgemein = json.load(f)
+        for _nr, ms in (allgemein.get('Miniserver') or {}).items():
+            if isinstance(ms, dict):
+                for schluessel in ('Ipaddress', 'IPAddress', 'ipaddress'):
+                    if str(ms.get(schluessel) or '').strip():
+                        roh.add(str(ms.get(schluessel)).strip())
+                        break
+    except (OSError, ValueError, AttributeError) as fehler:
+        _LOGGER.warning("general.json nicht lesbar (%s) - fuer die UDP-Absender "
+                        "gilt nur die general.cfg.", fehler)
+    for abschnitt in cfg.sections():
+        if abschnitt.upper().startswith('MINISERVER') and cfg.has_option(abschnitt, 'IPADDRESS'):
+            wert = str(cfg.get(abschnitt, 'IPADDRESS')).strip()
+            if wert:
+                roh.add(wert)
+    aus = {'127.0.0.1'}
+    if LoxberryIP and LoxberryIP != '0.0.0.0':
+        aus.add(LoxberryIP)
+    for adresse in roh:
+        try:
+            if type(ip_address(adresse)) is IPv4Address:
+                aus.add(adresse)
+                continue
+        except ValueError:
+            pass
+        try:
+            for eintrag in socket.getaddrinfo(adresse, None, socket.AF_INET):
+                aus.add(eintrag[4][0])
+        except (OSError, UnicodeError) as fehler:
+            _LOGGER.warning("Miniserver-Adresse '%s' laesst sich nicht aufloesen (%s) - "
+                            "von dort werden keine UDP-Befehle angenommen.", adresse, fehler)
+    return aus
+
+
+def absender_erlaubt(adresse):
+    """Darf dieser Absender Befehle schicken? Abweisung gebremst melden:
+    die erste sofort, danach hoechstens einmal je Stunde mit der Zahl der
+    seither verworfenen."""
+    if adresse in ERLAUBTE_ABSENDER:
+        return True
+    jetzt = time.time()
+    eintrag = _FREMDE_ABSENDER.get(adresse)
+    if eintrag is None or jetzt - eintrag[0] >= 3600:
+        zusatz = '' if eintrag is None or not eintrag[1] else \
+            ' (seit der letzten Meldung %d weitere verworfen)' % eintrag[1]
+        _LOGGER.warning("UDP von %s verworfen: nur die Miniserver (general.json), "
+                        "127.0.0.1 und der LoxBerry selbst duerfen Befehle schicken%s",
+                        adresse or '?', zusatz)
+        _FREMDE_ABSENDER[adresse] = [jetzt, 0]
+    else:
+        eintrag[1] += 1
+    return False
 
 
 # ===========================================================================
@@ -265,6 +366,12 @@ async def start_server():
                     "verworfen: %r", absender[0] if absender else '?',
                     len(daten), UDP_MAX, daten[:64])
                 return
+            # C1 (Durchgang 30.09.2026, Entscheidung 8): nur die Miniserver
+            # aus general.json, 127.0.0.1 und die eigene Adresse duerfen
+            # Befehle schicken. Geprueft VOR der Warteschlange - ein
+            # abgewiesenes Paket setzt auch keine Handsperre der Automatik.
+            if not absender_erlaubt(absender[0] if absender else ''):
+                return
             try:
                 warteschlange.put_nowait((daten, absender))
             except asyncio.QueueFull:
@@ -276,9 +383,11 @@ async def start_server():
         def error_received(self, fehler):
             _LOGGER.warning("UDP-Fehler: %s", fehler)
 
+    # Der Socket ist seit 4.5.10 schon gebunden (UDP_SOCKET, im Modulrumpf
+    # VOR der MQTT-Anmeldung - C6). Hier wird er nur noch uebernommen.
     try:
         transport, _ = await schleife.create_datagram_endpoint(
-            Empfang, local_addr=(LoxberryIP, UDP_Port))
+            Empfang, sock=UDP_SOCKET)
     except OSError as fehler:
         _LOGGER.error("Socket konnte nicht gebunden werden (%s:%s): %s",
                       LoxberryIP, UDP_Port, fehler)
@@ -286,6 +395,8 @@ async def start_server():
         return
     _LOGGER.info("Socket bind complete, listen at {}:{}".format(LoxberryIP, UDP_Port))
     print('Socket bind complete, listen at', LoxberryIP, ":", UDP_Port)
+    _LOGGER.info("UDP-Befehle werden nur angenommen von: %s",
+                 ', '.join(sorted(ERLAUBTE_ABSENDER)))
 
     aufgaben = [
         asyncio.ensure_future(arbeiter(warteschlange)),
@@ -419,6 +530,9 @@ async def herzschlag():
             # Ein gescheitertes Abraeumen der Altwerte wird von hier aus
             # wiederholt (hoechstens alle zehn Minuten, siehe unten).
             altlast_anstossen()
+            # Ebenso der Nachlauf (M1/M2); er merkt ausserdem, wenn in
+            # devices.cfg ein Geraet weggefallen ist.
+            nachlauf_anstossen()
         except Exception as fehler:
             _LOGGER.error("Herzschlag gescheitert: %s", fehler)
         await asyncio.sleep(HERZTAKT)
@@ -550,6 +664,8 @@ def auto_signal():
         zahl = abo_zahl(text)
         if text is None and alter is None:
             gruende.append('Regel: noch nichts empfangen')
+        elif text is None and alter == -1:
+            gruende.append('Regel: nur ein zurueckbehaltener Wert (Alter unbekannt)')
         elif text is None:
             gruende.append('Regel: seit %d s nichts mehr (Grenze %d s)'
                            % (int(alter or 0), AUTO_MAX_ALTER))
@@ -566,6 +682,8 @@ def auto_signal():
         zahl = abo_zahl(text)
         if text is None and alter is None:
             gruende.append('PV: noch nichts empfangen')
+        elif text is None and alter == -1:
+            gruende.append('PV: nur ein zurueckbehaltener Wert (Alter unbekannt)')
         elif text is None:
             gruende.append('PV: seit %d s nichts mehr (Grenze %d s)'
                            % (int(alter or 0), AUTO_MAX_ALTER))
@@ -658,6 +776,15 @@ async def auto_anlegen(gid, device):
         neu = float(AUTO_SOLL_MIN)
     if neu > AUTO_SOLL_MAX:
         neu = float(AUTO_SOLL_MAX)
+    # Der eigene Sollwert der Automatik bleibt in den Grenzen des Geraets.
+    # Bis 4.5.9 leistete das die Klemme in send_to_midea(); seit 4.5.10
+    # weist send_to_midea() Werte ausserhalb ab (C5) - die Automatik rechnet
+    # ihren Wert deshalb hier selbst hinein, statt abgewiesen zu werden.
+    try:
+        neu = min(max(neu, float(device.min_target_temperature)),
+                  float(device.max_target_temperature))
+    except (AttributeError, TypeError, ValueError):
+        pass
     if abs(neu - vorher_soll) < 0.05 and not (AUTO_SCHALTEN and not vorher_ein):
         _LOGGER.debug("Automatik: %s liegt schon an der Grenze - nichts zu tun.", gid)
         return False
@@ -788,6 +915,56 @@ def geraete_ids_aus_datei():
 # Befehle an das Geraet
 # ===========================================================================
 
+# C4 (Durchgang 30.09.2026): Adresse, Port, Token und Schluessel, mit denen
+# ein Geraet angelegt wurde. Bis 4.5.9 wurden sie nur beim ERSTEN Anlegen
+# benutzt; fand die Suche eine neue Adresse und schrieb sie in devices.cfg,
+# sprach der Dienst bis zum naechsten Neustart die alte an (in WSL gemessen,
+# Bericht code Befund 4: "refresh ip=127.0.0.1" nach Umstellung auf
+# 127.0.0.9). Jetzt wird bei jedem Befehl verglichen; weicht etwas ab, wird
+# das Geraet verworfen und mit den neuen Angaben neu angelegt - ohne
+# Neustart des Dienstes.
+_GERAET_SIGNATUR = {}   # Geraetenummer (int) -> (ip, port, token, key)
+
+
+def geraet_verwerfen(nummer):
+    """Ein zwischengespeichertes Geraet vergessen (C4)."""
+    while nummer in device_id_list:
+        device_id_list.remove(nummer)
+    for d in [d for d in device_list if getattr(d, 'id', None) == nummer]:
+        device_list.remove(d)
+    _GERAET_SIGNATUR.pop(nummer, None)
+
+
+def soll_pruefen(device, wert, wort):
+    """Eine Solltemperatur pruefen - abweisen statt zurechtbiegen (C5).
+
+    Bis 4.5.9 kam temp.nan bis in apply() und ging als "nan" retained an den
+    Broker (float('nan') besteht beide Vergleiche < und >), und ein Wert
+    ausserhalb des Bereichs wurde still auf die Grenze gesetzt (in WSL
+    gemessen, Bericht code Befund 5). Rueckgabe: die Zahl, oder None, wenn
+    der Befehl zu verwerfen ist - dann steht der Grund im Protokoll.
+    """
+    try:
+        zahl = float(wert)
+    except (TypeError, ValueError):
+        _LOGGER.error("ungueltige Solltemperatur '%s' - Befehl verworfen", wort)
+        return None
+    if not math.isfinite(zahl):
+        _LOGGER.error("Solltemperatur '%s' ist keine endliche Zahl - Befehl verworfen", wort)
+        return None
+    try:
+        unten = float(device.min_target_temperature)
+        oben = float(device.max_target_temperature)
+    except (AttributeError, TypeError, ValueError):
+        return zahl
+    if zahl < unten or zahl > oben:
+        _LOGGER.error("Solltemperatur '%s' liegt ausserhalb des Bereichs %s-%s dieses "
+                      "Geraets - Befehl verworfen, der Sollwert bleibt.", wort,
+                      device.min_target_temperature, device.max_target_temperature)
+        return None
+    return zahl
+
+
 # send to Midea Appliance over LAN/WLAN
 async def send_to_midea(data):
     global _letzter_erfolg
@@ -894,6 +1071,17 @@ async def send_to_midea(data):
             return
 
 
+        # C4: neue Angaben aus devices.cfg (oder aus dem Paket) fuer ein schon
+        # angelegtes Geraet? Dann verwerfen und unten neu anlegen.
+        signatur = (str(device_ip), int(device_port), device_token or '', device_key or '')
+        vorher = _GERAET_SIGNATUR.get(int(device_id))
+        if int(device_id) in device_id_list and vorher is not None and vorher != signatur:
+            _LOGGER.info("Midea.%s hat neue Angaben (Adresse %s:%s%s) - das Geraet wird "
+                         "ohne Neustart des Dienstes neu angelegt.", device_id, device_ip,
+                         device_port,
+                         ", Token/Schluessel geaendert" if vorher[2:] != signatur[2:] else "")
+            geraet_verwerfen(int(device_id))
+
         if int(device_id) not in device_id_list: ### Init nur von neuen Devices
             _LOGGER.debug('Init eines neuen Devices')
             device = ac(ip=device_ip, device_id=int(device_id), port=device_port)
@@ -927,6 +1115,7 @@ async def send_to_midea(data):
             # aufgebaut worden, inklusive authenticate().
             device_id_list.append(device.id)
             device_list.append(device)
+            _GERAET_SIGNATUR[device.id] = signatur
             faehigkeiten_protokollieren(device)
 
         else:
@@ -972,6 +1161,9 @@ async def send_to_midea(data):
                     except (ValueError, TypeError):
                         p_temp = None
                         beanstandet.append('Temperatur %r' % (data[2],))
+                    # C5: ausserhalb des Bereichs abweisen, nicht klemmen.
+                    if p_temp is not None and soll_pruefen(device, p_temp, data[2]) is None:
+                        beanstandet.append('Temperatur %r ausserhalb des Bereichs' % (data[2],))
                     for name, wert in (('power', p_power), ('tone', p_beep),
                                        ('operational_mode', p_mode), ('fan_speed', p_fan),
                                        ('swing_mode', p_swing), ('eco', p_eco),
@@ -1099,19 +1291,22 @@ async def send_to_midea(data):
                             device.swing_mode = wert
                             _LOGGER.debug(device.swing_mode)
                     elif len(eachArg) == 2 and eachArg.isdigit():
-                        device.target_temperature = int(eachArg)
-                        _LOGGER.debug(device.target_temperature)
+                        # C5: ausserhalb des Bereichs abweisen, nicht klemmen.
+                        if soll_pruefen(device, int(eachArg), eachArg) is not None:
+                            device.target_temperature = int(eachArg)
+                            _LOGGER.debug(device.target_temperature)
                     elif eachArg.startswith("temp."):
                         # Einstellige Sollwerte (8 Grad Frostschutz) und halbe
                         # Grad gingen bis 4.2.12 nicht: die Erkennung war
                         # len(eachArg) == 2 and isdigit(). "20.5" und "8"
                         # fielen durch und landeten als "unknown" im Protokoll.
                         roh = eachArg.split(".", 1)[1].replace(",", ".")
-                        try:
-                            device.target_temperature = float(roh)
+                        # C5: nan/inf und Werte ausserhalb des Bereichs werden
+                        # abgewiesen (soll_pruefen), nicht geklemmt.
+                        zahl = soll_pruefen(device, roh, eachArg)
+                        if zahl is not None:
+                            device.target_temperature = zahl
                             _LOGGER.debug(device.target_temperature)
-                        except ValueError:
-                            _LOGGER.error("ungueltige Solltemperatur '{}' - Befehl verworfen".format(eachArg))
                     elif eachArg in display:
                         if device.supports_display_control:
                             device.toggle_display()
@@ -1241,21 +1436,11 @@ async def send_to_midea(data):
                 device.operational_mode = ac.OperationalMode.HEAT
                 _LOGGER.info("set Heatmode to get into Freezeprotection Mode")
 
-            #set only accepted temperatures
-            # float() statt int(): int(30.5) ist 30 und damit NICHT groesser
-            # als ein Maximum von 30 - ein unzulaessiger Wert waere
-            # stehengeblieben.
-            try:
-                soll = float(device.target_temperature)
-            except (TypeError, ValueError):
-                soll = None
-            if soll is not None:
-                if soll < device.min_target_temperature:
-                    _LOGGER.warning("Get Temperature {}. Allowed Temperature: {}-{}, set target Temperature to {}".format(device.target_temperature,device.min_target_temperature,device.max_target_temperature,device.min_target_temperature))
-                    device.target_temperature = device.min_target_temperature
-                elif soll > device.max_target_temperature:
-                    _LOGGER.warning("Get Temperature {}. Allowed Temperature: {}-{}, set target Temperature to {}".format(device.target_temperature,device.min_target_temperature,device.max_target_temperature,device.max_target_temperature))
-                    device.target_temperature = device.max_target_temperature
+            # Solltemperaturen werden seit 4.5.10 schon beim Lesen des Befehls
+            # geprueft (soll_pruefen, C5): ein Wert ausserhalb des Bereichs oder
+            # nan/inf wird abgewiesen und protokolliert. Bis 4.5.9 stand hier
+            # ein Klemmen auf die Grenze - der Anwender bekam einen anderen
+            # Sollwert, als er geschickt hatte, und nan ging ganz durch.
 
             # commit the changes with apply()
             # Der Wiederholungszaehler faengt hier neu an. Bis 4.2.12 teilten
@@ -1368,8 +1553,23 @@ async def send_to_loxone(device, support_mode):
     def nimm(name, holen, wandeln=str):
         try:
             w = holen()
-            if w is None:
-                raise ValueError('kein Wert')
+        except Exception as fehler:
+            _LOGGER.debug("Wert '%s' nicht verfuegbar: %s", name, fehler)
+            return
+        if w is None:
+            # M3 (Durchgang 30.09.2026, Entscheidungen 5 und 8): ein Zustand,
+            # den ein ERFOLGREICHER Abruf nicht liefert, geht einmal als '-'
+            # retained hinaus - nie als stehenbleibender Altwert. Bis 4.5.9
+            # wurde er uebersprungen, und im Broker blieb der alte Wert (in
+            # WSL gemessen, Bericht mqtt M3: target_humidity 55 blieb stehen).
+            # Messwerte (nicht retained) werden weiter nicht gesendet.
+            thema = '%s/%s' % (geraet_id, name)
+            if support_mode == 0 and retain_fuer(name) and _ZULETZT.get(thema) != '-':
+                paare.append((thema, '-'))
+            else:
+                _LOGGER.debug("Wert '%s' nicht verfuegbar: kein Wert", name)
+            return
+        try:
             paare.append(('%s/%s' % (geraet_id, name), wandeln(w)))
         except Exception as fehler:
             _LOGGER.debug("Wert '%s' nicht verfuegbar: %s", name, fehler)
@@ -1398,9 +1598,9 @@ async def send_to_loxone(device, support_mode):
     # Die beiden Schwenkwinkel haben jetzt eine Faehigkeitsabfrage - der
     # Empfangsweg hatte sie schon immer, der Sendeweg nicht.
     if getattr(device, 'supports_horizontal_swing_angle', False):
-        nimm('horizontal_swing_angle', lambda: device.horizontal_swing_angle.name)
+        nimm('horizontal_swing_angle', lambda: getattr(device.horizontal_swing_angle, 'name', None))
     if getattr(device, 'supports_vertical_swing_angle', False):
-        nimm('vertical_swing_angle',   lambda: device.vertical_swing_angle.name)
+        nimm('vertical_swing_angle',   lambda: getattr(device.vertical_swing_angle, 'name', None))
     nimm('freeze_protection_mode', lambda: device.freeze_protection, ganz)
     nimm('sleep_mode',             lambda: device.sleep, ganz)
     nimm('follow_me',              lambda: device.follow_me, ganz)
@@ -1574,6 +1774,22 @@ def on_connect(client, userdata, flags, rc, properties=None):
         publish = client.publish(MQTT_PRAEFIX + '/connection/status', 'connected',
                                  qos=2, retain=True)
         _LOGGER.debug("Publishing: MsgNum:%s: connection/status = connected", publish.mid)
+        # M6 (Durchgang 30.09.2026): nach JEDEM Verbinden die zuletzt
+        # gesendeten Zustaende einmal vollstaendig retained senden (Regeln/07
+        # Abschnitt 2). Bis 4.5.9 kam nach einem Broker-Neustart ohne
+        # gespeicherte Werte nur connection/status - die Zustaende fehlten,
+        # bis Loxone wieder "<ID> status" schickte (in WSL gemessen, Bericht
+        # mqtt M6). Beim ersten Verbinden ist die Liste leer. client.publish()
+        # wartet nicht; der Netzwerkfaden wird nicht aufgehalten.
+        try:
+            erneut = [(t, w) for t, w in list(_ZULETZT.items()) if retain_fuer(t)]
+        except RuntimeError:
+            erneut = []
+        for _t, _w in erneut:
+            client.publish(MQTT_PRAEFIX + '/' + _t, _w, qos=2, retain=True)
+        if erneut:
+            _LOGGER.info("MQTT: nach dem Verbinden %d Zustaende erneut gesendet (retained).",
+                         len(erneut))
         # Die Abonnements gehoeren HIERHER, nicht neben den Verbindungsaufbau.
         #
         # Ein subscribe(), das einmal beim Start steht, ist nach dem ersten
@@ -1593,6 +1809,8 @@ def on_connect(client, userdata, flags, rc, properties=None):
         # Altwerte frueherer Fassungen - in einem eigenen Faden, auf einer
         # eigenen Verbindung; dieser Rueckruf laeuft im Netzwerkfaden von paho.
         altlast_anstossen()
+        # Fruehere Praefixe (M1) und entfernte Geraete (M2) - ebenso.
+        nachlauf_anstossen()
     else:
         # Den Code als Zahl lesen, gleich welcher Rueckruffassung: paho 2.x
         # uebergibt ein ReasonCode-Objekt, paho 1.x eine Zahl.
@@ -1621,8 +1839,11 @@ def on_message(client, userdata, nachricht):
         text = nachricht.payload.decode('utf-8', 'replace').strip()
     except Exception:
         return
-    abo_merken(nachricht.topic, text)
-    _LOGGER.debug("MQTT empfangen: %s = %s", nachricht.topic, text[:40])
+    # C2: das Retain-Merkmal auswerten - siehe abo_merken().
+    zurueck = bool(getattr(nachricht, 'retain', False))
+    abo_merken(nachricht.topic, text, zurueck)
+    _LOGGER.debug("MQTT empfangen: %s = %s%s", nachricht.topic, text[:40],
+                  " (zurueckbehalten, Alter unbekannt - zaehlt nicht)" if zurueck else "")
 
 
 def on_disconnect(client, userdata, *rest):
@@ -1746,6 +1967,112 @@ def _altlast_abraeumen(kennung):
         _ALTLAST['laeuft'] = False
 
 
+# ---------------------------------------------------------------------------
+# Nachlauf nach dem Verbinden (ab 4.5.10): fruehere Praefixe (M1) und
+# entfernte Geraete (M2)
+# ---------------------------------------------------------------------------
+#
+# M1: Bis 4.5.9 blieben nach einem Praefixwechsel (Reiter MQTT oder
+# Zurueckspielen einer Sicherung) alle retained Themen des alten Zweigs
+# stehen, dazu der Letzte Wille "disconnected" des beendeten Dienstes - 19
+# Themen, und die Deinstallation raeumte nur das eingestellte Praefix ab (in
+# WSL gemessen, Bericht mqtt M1). Jetzt fuehrt die Linie eine Liste der
+# Praefixe, unter denen sie gesendet hat (config/plugins/<ordner>.mqtt_praefixe,
+# NEBEN dem Konfigordner, damit sie ein Update uebersteht). Nach dem
+# Verbinden traegt der Dienst sein Praefix ein und raeumt jedes andere ab,
+# ueber eine eigene TCP-Verbindung mit Nachlesen (mi_mqtt.broker_leeren);
+# erst nach Erfolg faellt es aus der Liste. Die Deinstallation raeumt alle
+# gemerkten ab. Bauform Heimkino 1.3.15.
+#
+# M2: Ein aus devices.cfg entferntes Geraet (Zurueckspielen, Handaenderung)
+# meldete in Loxone nach jedem Neustart weiter seine alten Zustaende (in WSL
+# gemessen, Bericht mqtt M2: 17 retained, 0 PUB). Entscheidung 8: fuer ein
+# entferntes Geraet einmal '-' retained. Dazu wird am Broker nachgesehen,
+# welche Geraetenummern unter dem Praefix Zustaende tragen, die devices.cfg
+# nicht mehr nennt; deren Zustaende gehen einmal auf '-', danach wird
+# nachgelesen. Ist devices.cfg nicht lesbar, wird NICHTS gesetzt - eine
+# unlesbare Datei ist kein leeres Haus.
+_NACHLAUF = {'praefixe': False, 'geraete': None, 'naechster': 0.0, 'laeuft': False}
+
+
+def geraete_ids_lesen():
+    """Die Geraetenummern aus devices.cfg - oder None, wenn die Datei fehlt
+    oder nicht lesbar ist (dann darf M2 nichts setzen)."""
+    datei = cfg_path + '/devices.cfg'
+    if not os.path.isfile(datei):
+        return None
+    try:
+        c = configparser.RawConfigParser()
+        if not c.read(datei):
+            return None
+    except (configparser.Error, OSError, UnicodeError):
+        return None
+    aus = set()
+    for ab in c.sections():
+        if c.has_option(ab, 'id'):
+            aus.add(str(c.get(ab, 'id')).strip())
+        elif ab.startswith('Midea_'):
+            aus.add(ab[6:])
+    return tuple(sorted(x for x in aus if x.isdigit()))
+
+
+def nachlauf_anstossen():
+    """Startet den Nachlauf in einem eigenen Faden, wenn etwas offen ist."""
+    if client is None or mqtt_error != 0 or _NACHLAUF['laeuft']:
+        return
+    ids = geraete_ids_lesen()
+    offen = (not _NACHLAUF['praefixe']) or (ids is not None and _NACHLAUF['geraete'] != ids)
+    if not offen or time.time() < _NACHLAUF['naechster']:
+        return
+    _NACHLAUF['laeuft'] = True
+    threading.Thread(target=_nachlauf, args=(ids,), daemon=True).start()
+
+
+def _nachlauf(ids):
+    try:
+        zugang = {'host': MQTThost, 'port': int(MQTTport),
+                  'user': MQTTuser, 'pass': MQTTpass}
+        gut = True
+        if not _NACHLAUF['praefixe']:
+            erg = mi_mqtt.praefixe_abraeumen(zugang, MQTT_PRAEFIX,
+                                             mi_mqtt.praefixe_datei(cfg_path))
+            for zeile in erg['meldungen']:
+                (_LOGGER.info if erg['rc'] == 0 else _LOGGER.warning)("MQTT: %s", zeile)
+            if erg['rc'] == 0:
+                _NACHLAUF['praefixe'] = True
+            else:
+                gut = False
+        if ids is not None and _NACHLAUF['geraete'] != ids:
+            bekannt = set(ids)
+            praefix = MQTT_PRAEFIX
+
+            def auswahl(thema):
+                if not thema.startswith(praefix + '/'):
+                    return False
+                paar = mi_mqtt.geraet_und_wert(thema[len(praefix) + 1:])
+                return (paar is not None and paar[0] not in bekannt
+                        and paar[1] in mi_mqtt.MIT_RETAIN)
+
+            erg = mi_mqtt.broker_leeren(zugang, praefix, auswahl, ersatz='-')
+            if erg['rc'] == 0:
+                _NACHLAUF['geraete'] = ids
+                if erg['geleert']:
+                    _LOGGER.info("MQTT: %d Zustaende entfernter Geraete einmal auf '-' "
+                                 "gesetzt und nachgelesen (%s).", len(erg['geleert']),
+                                 ', '.join(erg['geleert']))
+            else:
+                gut = False
+                _LOGGER.warning("MQTT: Zustaende entfernter Geraete nicht auf '-' gesetzt - "
+                                "%s. Neuer Versuch in zehn Minuten.",
+                                erg['grund'] or ('%d stehen noch' % len(erg['rest'])))
+        _NACHLAUF['naechster'] = 0.0 if gut else time.time() + 600
+    except Exception as fehler:
+        _NACHLAUF['naechster'] = time.time() + 600
+        _LOGGER.error("MQTT: Nachlauf gescheitert: %s", fehler, exc_info=True)
+    finally:
+        _NACHLAUF['laeuft'] = False
+
+
 ##########
 
 try:
@@ -1755,6 +2082,8 @@ try:
     import configparser
     from ipaddress import ip_address, IPv4Address
     from urllib.parse import quote
+    import math
+    import socket
 
     from msmart.device import AirConditioner as ac
     from msmart import __version__
@@ -1999,6 +2328,9 @@ except (configparser.Error, OSError) as fehler:
     print('Midea2Lox: Miniserver %s nicht in general.cfg gefunden' % Miniserver)
     sys.exit(1)
 
+# C1: die zulaessigen Absender des UDP-Befehlseingangs (siehe oben).
+ERLAUBTE_ABSENDER = miniserver_adressen()
+
 ###Version
 # Bis 3.4.8 stand hier ein fest verdrahteter MD5-Schluessel
 # ("ef8d4aab121cb54f6379fff540319792"). LoxBerry bildet diesen Schluessel
@@ -2031,6 +2363,30 @@ except Exception as err:
 # Verzweigung stand, ging dann auch ueber HTTP nichts: der Rueckfallweg, der
 # eigens dafuer gebaut ist, wurde nie erreicht.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Den UDP-Port binden - VOR der MQTT-Anmeldung (ab 4.5.10, C6)
+#
+# Bis 4.5.9 meldete sich der Dienst zuerst beim Broker an (connect_async im
+# Modulrumpf, Kennung "Midea2Lox", Letzter Wille connection/status =
+# disconnected) und scheiterte erst danach in start_server() am belegten
+# UDP-Port. Liefen zwei Waechter in derselben Sekunde (Cron holt Minuten
+# nach), meldete sich der unterlegene Prozess mit DERSELBEN Kennung an und
+# loeste beim Sterben den Letzten Willen aus: im Broker stand "disconnected",
+# waehrend der Dienst lief (in WSL gemessen, Bericht code Befund 6, Lauf 3).
+# Jetzt gilt: wer den Port nicht bekommt, meldet sich nie beim Broker an.
+# Das Startskript sperrt ausserdem selbst (flock, daemon/daemon).
+# ---------------------------------------------------------------------------
+UDP_SOCKET = None
+try:
+    UDP_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    UDP_SOCKET.bind((LoxberryIP, UDP_Port))
+except OSError as fehler:
+    _LOGGER.error("Socket konnte nicht gebunden werden (%s:%s): %s - laeuft schon ein "
+                  "Midea2Lox? Dieser Prozess endet, BEVOR er sich beim Broker anmeldet.",
+                  LoxberryIP, UDP_Port, fehler)
+    print('Bind failed. Error : %s' % fehler)
+    sys.exit(1)
+
 mqtt_error = 1
 MQTT = 0
 client = None

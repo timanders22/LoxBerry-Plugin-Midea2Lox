@@ -213,12 +213,20 @@ fi
 # also alle drei liegen - genau das, was der Absatz darueber verhindern
 # soll. Der alte Name bleibt in der Liste: wer ihn von einer aelteren
 # Fassung noch herumliegen hat, wird ihn jetzt los.
-for BK_NAME in backup.json backup.devices.cfg backup.midea2lox.cfg \
-               backup.mqtt_subscriptions.cfg; do
-	BK="$BASE/config/plugins/$PDIR.$BK_NAME"
-	if [ -f "$BK" ]; then
-		rm -f "$BK" && echo "<OK> Zweitschrift $BK_NAME entfernt."
-	fi
+#
+# Seit 4.5.10 (I1) mit einem Muster statt einer Namensliste: alle
+# <ordner>.backup.* - die Zweitschriften dieser und aelterer Fassungen,
+# ihre Zwischenstaende (.neu) und das, was preinstall.sh bzw. preupgrade.sh
+# nach Entscheidung 1 beiseitegelegt haben (.alt).
+for BK in "$BASE/config/plugins/$PDIR".backup.*; do
+	[ -e "$BK" ] || [ -L "$BK" ] || continue
+	rm -rf "${BK:?}" && echo "<OK> Zweitschrift ${BK##*/} entfernt."
+done
+# Die Liste der benutzten MQTT-Praefixe (M1). mi_mqtt.py --mqtt-leeren hat
+# sie oben schon abgearbeitet; sie gehoert zur Anlage, nicht zum Anwender.
+for BK in "$BASE/config/plugins/$PDIR".mqtt_praefixe*; do
+	[ -e "$BK" ] || continue
+	rm -f "${BK:?}" && echo "<OK> Praefixliste ${BK##*/} entfernt."
 done
 
 echo "<INFO> Der minuetliche Waechter wird mit dem Cron-Eintrag von LoxBerry entfernt."
@@ -230,10 +238,19 @@ echo "<INFO> Der minuetliche Waechter wird mit dem Cron-Eintrag von LoxBerry ent
 UN_FOLDER="$PDIR"
 UN_BASE="$BASE"
 if [ -n "$UN_FOLDER" ] && [ -n "$UN_BASE" ] && [ -d "$UN_BASE/data/plugins" ]; then
-    rm -rf "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung" 2>/dev/null
-    # Zwischenstaende aus preupgrade.sh (neu bauen, dann umbenennen); sie
-    # bleiben nur liegen, wenn ein Lauf mittendrin endete - mit Zugangsdaten.
-    rm -rf "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung.neu" \n           "$UN_BASE/data/plugins/$UN_FOLDER.upgrade_sicherung.alt" 2>/dev/null
+    # Die Sicherung, ihre Zwischenstaende aus preupgrade.sh (.neu, .vorig)
+    # und das Beiseitegelegte (.alt, Entscheidung 1) - mit Zugangsdaten.
+    # I4 (ab 4.5.10): bis 4.5.9 stand hier ein woertliches "\n" statt einer
+    # Zeilenfortsetzung; die Schale machte daraus das Argument "n", und
+    # rm -rf loeschte als root einen Eintrag "n" im Arbeitsordner des
+    # Installers (in WSL gemessen, Bericht installer Befund 4). Jetzt ein
+    # Aufruf je Pfad, keine Fortsetzungszeile.
+    for UN_S in "$UN_BASE/data/plugins/$UN_FOLDER".upgrade_sicherung*; do
+        [ -e "$UN_S" ] || [ -L "$UN_S" ] || continue
+        rm -rf "${UN_S:?}" 2>/dev/null
+    done
+    # Der Startmerker aus preupgrade.sh (I2) liegt ebenfalls neben dem Ordner.
+    rm -f "$UN_BASE/data/plugins/$UN_FOLDER.lief_vorher" 2>/dev/null
     # Dasselbe gilt fuer die Marke aus preupgrade.sh (seit 4.5.7). Sie liegt
     # aus demselben Grund neben dem Ordner und bliebe sonst liegen - eine
     # abgebrochene Aktualisierung, gefolgt von einer Deinstallation, liesse

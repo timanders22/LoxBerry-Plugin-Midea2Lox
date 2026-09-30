@@ -94,6 +94,15 @@ GERAET_ALTLAST = (
 
 # Geraetenummern schreibt der Dienst mit 10 bis 19 Ziffern (send_to_midea).
 _GERAET = re.compile(r'^[0-9]{10,19}/([a-z_]+)$')
+_GERAET_ID = re.compile(r'^([0-9]{10,19})/([a-z_]+)$')
+# Ein Themenpraefix, wie die Oberflaeche es zulaesst (mi_wert_pruefen).
+_PRAEFIX = re.compile(r'^[A-Za-z0-9_.\-]{1,48}(/[A-Za-z0-9_.\-]{1,48}){0,3}$')
+
+
+def geraet_und_wert(unter):
+    """(Geraetenummer, Name) eines Themas ohne Praefix - oder None (M2)."""
+    m = _GERAET_ID.match(unter)
+    return (m.group(1), m.group(2)) if m else None
 
 
 def _geraetewert(unter):
@@ -168,7 +177,7 @@ CONNACK_TEXT = {1: 'Protokollfassung abgelehnt', 2: 'Client-Kennung abgelehnt',
                 135: 'nicht berechtigt', 136: 'Broker nicht verfuegbar'}
 
 
-def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None):
+def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None, ersatz=b''):
     """Behaltene Themen unter <praefix>/ am Broker loeschen und NACHLESEN.
 
     Bauart wie broker_leeren() in APC-UPS 1.2.13 (apc_common.py), dort in WSL
@@ -186,8 +195,13 @@ def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None):
     0.9.21). Rueckgabe {"rc", "geleert", "rest", "grund"}: rc 0 = nichts
     (mehr) behalten, 1 = nach dem Loeschen stand noch etwas, 2 = nicht zu
     fragen.
+
+    ersatz (ab 4.5.10, M2): statt der leeren Nutzlast wird dieser Wert
+    retained gesendet ('-' fuer ein entferntes Geraet, Entscheidung 8). Ein
+    Thema, das ihn schon traegt, gilt als erledigt.
     """
     erg = {'rc': 2, 'geleert': [], 'rest': [], 'grund': ''}
+    ersatz_b = ersatz.encode('utf-8') if isinstance(ersatz, str) else bytes(ersatz or b'')
     praefix = str(praefix or '').strip('/')
     if not praefix or '#' in praefix or '+' in praefix:
         erg['grund'] = "das Themenpraefix '%s' taugt nicht fuer ein Abonnement" % praefix
@@ -217,7 +231,7 @@ def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None):
     def bei_nachricht(_k, _d, n):
         # Nur BEHALTENES mit Inhalt: ein live gesendeter Wert ist keine
         # Altlast, und ein leeres Thema ist schon geloescht.
-        if n.retain and n.payload and auswahl(n.topic):
+        if n.retain and n.payload and n.payload != ersatz_b and auswahl(n.topic):
             gesehen.add(n.topic)
 
     def bei_abo(_k, _d, mid, codes, *_rest):
@@ -290,7 +304,7 @@ def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None):
         k.unsubscribe(praefix + '/#')
         zu_leeren = sorted(gesehen)
         for thema in zu_leeren:
-            info = k.publish(thema, b'', qos=1, retain=True)
+            info = k.publish(thema, ersatz_b, qos=1, retain=True)
             try:
                 info.wait_for_publish(5)
             except TypeError:           # paho vor 1.6 kennt kein timeout
@@ -325,6 +339,80 @@ def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None):
     return erg
 
 
+# ---------------------------------------------------------------------------
+# Die Praefixe, unter denen die Linie gesendet hat (ab 4.5.10, M1)
+# ---------------------------------------------------------------------------
+# Eine Datei NEBEN dem Konfigordner (config/plugins/<ordner>.mqtt_praefixe),
+# damit sie ein Update uebersteht (purge_installation raeumt den Ordner ab,
+# nicht den Nachbarn). Eine Zeile je Praefix, ohne Kommentar. Geschrieben vom
+# Dienst (sein eigenes Praefix nach dem Verbinden) und von der Oberflaeche
+# (das alte Praefix beim Wechsel); gelesen vom Dienst und von --mqtt-leeren.
+
+def praefixe_datei(konfigordner):
+    return str(konfigordner).rstrip('/') + '.mqtt_praefixe'
+
+
+def praefixe_lesen(datei):
+    aus = []
+    try:
+        with open(datei, encoding='utf-8') as f:
+            for zeile in f:
+                p = zeile.strip().strip('/')
+                if p and _PRAEFIX.match(p) and p not in aus:
+                    aus.append(p)
+    except (OSError, UnicodeError):
+        pass
+    return aus
+
+
+def praefixe_schreiben(datei, liste):
+    """Unteilbar ueber eine Nebendatei mit PID; True bei Erfolg."""
+    neu = '%s.neu.%d' % (datei, os.getpid())
+    try:
+        with open(neu, 'w', encoding='utf-8') as f:
+            for p in liste:
+                f.write(p + '\n')
+        os.replace(neu, datei)
+        return True
+    except OSError:
+        try:
+            os.remove(neu)
+        except OSError:
+            pass
+        return False
+
+
+def praefixe_abraeumen(zugang, aktuell, datei):
+    """Das aktuelle Praefix eintragen und jedes andere gemerkte abraeumen.
+
+    Rueckgabe {"rc": 0|1|2, "meldungen": [...]}. Ein Praefix faellt erst aus
+    der Liste, wenn es am Broker nachweislich leer ist.
+    """
+    erg = {'rc': 0, 'meldungen': []}
+    liste = praefixe_lesen(datei)
+    rest = [aktuell]
+    for p in liste:
+        if p == aktuell:
+            continue
+
+        def auswahl(thema, p=p):
+            return thema.startswith(p + '/') and eigenes_thema(thema[len(p) + 1:])
+
+        teil = broker_leeren(zugang, p, auswahl)
+        if teil['rc'] == 0:
+            erg['meldungen'].append('frueheres Praefix %s/: %d zurueckbehaltene Themen geleert '
+                                    'und nachgelesen.' % (p, len(teil['geleert'])))
+        else:
+            rest.append(p)
+            erg['rc'] = max(erg['rc'], teil['rc'])
+            erg['meldungen'].append('frueheres Praefix %s/ nicht abgeraeumt - %s' % (
+                p, teil['grund'] or ('%d Themen stehen noch' % len(teil['rest']))))
+    if rest != liste and not praefixe_schreiben(datei, rest):
+        erg['meldungen'].append('die Praefixliste %s liess sich nicht schreiben' % datei)
+        erg['rc'] = max(erg['rc'], 1)
+    return erg
+
+
 def mqtt_leeren():
     """Die retained Themen dieser Linie abraeumen - fuer die Deinstallation.
 
@@ -350,7 +438,16 @@ def mqtt_leeren():
         praefix = ''
     praefix = praefix or 'Midea2Lox'
     zugang = zugangsdaten(home_path)
+    # M1 (ab 4.5.10): auch jedes frueher benutzte Praefix aus der Liste.
+    alle = [praefix] + [p for p in praefixe_lesen(praefixe_datei(cfg_path)) if p != praefix]
+    gesamt = 0
+    for p in alle:
+        gesamt = max(gesamt, _praefix_leeren(zugang, p))
+    return gesamt
 
+
+def _praefix_leeren(zugang, praefix):
+    """Ein Praefix fuer die Deinstallation leeren; Rueckgabe wie mqtt_leeren()."""
     def auswahl(thema):
         return thema.startswith(praefix + '/') and eigenes_thema(thema[len(praefix) + 1:])
 
