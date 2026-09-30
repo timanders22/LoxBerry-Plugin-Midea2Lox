@@ -177,6 +177,92 @@ CONNACK_TEXT = {1: 'Protokollfassung abgelehnt', 2: 'Client-Kennung abgelehnt',
                 135: 'nicht berechtigt', 136: 'Broker nicht verfuegbar'}
 
 
+# ---------------------------------------------------------------------------
+# Die Client-Kennung (Verbesserungsbau 30.09.2026, a1)
+# ---------------------------------------------------------------------------
+# Bis 4.5.11 hiess der Dienst am Broker fest "Midea2Lox", das Lebenszeichen
+# fest "Midea2Lox_leben". Zwei Anlagen am selben Broker (zwei LoxBerrys oder
+# ein zweiter Pluginordner) meldeten sich damit unter DERSELBEN Kennung an.
+# Der Broker trennt dann die bestehende Verbindung (MQTT 3.1.1, 3.1.4), deren
+# Letzter Wille "disconnected" geht hinaus, paho verbindet neu und wirft
+# seinerseits den anderen hinaus - ein Wechselspiel im Sekundentakt (am
+# Attrappen-Broker gemessen, vb_md2_bau_skripte/proben/a1_*).
+#
+# Jetzt: Midea2Lox-<ordner>-<hostname kurz>[-<rolle>]-<hash>, hoechstens 64
+# Zeichen. Der Hash (6 Hexziffern) geht ueber Ordner, vollen Hostnamen,
+# /etc/machine-id und Rolle - zwei LoxBerrys mit dem Vorgabenamen "loxberry"
+# unterscheiden sich damit trotzdem, und bei jedem Start ist es dieselbe
+# Kennung.
+#
+# MQTT 3.1 laesst nur 23 Zeichen zu, und 3.1.1 garantiert nur Buchstaben und
+# Ziffern bis 23 Zeichen. paho faellt bei CONNACK 1 selbst auf 3.1 zurueck;
+# weist der Broker danach die lange Kennung ab (CONNACK 2 bzw. 133), nimmt
+# der naechste Versuch die kurze Form: "Midea2Lox" + Hostname + Rolle, nur
+# Buchstaben und Ziffern, auf 17 Zeichen gekuerzt, + Hash = 23 Zeichen.
+#
+# Was an der Kennung haengt, geprueft am Code (Bauliste "zu pruefen"): der
+# Dienst verbindet mit clean_session (paho-Vorgabe bei 3.1.1, nirgends
+# anders gesetzt) - der Broker haelt keine Sitzung und keine Abos ueber die
+# Verbindung hinaus, und on_connect abonniert nach jedem Verbinden neu. Der
+# Letzte Wille gehoert zur Verbindung (will_set vor connect), die retained
+# Themen gehoeren zum Praefix. Ein Wechsel der Kennung verliert also nichts.
+KENNUNG_LANG = 64
+KENNUNG_KURZ = 23
+
+
+def _maschinen_kennung():
+    """/etc/machine-id (systemd) - oder leer, wenn es sie nicht gibt."""
+    for datei in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+        try:
+            with open(datei, encoding='ascii', errors='replace') as f:
+                wert = f.read().strip()
+        except OSError:
+            continue
+        if wert:
+            return wert
+    return ''
+
+
+def client_kennungen(rolle='', ordner=None, host=None, maschine=None):
+    """(lange, kurze) Client-Kennung dieser Anlage fuer eine Rolle.
+
+    rolle '' ist der Dienst, 'leben' das Lebenszeichen aus dem Cron-Lauf.
+    ordner, host und maschine sind nur fuer die Probe da; ohne Angabe gelten
+    der Pluginordner (aus cfg_path), socket.gethostname() und die
+    Maschinenkennung.
+    """
+    import hashlib
+    import socket
+    if ordner is None:
+        ordner = os.path.basename(str(cfg_path).rstrip('/')) or 'Midea2Lox'
+    if host is None:
+        try:
+            host = socket.gethostname() or ''
+        except OSError:
+            host = ''
+    if maschine is None:
+        maschine = _maschinen_kennung()
+    rest = hashlib.sha1(('%s|%s|%s|%s' % (ordner, host, maschine, rolle))
+                        .encode('utf-8')).hexdigest()[:6]
+    kurzname = str(host).split('.')[0]
+
+    def sauber(s):
+        return ''.join(c if (c.isascii() and (c.isalnum() or c in '-_')) else '_'
+                       for c in str(s))
+
+    kopf = 'Midea2Lox-'
+    mitte = '-'.join(t for t in (sauber(ordner), sauber(kurzname), sauber(rolle)) if t)
+    mitte = mitte[:KENNUNG_LANG - len(kopf) - 1 - len(rest)].rstrip('-_')
+    lang = kopf + (mitte + '-' if mitte else '') + rest
+    buchstaben = ''.join(c for c in kurzname + rolle if c.isascii() and c.isalnum())
+    kurz = ('Midea2Lox' + buchstaben)[:KENNUNG_KURZ - len(rest)] + rest
+    return lang, kurz
+
+
+_LEEREN = {'n': 0}
+_LEEREN_SCHLOSS = threading.Lock()
+
+
 def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None, ersatz=b''):
     """Behaltene Themen unter <praefix>/ am Broker loeschen und NACHLESEN.
 
@@ -263,7 +349,16 @@ def broker_leeren(zugang, praefix, auswahl, warten=1.5, nach_loeschen=None, ersa
                     % (wo, praefix, schlecht[0]))
         return ''
 
-    name = 'Midea2Lox-leeren-%d' % os.getpid()
+    # a1 (Verbesserungsbau 30.09.2026): je AUFRUF eine eigene Kennung. Bis
+    # 4.5.11 trugen alle Abraeum-Verbindungen eines Prozesses dieselbe
+    # ('Midea2Lox-leeren-<pid>'); das Abraeumen der Altwerte und der Nachlauf
+    # laufen im Dienst aber in zwei Faeden gleichzeitig - der Broker trennte
+    # die eine Verbindung, sobald die andere kam (am Attrappen-Broker mit
+    # Sitzungsuebernahme gemessen, proben/a1_vorher.txt: 1-2 Uebernahmen je
+    # Start). Der Anfang 'Midea2Lox-leeren-' bleibt.
+    with _LEEREN_SCHLOSS:
+        _LEEREN['n'] += 1
+        name = 'Midea2Lox-leeren-%d-%d' % (os.getpid(), _LEEREN['n'])
     k = None
     for art in ('VERSION2', 'VERSION1'):
         api = getattr(getattr(mqtt, 'CallbackAPIVersion', None), art, None)

@@ -111,6 +111,24 @@ def _wert(schluessel, vorgabe=''):
         return vorgabe
 
 
+def kennwort_lesen(roh):
+    """Das Midea-Kennwort aus midea2lox.cfg (Verbesserungsbau 30.09.2026, b1).
+
+    configparser schneidet Leerraum am Rand eines Wertes immer ab. Die
+    Oberflaeche setzt ein Kennwort mit Rand-Leerraum deshalb in EIN Paar
+    Anfuehrungszeichen (mi_kennwort_kodieren in mi_lib.php) - hier wird es
+    wieder weggenommen: in Anfuehrungszeichen UND innen am Rand Leerraum ->
+    das Innere; sonst der Wert woertlich. Ein Kennwort ohne Rand-Leerraum,
+    auch eines mit Anfuehrungszeichen darin, bleibt, was es war.
+    """
+    s = str(roh or '')
+    if len(s) >= 3 and s[0] == '"' and s[-1] == '"':
+        innen = s[1:-1]
+        if innen[0].isspace() or innen[-1].isspace():
+            return innen
+    return s
+
+
 DEBUG = _wert('DEBUG', '0')
 logging.basicConfig(
     level=logging.DEBUG if DEBUG == '1' else logging.INFO,
@@ -143,7 +161,7 @@ def zugangsdaten():
     argumente = {}
 
     benutzer = _wert('MideaUser')
-    kennwort = _wert('MideaPassword')
+    kennwort = kennwort_lesen(_wert('MideaPassword'))
     if benutzer and kennwort:
         argumente['account'] = benutzer
         argumente['password'] = kennwort

@@ -304,6 +304,56 @@ function mi_pruefungen($cfg)
         }
     }
 
+    // ---- Fenster offen -> Geraet aus (Verbesserungsbau 30.09.2026, c1) ----
+    //
+    // Die Zeilen sagen, ob die Kopplung etwas HOERT. Fehlt die Quelle, kommt
+    // nur ein alter zurueckbehaltener Wert oder '-', passiert nichts - das
+    // Geraet laeuft wie ohne Kopplung weiter, und genau das steht hier.
+    list($fl, $fd, $falter) = mi_fenster_lage($cfg);
+    if ($fl === 'aus') {
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 2, mi_t('UI.FENSTER_LAGE_AUS'));
+    } elseif ($fl === 'fehlt') {
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 0, mi_t('UI.FENSTER_LAGE_FEHLT'));
+    } elseif ($fl === 'unlesbar') {
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 0, mi_t('UI.FENSTER_LAGE_UNLESBAR'));
+    } elseif ($fl === 'alt') {
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 0,
+            sprintf(mi_t('UI.FENSTER_LAGE_ALT'), (int) $falter));
+    } elseif (empty($fd['mqtt'])) {
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 0, mi_t('UI.FENSTER_OHNE_MQTT'));
+    } else {
+        $fg = (isset($fd['geraete']) && is_array($fd['geraete'])) ? $fd['geraete'] : array();
+        $z[] = array(mi_e(mi_t('PRUEF.FENSTER')), 1,
+            sprintf(mi_t('UI.FENSTER_LAEUFT'), (int) $fd['frist'], count($fg)));
+        $jetzt = time();
+        foreach ($fd['fenster'] as $fname => $fe) {
+            $frage = mi_e(sprintf(mi_t('PRUEF.FENSTER_QUELLE'), 'haus/tuer/' . $fname . '/offen'));
+            $fw = (is_array($fe) && isset($fe['wert']) && is_string($fe['wert'])) ? $fe['wert'] : null;
+            if ($fw === null) {
+                $z[] = array($frage, 0, mi_t('UI.FENSTER_NIE'));
+            } elseif ($fw === '-') {
+                $z[] = array($frage, 0, mi_t('UI.FENSTER_KEINE_AUSSAGE'));
+            } elseif (empty($fe['live'])) {
+                $z[] = array($frage, 2, sprintf(mi_t('UI.FENSTER_NUR_RETAIN'), mi_e($fw)));
+            } elseif ($fw !== '0' && $fw !== '1') {
+                $z[] = array($frage, 0, sprintf(mi_t('UI.FENSTER_UNLESBAR'), mi_e(substr($fw, 0, 20))));
+            } elseif (!empty($fe['offen_seit'])) {
+                $z[] = array($frage, 1, sprintf(mi_t('UI.FENSTER_OFFEN_SEIT'),
+                    max(0, $jetzt - (int) $fe['offen_seit'])));
+            } else {
+                $z[] = array($frage, 1, sprintf(mi_t('UI.FENSTER_EMPFANGEN'), mi_e($fw),
+                    max(0, $jetzt - (int) $fe['empfangen'])));
+            }
+        }
+        foreach ($fg as $fgid => $fge) {
+            if (is_array($fge) && !empty($fge['aus_befohlen'])) {
+                $z[] = array(mi_e(sprintf(mi_t('PRUEF.FENSTER_BEFEHL'), (string) $fgid)), 1,
+                    sprintf(mi_t('UI.FENSTER_AUS_BEFOHLEN'),
+                            max(0, $jetzt - (int) $fge['aus_befohlen'])));
+            }
+        }
+    }
+
     return $z;
 }
 

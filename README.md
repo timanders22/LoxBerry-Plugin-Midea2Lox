@@ -975,6 +975,36 @@ Zahl, die richtig aussieht, ist schlimmer als keine.
 
 ---
 
+## Was 4.5.11 behebt
+
+Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`). Gemessen an Attrappen
+für Broker und Klimageräte unter PHP 7.4 und 8.5, Dienst unter WSL mit paho
+1.6.1; nicht am Gerät.
+
+* **Jede Anlage meldet sich am Broker mit eigener Kennung an**
+  (`Midea2Lox-<ordner>-<rechnername>-<prüfsumme>`). Zwei LoxBerrys am selben
+  Broker warfen sich bisher ständig gegenseitig hinaus (im Prüfstand 20 bis 25
+  Übernahmen in 20 s, jetzt 0), und Loxone sah ein falsches `disconnected`.
+  Lässt ein Broker nur 23 Zeichen zu, nimmt der nächste Versuch eine kurze Form.
+  Wer am Broker eine Zugriffsliste auf die Kennung `Midea2Lox` zugeschnitten
+  hat, muss sie nachziehen.
+* Das Aufräumen alter Werte am Broker wirft sich nicht mehr selbst hinaus.
+* **Das Midea-Kennwort darf mit Leerzeichen beginnen oder enden**; es wird dann
+  in Anführungszeichen gespeichert, und Oberfläche und Gerätesuche lesen es
+  gleich. Ein Kennwort mit geschütztem Leerzeichen am Ende kam bei der
+  Gerätesuche bisher gekürzt an. Andere Kennwörter bleiben byte-gleich.
+* **Neu, ab Werk aus: „Fenster offen: Gerät aus“.** Quelle sind die Haus-Themen
+  `haus/tuer/<name>/offen` (z. B. von Matter2Lox). Ist ein zugeordnetes Fenster
+  länger als die eingestellte Frist offen, geht genau ein Aus-Befehl an das
+  Gerät; beim Schließen wird **nicht** wieder eingeschaltet (wer das will, baut
+  es in Loxone). Ein alter, zurückbehaltener Wert beim Start löst nichts aus. Der
+  Reiter Test zeigt je Fenster, was ankommt.
+* Nach einer Beanstandung stehen die eingetippten Werte wieder im Formular (ohne
+  Kennwort), das falsche Feld ist markiert; gespeichert bleibt der bisherige
+  Stand. „Einstellungen sichern“ warnt bei Werten, die das eigene Zurückspielen
+  nicht bestünden.
+
 ## Was 4.1.0 behebt
 
 Acht Meldungen eines Mitlesers, jede einzeln nachgestellt. Drei davon haben
@@ -1152,6 +1182,39 @@ Loxone liest ihn über das MQTT-Gateway.
 
 Die Zugangsdaten des Hersteller-Kontos werden **nur einmal** gebraucht, um beim
 Suchen der Geräte Token und Schlüssel abzuholen. Danach läuft alles lokal.
+Ein Kennwort darf mit Leerzeichen beginnen oder enden: die Oberfläche setzt es
+dann in `midea2lox.cfg` in Anführungszeichen, und die Gerätesuche nimmt sie
+wieder weg. Jedes andere Kennwort steht dort wörtlich.
+
+Am MQTT-Broker meldet sich der Dienst mit einer eigenen Kennung je Anlage an:
+`Midea2Lox-<ordner>-<rechnername>-<prüfzeichen>`, das Lebenszeichen mit
+`…-leben-…`. Zwei LoxBerrys am selben Broker trennen sich damit nicht mehr
+gegenseitig. Weist ein Broker die lange Kennung ab (MQTT 3.1 kennt nur 23
+Zeichen), nimmt der nächste Versuch eine kurze Form; die Kennung steht beim
+Start im Protokoll.
+
+## Fenster offen: Klimagerät aus
+
+Eine Einstellung im Reiter **Automatik**, **ab Werk aus**.
+
+* **Quelle:** die Haus-Themen `haus/tuer/<name>/offen` (0 = zu, 1 = offen,
+  `-` = keine Aussage). Sie kommen von **Matter2Lox**, wenn dort die
+  Haus-Themen eingeschaltet sind; jeder Kontaktsensor gilt dort als Tür, also
+  auch ein Fensterkontakt. Die Beschattung Fensterbilanz liefert kein solches
+  Thema.
+* **Zuordnung:** je Gerät eine Liste von Fenstern,
+  `<Gerätenummer>:<name>+<name>`, mehrere Geräte durch Komma getrennt. Die
+  Namen stehen so in der Themenliste von Matter2Lox.
+* **Verhalten:** Bleibt ein zugeordnetes Fenster länger offen als die Frist
+  (Vorgabe 60 s, einstellbar 0 bis 600), bekommt das Gerät **einen**
+  Aus-Befehl – einen je Öffnung, auch wenn weitere Fenster dazukommen.
+  **Schließt das Fenster, wird das Gerät nicht wieder eingeschaltet.**
+  Solange ein Fenster offen ist, greift die Automatik bei diesem Gerät nicht
+  zu.
+* **Fällt die Quelle aus:** Ein Wert, der nach dem Start oder einem
+  Wiederverbinden nur aus dem Speicher des Brokers kommt, löst nichts aus –
+  erst ein frisch gesendetes Öffnen. Schweigt die Quelle oder meldet sie `-`,
+  passiert nichts; der Reiter **Test** zeigt je Fenster, was ankommt.
 
 ## Installation
 

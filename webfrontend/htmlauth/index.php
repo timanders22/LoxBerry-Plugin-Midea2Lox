@@ -71,6 +71,11 @@ $mi_test_text  = '';
 // fuer Vorgaenge, die nichts speichern (Dienstknoepfe) oder halb gelangen.
 $mi_test_ok    = true;
 $mi_misslungen = array();
+// X-2 (Verbesserungsbau 30.09.2026): die Eingaben eines beanstandeten
+// Formulars fuer das GET nach der Umleitung (mi_x2_eingaben) - und beim GET
+// die mitgereisten (mi_x2_pruefen).
+$mi_eingaben = null;
+$mi_x2 = null;
 
 /* O1 (ab 4.5.10): das Ergebnis des vorigen POST - NUR beim GET gelesen
  * (Regeln/04: beim POST ist die Fehlerliste zugleich der Sammler der
@@ -90,6 +95,7 @@ if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST')
         $mi_test_titel = (isset($mi_em['test_titel']) && is_string($mi_em['test_titel'])) ? $mi_em['test_titel'] : '';
         $mi_test_text  = (isset($mi_em['test_text']) && is_string($mi_em['test_text'])) ? $mi_em['test_text'] : '';
         $mi_test_ok    = !empty($mi_em['test_ok']);
+        $mi_x2         = mi_x2_pruefen(isset($mi_em['eingaben']) ? $mi_em['eingaben'] : null);
     }
 }
 
@@ -137,6 +143,7 @@ if ($mi_fehlten && $mi_wache === '') {
 // ---------- Einstellungen speichern ----------
 if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     $neu = $mi_cfg;
+    $mi_x2_falsch = array();
 
     /* Jedes Feld durch mi_wert_pruefen() - dieselbe Positivliste, die auch
      * die zurueckgespielte Sicherung benutzt. Eine zweite Wahrheit ueber
@@ -146,12 +153,14 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
         $roh = isset($_POST[$feld]) ? $_POST[$feld] : '';
         if (!is_string($roh)) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($feld));
+            $mi_x2_falsch[] = $feld;
             continue;
         }
         $roh = trim($roh);
         $f = mi_wert_pruefen($feld, $roh);
         if ($f !== '') {
             $mi_fehler[] = $f;
+            $mi_x2_falsch[] = $feld;
         } else {
             $neu[$feld] = $roh;
         }
@@ -175,21 +184,29 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     if (isset($_POST['MideaUser'])) {
         if (!is_string($_POST['MideaUser'])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaUser');
+            $mi_x2_falsch[] = 'MideaUser';
         } else {
             $f = mi_wert_pruefen('MideaUser', trim($_POST['MideaUser']));
             if ($f !== '') {
                 $mi_fehler[] = $f;
+                $mi_x2_falsch[] = 'MideaUser';
             } else {
                 $neu['MideaUser'] = trim($_POST['MideaUser']);
             }
         }
     }
+    /* b1 (Verbesserungsbau 30.09.2026): das Kennwort geht UNGEKUERZT in die
+     * Pruefung und in die Datei - Leerzeichen am Rand gehoeren dazu
+     * (mi_kennwort_kodieren in mi_lib.php). */
     if (isset($_POST['MideaPassword'])) {
         if (!is_string($_POST['MideaPassword'])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'MideaPassword');
+            $mi_x2_falsch[] = 'MideaPassword';
         } elseif ($_POST['MideaPassword'] !== ''
                   && ($f = mi_wert_pruefen('MideaPassword', $_POST['MideaPassword'])) !== '') {
             $mi_fehler[] = $f;
+            // Markiert wird das Feld, sein Inhalt reist NIE mit (X-2).
+            $mi_x2_falsch[] = 'MideaPassword';
         } elseif ($_POST['MideaPassword'] !== '') {
             // Leeres Passwortfeld heisst "unveraendert lassen", nicht
             // "loeschen" - geloescht wird ueber den ausdruecklichen Haken.
@@ -254,19 +271,23 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     }
     if ($mi_fehler) {
         $mi_tab = 'tab-settings';
+        $mi_eingaben = mi_x2_eingaben('settings', $mi_x2_falsch);
     }
 }
 
 // ---------- MQTT speichern (eigener Handler, eigener Reiter) ----------
 if (isset($_POST['mqtt_speichern'])) {
     $roh = isset($_POST['mqtt_praefix']) ? $_POST['mqtt_praefix'] : '';
+    $mi_x2_falsch = array();
     if (!is_string($roh)) {
         $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'mqtt_praefix');
+        $mi_x2_falsch[] = 'mqtt_praefix';
     } else {
         $roh = trim($roh, "/ \t\n\r\0\x0B");
         $f = mi_wert_pruefen('mqtt_praefix', $roh);
         if ($f !== '') {
             $mi_fehler[] = $f;
+            $mi_x2_falsch[] = 'mqtt_praefix';
         } else {
             $neu = $mi_cfg;
             $mi_alt_praefix = mi_mqtt_topic($mi_cfg);
@@ -311,27 +332,34 @@ if (isset($_POST['mqtt_speichern'])) {
         }
     }
     $mi_tab = 'tab-mqtt';
+    if ($mi_fehler) {
+        $mi_eingaben = mi_x2_eingaben('mqtt', $mi_x2_falsch);
+    }
 }
 
 // ---------- Die Automatik speichern ----------
 if (isset($_POST['auto_speichern'])) {
     $mi_neu_auto = $mi_cfg;
+    $mi_x2_falsch = array();
     /* Jedes Feld durch mi_wert_pruefen(), und Beanstandungen werden
      * GESAMMELT, nicht ueberschrieben - sonst berichtigt der Anwender einen
      * Fehler nach dem anderen statt alle auf einmal. */
     foreach (array('auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab',
                    'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',
                    'auto_turbo', 'auto_schalten', 'auto_sperrzeit',
-                   'auto_max_alter', 'auto_takt', 'auto_geraete') as $mi_k) {
+                   'auto_max_alter', 'auto_takt', 'auto_geraete',
+                   'fenster_ein', 'fenster_frist', 'fenster_zuordnung') as $mi_k) {
         if (!isset($_POST[$mi_k])) { continue; }
         if (!is_string($_POST[$mi_k])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($mi_k));
+            $mi_x2_falsch[] = $mi_k;
             continue;
         }
         $mi_w = trim($_POST[$mi_k]);
         $mi_f = mi_wert_pruefen($mi_k, $mi_w);
         if ($mi_f !== '') {
             $mi_fehler[] = $mi_f;
+            $mi_x2_falsch[] = $mi_k;
             continue;
         }
         $mi_neu_auto[$mi_k] = $mi_w;
@@ -342,12 +370,38 @@ if (isset($_POST['auto_speichern'])) {
     if (!$mi_fehler
         && (int) $mi_neu_auto['auto_soll_min'] > (int) $mi_neu_auto['auto_soll_max']) {
         $mi_fehler[] = mi_t('UI.PRUEF_SOLL_VERDREHT');
+        $mi_x2_falsch[] = 'auto_soll_min';
+        $mi_x2_falsch[] = 'auto_soll_max';
     }
     /* Eingeschaltet ohne ein einziges Thema waere ein Schalter ohne Wirkung. */
     if (!$mi_fehler && $mi_neu_auto['auto_ein'] === '1'
         && $mi_neu_auto['auto_thema_regel'] === ''
         && $mi_neu_auto['auto_thema_pv'] === '') {
         $mi_fehler[] = mi_t('UI.PRUEF_AUTO_OHNE_THEMA');
+        $mi_x2_falsch[] = 'auto_ein';
+        $mi_x2_falsch[] = 'auto_thema_regel';
+        $mi_x2_falsch[] = 'auto_thema_pv';
+    }
+    /* c1: eingeschaltet ohne ein einziges zugeordnetes Fenster waere ein
+     * Schalter ohne Wirkung. */
+    if (!$mi_fehler && $mi_neu_auto['fenster_ein'] === '1'
+        && $mi_neu_auto['fenster_zuordnung'] === '') {
+        $mi_fehler[] = mi_t('UI.PRUEF_FENSTER_OHNE_ZUORDNUNG');
+        $mi_x2_falsch[] = 'fenster_ein';
+        $mi_x2_falsch[] = 'fenster_zuordnung';
+    }
+    /* c1: eine Geraetenummer, die devices.cfg nicht kennt, ist kein Fehler
+     * (das Geraet kann nach der naechsten Suche kommen) - aber gesagt wird es. */
+    if (!$mi_fehler) {
+        $mi_fz = mi_fenster_zuordnung($mi_neu_auto['fenster_zuordnung']);
+        $mi_fbek = array();
+        foreach (mi_devices() as $mi_fd) { $mi_fbek[(string) $mi_fd['id']] = true; }
+        $mi_funbek = is_array($mi_fz) ? array_diff(array_map('strval', array_keys($mi_fz)),
+                                                    array_keys($mi_fbek)) : array();
+        if ($mi_funbek) {
+            $mi_hinweise[] = sprintf(mi_t('UI.FENSTER_GERAET_UNBEKANNT'),
+                                     mi_e(implode(', ', $mi_funbek)));
+        }
     }
     if (!$mi_fehler) {
         if (!mi_config_write($mi_neu_auto)) {
@@ -363,11 +417,15 @@ if (isset($_POST['auto_speichern'])) {
         }
     }
     $mi_tab = 'tab-automatik';
+    if ($mi_fehler) {
+        $mi_eingaben = mi_x2_eingaben('automatik', $mi_x2_falsch);
+    }
 }
 
 // ---------- Bezeichnungen der Geraete speichern ----------
 if (isset($_POST['bez_speichern'])) {
     $zuordnung = array();
+    $mi_x2_falsch = array();
     $roh = isset($_POST['bezeichnung']) ? $_POST['bezeichnung'] : array();
     if (!is_array($roh)) {
         $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'bezeichnung');
@@ -385,6 +443,7 @@ if (isset($_POST['bez_speichern'])) {
             }
             if (!is_string($wert) || !mi_wert_taugt($wert) || strlen(trim($wert)) > 120) {
                 $mi_fehler[] = sprintf(mi_t('UI.PRUEF_BEZEICHNUNG'), mi_e($id));
+                $mi_x2_falsch[] = 'bezeichnung[' . $id . ']';
                 continue;
             }
             $zuordnung[$id] = trim($wert);
@@ -400,6 +459,9 @@ if (isset($_POST['bez_speichern'])) {
         }
     }
     $mi_tab = 'tab-settings';
+    if ($mi_fehler) {
+        $mi_eingaben = mi_x2_eingaben('geraete', $mi_x2_falsch);
+    }
 }
 
 // ---------- Dienst steuern ----------
@@ -490,7 +552,16 @@ if (isset($_SERVER['REQUEST_METHOD'])
      * devices.cfg liess json_encode() bis 4.3.2 mit false enden, und der
      * Knopf "Einstellungen sichern" meldete daraufhin, es liesse sich nichts
      * SCHREIBEN - dabei wird beim Herunterladen gar nichts geschrieben. */
-    $mi_js = json_encode(mi_sicherung_bauen($mi_cfg),
+    /* X-3 (Verbesserungsbau 30.09.2026): bestuende ein gespeicherter Wert
+     * das eigene Zurueckspielen nicht, sagt es der Kopf der Datei - mit den
+     * NAMEN, nie den Werten. Geliefert wird trotzdem, vollstaendig. */
+    $mi_sich = mi_sicherung_bauen($mi_cfg);
+    $mi_altw = mi_rueckspiel_altwerte($mi_sich);
+    if ($mi_altw) {
+        $mi_sich = array('_warnung' => sprintf(mi_t('UI.SICH_ALTWERT_KOPF'),
+                                               implode(', ', $mi_altw))) + $mi_sich;
+    }
+    $mi_js = json_encode($mi_sich,
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
         | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($mi_js !== false) {
@@ -631,6 +702,7 @@ if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') 
         'test_titel' => $mi_test_titel,
         'test_text'  => $mi_test_text,
         'test_ok'    => $mi_test_ok ? 1 : 0,
+        'eingaben'   => $mi_eingaben,
     ));
     if ($mi_abgelegt && !headers_sent()) {
         header('Location: index.php?form=' . substr($mi_tab, 4), true, 303);
@@ -857,6 +929,13 @@ $mi_fs = mi_fassungen(false);
   </form>
 </div>
 
+<?php
+/* X-2: fuer dieses Formular die mitgereisten Eingaben statt der gespeicherten
+ * Werte; nach dem Formular gilt wieder die gespeicherte Konfiguration. */
+$mi_cfg_gespeichert = $mi_cfg;
+$mi_cfg = mi_x2_ueberlagern($mi_cfg, $mi_x2, 'settings');
+echo mi_x2_markierung($mi_x2, 'settings', 'tab-settings');
+?>
 <form method="post" action="index.php" autocomplete="off">
 <?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -961,11 +1040,13 @@ if (!$mi_liste) {
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="speichern_suchen" value="1"><?php echo mi_t('UI.SPEICHERN_SUCHEN'); ?></button>
 </div>
 </form>
+<?php $mi_cfg = $mi_cfg_gespeichert; ?>
 
 <h2><?php echo mi_te('SETTINGS.HEAD_DEVICES'); ?></h2>
 <?php if (!$mi_geraete) { ?>
 <div class="sm-alert sm-info"><?php echo mi_t('UI.KEINE_GERAETE'); ?></div>
 <?php } else { ?>
+<?php echo mi_x2_markierung($mi_x2, 'geraete', 'tab-settings'); ?>
 <form method="post" action="index.php">
 <?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
@@ -983,7 +1064,7 @@ if (!$mi_liste) {
         else { echo mi_te('UI.PROTOKOLL_V2'); } ?></td>
     <td><input data-role="none" type="text" style="max-width:100%"
         name="bezeichnung[<?php echo mi_e($d['id']); ?>]"
-        value="<?php echo mi_e($d['bezeichnung']); ?>"
+        value="<?php echo mi_e(mi_x2_bezeichnung($mi_x2, $d)); ?>"
         placeholder="<?php echo mi_e(mi_geraetename($d)); ?>"></td></tr>
 <?php } ?>
 </table>
@@ -999,6 +1080,11 @@ if (!$mi_liste) {
 <h2><?php echo mi_te('UI.H_SICHERUNG'); ?></h2>
 <div class="sm-hinweis"><?php echo mi_t('UI.SICH_ERKLAERUNG'); ?></div>
 <div class="sm-warnung"><?php echo mi_t('UI.SICH_WARNUNG'); ?></div>
+<?php /* X-3: ein gespeicherter Wert, den das eigene Zurueckspielen abwiese. */
+$mi_altwerte = mi_rueckspiel_altwerte();
+if ($mi_altwerte) { ?>
+<div class="sm-warnung"><?php echo sprintf(mi_t('UI.SICH_ALTWERT'), mi_e(implode(', ', $mi_altwerte))); ?></div>
+<?php } ?>
 <div class="sm-knopfreihe">
   <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
        exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
@@ -1047,6 +1133,11 @@ if (!$mi_liste) {
 <?php } ?>
 
 <h2><?php echo mi_te('UI.H_MQTT_EINSTELLUNGEN'); ?></h2>
+<?php
+$mi_cfg_gespeichert = $mi_cfg;
+$mi_cfg = mi_x2_ueberlagern($mi_cfg, $mi_x2, 'mqtt');
+echo mi_x2_markierung($mi_x2, 'mqtt', 'tab-mqtt');
+?>
 <form method="post" action="index.php">
 <?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
@@ -1060,6 +1151,7 @@ if (!$mi_liste) {
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mqtt_speichern" value="1"><?php echo mi_t('UI.MQTT_SPEICHERN'); ?></button>
 </div>
 </form>
+<?php $mi_cfg = $mi_cfg_gespeichert; ?>
 
 <h2><?php echo mi_te('UI.H_ABO'); ?></h2>
 <div class="sm-hinweis"><?php echo mi_abo_text(); ?></div>
@@ -1273,6 +1365,11 @@ $mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
   </div>
 </div>
 
+<?php
+$mi_cfg_gespeichert = $mi_cfg;
+$mi_cfg = mi_x2_ueberlagern($mi_cfg, $mi_x2, 'automatik');
+echo mi_x2_markierung($mi_x2, 'automatik', 'tab-automatik');
+?>
 <form method="post" action="index.php">
 <?php echo mi_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-automatik">
@@ -1352,6 +1449,27 @@ $mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
 </table>
 </div>
 
+<div class="sm-step">
+<h3><?php echo mi_te('UI.FENSTER_S'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.FENSTER_S_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><td><?php echo mi_te('UI.FENSTER_F_EIN'); ?></td>
+    <td><select data-role="none" name="fenster_ein">
+      <option value="0"<?php echo mi_cfg($mi_cfg, 'fenster_ein', '0') === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.AUS'); ?></option>
+      <option value="1"<?php echo mi_cfg($mi_cfg, 'fenster_ein', '0') === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.EIN'); ?></option>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.FENSTER_F_FRIST'); ?></td>
+    <td><input data-role="none" type="text" name="fenster_frist" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'fenster_frist', '60')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_SEKUNDEN'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.FENSTER_F_ZUORDNUNG'); ?></td>
+    <td><input data-role="none" type="text" name="fenster_zuordnung" size="42"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'fenster_zuordnung', '')); ?>"
+        placeholder="<?php echo mi_e($mi_bsp . ':wohnzimmer_links+wohnzimmer_rechts'); ?>"></td></tr>
+</table>
+<p class="sm-small"><?php echo mi_t('UI.FENSTER_S_HINWEIS'); ?></p>
+</div>
+
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-aktion"></i> <?php echo mi_t('UI.LEG_AKTION'); ?></span>
 </div>
@@ -1359,6 +1477,7 @@ $mi_apunkt = array('ok' => 'sm-gruen', 'aus' => 'sm-grau', 'fehlt' => 'sm-rot',
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="auto_speichern" value="1"><?php echo mi_te('UI.AUTO_SPEICHERN'); ?></button>
 </div>
 </form>
+<?php $mi_cfg = $mi_cfg_gespeichert; ?>
 
 <div class="sm-step">
 <h3><?php echo mi_te('UI.AUTO_S4'); ?></h3>

@@ -78,38 +78,56 @@ def main(argv):
             allgemein = json.load(f)
         m = allgemein['Mqtt']
         import paho.mqtt.client as mqtt
-        # Die Fassung wird abgetastet, nicht angenommen: paho-mqtt 2.x schreibt
-        # bei VERSION1 eine DeprecationWarning in JEDES Protokoll (am Geraet an
-        # 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die Aufzaehlung gar nicht.
-        if hasattr(mqtt, 'CallbackAPIVersion'):
-            try:
-                c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                client_id='Midea2Lox_leben')
-            except (AttributeError, TypeError):
-                c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
-                                client_id='Midea2Lox_leben')
-        else:
-            c = mqtt.Client(client_id='Midea2Lox_leben')
-        c.username_pw_set(m['Brokeruser'], m['Brokerpass'])
-        # M5 (Durchgang 30.09.2026): die Antwort des Brokers AUSWERTEN. Bis
-        # 4.5.9 wurde nach connect() einfach gesendet; wies der Broker die
-        # Anmeldung ab (CONNACK 5), endete das Skript mit 0 und schrieb
-        # "Lebenszeichen ... =1" ins Protokoll, der HTTP-Rueckfall wurde nie
-        # versucht (in WSL gemessen, Bericht mqtt M5; Regeln/07 "Eine
-        # abgelehnte Anmeldung sieht aus wie eine gelungene").
-        antwort = {'rc': None}
-        angemeldet = threading.Event()
+        # a1 (Verbesserungsbau 30.09.2026): eine eigene Kennung je Anlage
+        # statt fest "Midea2Lox_leben" (mi_mqtt.client_kennungen, Rolle
+        # "leben"). Zwei Anlagen am selben Broker senden ihr Lebenszeichen in
+        # derselben Minute; mit gleicher Kennung trennte der Broker die erste
+        # Verbindung. Erst die lange Kennung, bei CONNACK 2/133 die kurze.
+        import mi_mqtt
+        for kennung in mi_mqtt.client_kennungen('leben'):
+            # Die Fassung wird abgetastet, nicht angenommen: paho-mqtt 2.x
+            # schreibt bei VERSION1 eine DeprecationWarning in JEDES Protokoll
+            # (am Geraet an 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die
+            # Aufzaehlung gar nicht.
+            if hasattr(mqtt, 'CallbackAPIVersion'):
+                try:
+                    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                    client_id=kennung)
+                except (AttributeError, TypeError):
+                    c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
+                                    client_id=kennung)
+            else:
+                c = mqtt.Client(client_id=kennung)
+            c.username_pw_set(m['Brokeruser'], m['Brokerpass'])
+            # M5 (Durchgang 30.09.2026): die Antwort des Brokers AUSWERTEN. Bis
+            # 4.5.9 wurde nach connect() einfach gesendet; wies der Broker die
+            # Anmeldung ab (CONNACK 5), endete das Skript mit 0 und schrieb
+            # "Lebenszeichen ... =1" ins Protokoll, der HTTP-Rueckfall wurde nie
+            # versucht (in WSL gemessen, Bericht mqtt M5; Regeln/07 "Eine
+            # abgelehnte Anmeldung sieht aus wie eine gelungene").
+            antwort = {'rc': None}
+            angemeldet = threading.Event()
 
-        def bei_verbindung(_c, _u, _f, rc, *_rest):
-            try:
-                antwort['rc'] = int(getattr(rc, 'value', rc))
-            except (TypeError, ValueError):
-                antwort['rc'] = -1
-            angemeldet.set()
+            def bei_verbindung(_c, _u, _f, rc, *_rest, antwort=antwort, angemeldet=angemeldet):
+                try:
+                    antwort['rc'] = int(getattr(rc, 'value', rc))
+                except (TypeError, ValueError):
+                    antwort['rc'] = -1
+                angemeldet.set()
 
-        c.on_connect = bei_verbindung
-        c.connect(m['Brokerhost'], int(m['Brokerport']), keepalive=15)
-        c.loop_start()
+            c.on_connect = bei_verbindung
+            c.connect(m['Brokerhost'], int(m['Brokerport']), keepalive=15)
+            c.loop_start()
+            if (angemeldet.wait(3) and antwort['rc'] in (2, 133)
+                    and kennung != mi_mqtt.client_kennungen('leben')[1]):
+                # Die lange Kennung abgewiesen - mit der kurzen noch einmal.
+                c.loop_stop()
+                try:
+                    c.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            break
         try:
             if not angemeldet.wait(3):
                 raise RuntimeError('der Broker hat binnen 3 s nicht auf die Anmeldung geantwortet')

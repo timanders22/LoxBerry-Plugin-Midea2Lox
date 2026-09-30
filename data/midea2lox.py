@@ -409,6 +409,14 @@ async def start_server():
                      AUTO_THEMA_REGEL, AUTO_THEMA_PV)
     else:
         _LOGGER.info("Automatik ist ausgeschaltet.")
+    if FENSTER_EIN:
+        aufgaben.append(asyncio.ensure_future(fenster_schleife()))
+        _LOGGER.info("Fenster offen -> Geraet aus: eingeschaltet, Frist %d s, %d Geraet(e), "
+                     "Themen %s", FENSTER_FRIST, len(FENSTER_ZUORDNUNG),
+                     ', '.join(sorted(FENSTER_THEMEN)))
+        if MQTT != 1:
+            _LOGGER.warning("Fenster offen -> Geraet aus: ohne MQTT hoert der Dienst keine "
+                            "Fenster - die Kopplung ruht, es wird nichts ausgeschaltet.")
     if Abfragetakt > 0:
         aufgaben.append(asyncio.ensure_future(abfragetakt_schleife()))
         _LOGGER.info("Abfragetakt eingeschaltet: alle %d s", Abfragetakt)
@@ -856,6 +864,12 @@ async def automatik_schleife():
                 stand = _AUTO_STAND.get(gid)
                 aktiv = bool(stand and stand.get('aktiv'))
                 if traegt and not aktiv:
+                    # c1: waehrend einer Fensteroeffnung weder zugreifen noch
+                    # einschalten - sonst liefe das Geraet bei offenem Fenster.
+                    if fenster_sperrt(gid):
+                        _LOGGER.debug("Automatik: bei %s ist ein Fenster offen - es wird "
+                                      "nicht zugegriffen.", gid)
+                        continue
                     device = auto_device(gid)
                     if device is None:
                         # Das Geraet ist dem Dienst noch nie begegnet. Eine
@@ -888,6 +902,182 @@ async def automatik_schleife():
         except Exception as fehler:
             _LOGGER.error("Automatik gescheitert: %s", fehler, exc_info=True)
         await asyncio.sleep(AUTO_TAKT)
+
+
+# ===========================================================================
+# Fenster offen -> Klimageraet aus (Verbesserungsbau 30.09.2026, c1)
+# ===========================================================================
+#
+# AB WERK AUS (fenster_ein=0): eine Kopplung an ein anderes Plugin wird nicht
+# durch ein Update eingeschaltet.
+#
+# Die Quelle sind die Haus-Themen haus/tuer/<name>/offen (Regeln/07,
+# Entscheidung 15: 0/1, retained, '-' = keine Aussage; Anbieter Matter2Lox -
+# jeder Kontaktsensor gilt dort als Tuer, also auch ein Fensterkontakt). Die
+# Kopplung laeuft nur ueber diese Themen, nie ueber Dateien eines anderen
+# Plugins. Fensterbilanz sendet kein Thema fuer ein offenes Fenster (nur
+# Urteile ueber den Sonneneintrag) und kommt als Quelle nicht in Frage.
+#
+#   * Je Geraet eine Liste von Fenstern (fenster_zuordnung
+#     "<Geraetenummer>:<name>+<name>,<Geraetenummer>:<name>").
+#   * Geht ein zugeordnetes Fenster LIVE auf 1 und dauert die Oeffnung
+#     fenster_frist Sekunden (0-600, Vorgabe 60), geht EIN Befehl
+#     power.False an das Geraet. Die Oeffnung endet erst, wenn keines seiner
+#     Fenster mehr offen ist - ein zweites Fenster, das dazukommt, loest
+#     keinen zweiten Befehl aus (Bremse: einer je Geraet je Oeffnung).
+#   * Schliesst das Fenster, wird das Geraet NICHT wieder eingeschaltet. Wer
+#     das will, baut es in Loxone; ein Plugin, das von sich aus einschaltet,
+#     heizt oder kuehlt womoeglich ein Zimmer, das niemand mehr braucht.
+#   * Ein zurueckbehaltener Wert (Abo nach dem Start oder nach einem
+#     Wiederverbinden) hat kein bekanntes Alter und loest nie etwas aus (wie
+#     C2). '-' und jeder andere Wert als '1' heissen "nicht offen". Schweigt
+#     die Quelle, passiert nichts - und der Reiter Test sagt es.
+#   * Waehrend eine Oeffnung laeuft, greift die Automatik bei diesem Geraet
+#     nicht zu (sie wuerde es sonst womoeglich wieder einschalten).
+FENSTER_THEMA = 'haus/tuer/%s/offen'
+FENSTER_TAKT = 2
+_FENSTER_ZEICHEN = set('abcdefghijklmnopqrstuvwxyz0123456789_')
+_FENSTER_SCHLOSS = threading.Lock()
+_FENSTER = {}           # Name -> {'wert', 'live', 'empfangen', 'offen_seit'}
+_FENSTER_BEFOHLEN = {}  # Geraetenummer -> Zeitpunkt des Aus-Befehls dieser Oeffnung
+
+
+def fenster_zuordnung_lesen(roh):
+    """{Geraetenummer: [Namen]} aus fenster_zuordnung - oder None bei einem
+    Formfehler. Dieselbe Regel wie mi_fenster_zuordnung() in mi_lib.php:
+    Nummer 10-19 Ziffern, jede nur einmal; Namen wie im Haus-Thema (klein,
+    a-z, 0-9, _, 1-40 Zeichen), je Geraet ohne Doppel."""
+    aus = {}
+    text = str(roh or '').strip()
+    if not text:
+        return aus
+    for teil in text.split(','):
+        gid, trenner, namen = teil.strip().partition(':')
+        gid = gid.strip()
+        if (not trenner or not 10 <= len(gid) <= 19
+                or not all(c in '0123456789' for c in gid) or gid in aus):
+            return None
+        liste = [n.strip() for n in namen.split('+')]
+        if len(set(liste)) != len(liste) or any(
+                not 1 <= len(n) <= 40 or not set(n) <= _FENSTER_ZEICHEN for n in liste):
+            return None
+        aus[gid] = liste
+    return aus
+
+
+def fenster_merken(thema, text, zurueckbehalten):
+    """Ein Wert eines Fensterthemas ist eingetroffen.
+
+    Laeuft im Netzwerkfaden von paho - hier wird nur gemerkt, nichts
+    geschaltet; das tut fenster_schleife() in der Ereignisschleife.
+    """
+    name = FENSTER_THEMEN.get(thema)
+    if name is None:
+        return
+    jetzt = time.time()
+    with _FENSTER_SCHLOSS:
+        e = _FENSTER.setdefault(name, {'wert': None, 'live': False,
+                                       'empfangen': None, 'offen_seit': None})
+        e['wert'] = text
+        e['empfangen'] = jetzt
+        e['live'] = not zurueckbehalten
+        if text != '1':
+            # zu, '-' (keine Aussage) oder unlesbar: keine Oeffnung.
+            e['offen_seit'] = None
+        elif not zurueckbehalten and e['offen_seit'] is None:
+            # Nur ein LIVE gesendetes '1' beginnt eine Oeffnung. Ein
+            # zurueckbehaltenes '1' laesst eine laufende stehen (Wiederverbinden
+            # mitten in der Frist) und beginnt keine neue.
+            e['offen_seit'] = jetzt
+    _LOGGER.debug("Fenster %s = %s%s", name, text[:10],
+                  " (zurueckbehalten, loest nichts aus)" if zurueckbehalten else "")
+
+
+def fenster_offen(gid):
+    """Die Fenster dieses Geraets mit laufender Oeffnung: [(Name, seit)]."""
+    with _FENSTER_SCHLOSS:
+        return [(n, _FENSTER[n]['offen_seit']) for n in FENSTER_ZUORDNUNG.get(gid, ())
+                if n in _FENSTER and _FENSTER[n]['offen_seit'] is not None]
+
+
+def fenster_sperrt(gid):
+    """Laeuft fuer dieses Geraet eine Oeffnung? Dann greift die Automatik nicht."""
+    return FENSTER_EIN and bool(fenster_offen(gid))
+
+
+def fenster_stand():
+    """Der Stand der Kopplung fuer die Oberflaeche - ohne Zeitstempel des
+    Schreibens, damit ein unveraenderter Stand nicht jede Runde auf die
+    Karte geht."""
+    fenster = {}
+    with _FENSTER_SCHLOSS:
+        for namen in FENSTER_ZUORDNUNG.values():
+            for n in namen:
+                e = _FENSTER.get(n) or {}
+                fenster[n] = {
+                    'wert': e.get('wert'),
+                    'live': 1 if e.get('live') else 0,
+                    'empfangen': int(e['empfangen']) if e.get('empfangen') else None,
+                    'offen_seit': int(e['offen_seit']) if e.get('offen_seit') else None,
+                }
+    geraete = {}
+    for gid, namen in FENSTER_ZUORDNUNG.items():
+        wann = _FENSTER_BEFOHLEN.get(gid)
+        geraete[gid] = {'fenster': list(namen),
+                        'aus_befohlen': int(wann) if wann else None}
+    return {'mqtt': 1 if (MQTT == 1 and mqtt_error == 0) else 0,
+            'frist': FENSTER_FRIST, 'fenster': fenster, 'geraete': geraete}
+
+
+def fenster_stand_schreiben(stand):
+    """Unteilbar ueber eine Nebendatei - wie lebenszeichen.json."""
+    try:
+        os.makedirs(data_path, exist_ok=True)
+        ziel = os.path.join(data_path, 'fenster.json')
+        tmp = ziel + '.tmp'
+        daten = dict(stand)
+        daten['ts'] = int(time.time())
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(daten, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.debug("Fensterstand nicht schreibbar: %s", fehler)
+
+
+async def fenster_schleife():
+    """Der Takt der Kopplung: Frist abwarten, einmal ausschalten, merken."""
+    letzter = None
+    geschrieben = 0.0
+    while True:
+        try:
+            jetzt = time.time()
+            for gid in list(FENSTER_ZUORDNUNG):
+                offen = fenster_offen(gid)
+                if not offen:
+                    if _FENSTER_BEFOHLEN.pop(gid, None) is not None:
+                        _LOGGER.info("Fenster: bei %s ist wieder alles zu - das Geraet bleibt "
+                                     "aus, es wird nicht wieder eingeschaltet.", gid)
+                    continue
+                if gid in _FENSTER_BEFOHLEN:
+                    continue        # Bremse: ein Befehl je Geraet je Oeffnung
+                seit = min(s for _n, s in offen)
+                if jetzt - seit < FENSTER_FRIST:
+                    continue
+                # ERST merken, DANN senden: auch ein gescheiterter Befehl zaehlt
+                # als der eine dieser Oeffnung - kein Nachfassen im Takt.
+                _FENSTER_BEFOHLEN[gid] = jetzt
+                _LOGGER.info("Fenster offen (%s) seit %d s - %s wird ausgeschaltet "
+                             "(ein Befehl je Oeffnung).", ', '.join(n for n, _s in offen),
+                             int(jetzt - seit), gid)
+                async with GERAETE_SCHLOSS:
+                    await send_to_midea([gid, 'power.False'])
+            stand = fenster_stand()
+            if stand != letzter or jetzt - geschrieben >= 60:
+                fenster_stand_schreiben(stand)
+                letzter, geschrieben = stand, jetzt
+        except Exception as fehler:
+            _LOGGER.error("Fenster-Kopplung gescheitert: %s", fehler, exc_info=True)
+        await asyncio.sleep(FENSTER_TAKT)
 
 
 def geraete_ids_aus_datei():
@@ -1798,7 +1988,8 @@ def on_connect(client, userdata, flags, rc, properties=None):
         # dieser Dienst nach einem Abriss wirklich neu verbindet - dann muss
         # er auch neu abonnieren, sonst laeuft die Automatik ab dem ersten
         # Netzhaenger blind weiter.
-        for _thema in (AUTO_THEMA_REGEL, AUTO_THEMA_PV):
+        # c1: dazu die Fensterthemen (leer, solange die Kopplung aus ist).
+        for _thema in (AUTO_THEMA_REGEL, AUTO_THEMA_PV) + tuple(sorted(FENSTER_THEMEN)):
             if _thema:
                 try:
                     client.subscribe(_thema, qos=0)
@@ -1826,6 +2017,18 @@ def on_connect(client, userdata, flags, rc, properties=None):
             # damit sie nachschlagbar bleibt.
             _LOGGER.error("MQTT: Anmeldung abgelehnt, Code %s ohne bekannte "
                           "Bedeutung", code)
+        # a1: die lange Kennung abgewiesen (CONNACK 2 bzw. 133, etwa ein
+        # Broker, der nur MQTT 3.1 mit hoechstens 23 Zeichen spricht). paho
+        # verbindet von selbst neu - dann mit der kurzen Form. Ueber
+        # _client_id, weil paho 1.6.1 und 2.x die Kennung nur im Konstruktor
+        # annehmen; beide lesen sie bei jedem Verbinden aus diesem Feld.
+        if code in (2, 133) and hasattr(client, '_client_id'):
+            kurz = KENNUNG_KURZ.encode('utf-8')
+            if client._client_id != kurz:
+                client._client_id = kurz
+                _LOGGER.warning("MQTT: der Broker lehnt die Client-Kennung %s ab (%d Zeichen) - "
+                                "der naechste Versuch nimmt die kurze Form %s (23 Zeichen, "
+                                "MQTT 3.1).", KENNUNG, len(KENNUNG), KENNUNG_KURZ)
 
 
 def on_message(client, userdata, nachricht):
@@ -1842,6 +2045,8 @@ def on_message(client, userdata, nachricht):
     # C2: das Retain-Merkmal auswerten - siehe abo_merken().
     zurueck = bool(getattr(nachricht, 'retain', False))
     abo_merken(nachricht.topic, text, zurueck)
+    # c1: Fensterthemen zusaetzlich fuer die Kopplung merken.
+    fenster_merken(nachricht.topic, text, zurueck)
     _LOGGER.debug("MQTT empfangen: %s = %s%s", nachricht.topic, text[:40],
                   " (zurueckbehalten, Alter unbekannt - zaehlt nicht)" if zurueck else "")
 
@@ -2286,6 +2491,37 @@ if AUTO_EIN and not AUTO_THEMA_REGEL and not AUTO_THEMA_PV:
                     "eingetragen - sie kann nichts entscheiden und bleibt aus.")
     AUTO_EIN = False
 
+# --- Fenster offen -> Klimageraet aus (Verbesserungsbau 30.09.2026, c1) -----
+# Ein Stand ohne diese Schluessel (Update, die Oberflaeche noch nicht
+# geoeffnet) heisst schlicht "aus" - ohne die Warnung von _cfg_zahl().
+
+
+def _fenster_zahl(schluessel, vorgabe, klein, gross):
+    if not cfg.has_option('default', schluessel):
+        return vorgabe
+    return _cfg_zahl(schluessel, vorgabe, klein, gross)
+
+
+FENSTER_EIN = _fenster_zahl('fenster_ein', 0, 0, 1) == 1
+FENSTER_FRIST = _fenster_zahl('fenster_frist', 60, 0, 600)
+FENSTER_ZUORDNUNG = fenster_zuordnung_lesen(_cfg_text('fenster_zuordnung'))
+if FENSTER_ZUORDNUNG is None:
+    if FENSTER_EIN:
+        _LOGGER.warning("fenster_zuordnung ist nicht lesbar (Form <Geraetenummer>:<name>+<name>,"
+                        "...) - 'Fenster offen -> Geraet aus' bleibt AUS.")
+    FENSTER_EIN = False
+    FENSTER_ZUORDNUNG = {}
+if FENSTER_EIN and not FENSTER_ZUORDNUNG:
+    _LOGGER.warning("'Fenster offen -> Geraet aus' ist eingeschaltet, aber keinem Geraet ist "
+                    "ein Fenster zugeordnet - die Kopplung bleibt AUS.")
+    FENSTER_EIN = False
+if not FENSTER_EIN:
+    FENSTER_ZUORDNUNG = {}
+FENSTER_THEMEN = {}     # Thema -> Fenstername
+for _fg, _fn in FENSTER_ZUORDNUNG.items():
+    for _f in _fn:
+        FENSTER_THEMEN[FENSTER_THEMA % _f] = _f
+
 UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
 # Groesste zulaessige Laenge eines Datagramms (siehe datagram_received).
 # Der laengste zulaessige Befehl - Nummer, Schluessel, Token, IP und acht
@@ -2390,6 +2626,9 @@ except OSError as fehler:
 mqtt_error = 1
 MQTT = 0
 client = None
+# a1 (Verbesserungsbau 30.09.2026): eine eigene Kennung je Anlage statt fest
+# "Midea2Lox" - Begruendung und Form bei mi_mqtt.client_kennungen().
+KENNUNG, KENNUNG_KURZ = mi_mqtt.client_kennungen()
 try: # check if MQTTgateway is installed or not and set MQTT Client settings
     with open(home_path + '/config/system/general.json') as jsonFile:
         jsonObject = json.load(jsonFile)
@@ -2407,11 +2646,12 @@ try: # check if MQTTgateway is installed or not and set MQTT Client settings
     # 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die Aufzaehlung gar nicht.
     if hasattr(mqtt, 'CallbackAPIVersion'):
         try:
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='Midea2Lox')
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=KENNUNG)
         except (AttributeError, TypeError):
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id='Midea2Lox')
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=KENNUNG)
     else:
-        client = mqtt.Client(client_id='Midea2Lox')
+        client = mqtt.Client(client_id=KENNUNG)
+    _LOGGER.info("MQTT: Client-Kennung %s", KENNUNG)
     client.username_pw_set(MQTTuser, MQTTpass)
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect

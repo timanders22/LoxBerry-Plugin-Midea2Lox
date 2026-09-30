@@ -124,6 +124,7 @@ function mi_paths()
             'marke'     => $basis . '/data.upgrade_laeuft',
             'leben'     => $basis . '/data/lebenszeichen.json',
             'automatik' => $basis . '/data/automatik.json',
+            'fenster'   => $basis . '/data/fenster.json',
             'bin'       => $basis . '/bin',
             'venv'      => '',
             'daemon'    => '',
@@ -172,6 +173,9 @@ function mi_paths()
         // Ab 4.5.0: derselbe Zustand, den die Automatik veroeffentlicht, als
         // Datei - die Oberflaeche kann kein MQTT lesen.
         'automatik' => $home . '/data/plugins/' . $ordner . '/automatik.json',
+        // c1 (Verbesserungsbau 30.09.2026): der Stand der Kopplung
+        // "Fenster offen -> Geraet aus", geschrieben vom Dienst.
+        'fenster'   => $home . '/data/plugins/' . $ordner . '/fenster.json',
         'bin'     => $home . '/bin/plugins/' . $ordner,
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
         'daemon'  => $home . '/system/daemons/plugins/' . $ordner,
@@ -456,7 +460,76 @@ function mi_vorgaben()
         'auto_turbo'            => '0',
         'auto_schalten'         => '0',
         'auto_geraete'          => '',
+        /* Verbesserungsbau 30.09.2026 (c1): Fenster offen -> Klimageraet aus.
+         * AB WERK AUS - eine Kopplung an ein anderes Plugin wird nicht durch
+         * ein Update eingeschaltet. Frist in Sekunden (0-600). Zuordnung
+         * "<Geraetenummer>:<name>+<name>,<Geraetenummer>:<name>"; <name> wie
+         * im Haus-Thema haus/tuer/<name>/offen (Regeln/07). */
+        'fenster_ein'           => '0',
+        'fenster_frist'         => '60',
+        'fenster_zuordnung'     => '',
     );
+}
+
+/**
+ * fenster_zuordnung lesen (c1): array(Geraetenummer => array(Namen)) oder
+ * null bei einem Formfehler. Dieselbe Regel wie fenster_zuordnung_lesen() im
+ * Dienst: Nummer 10-19 Ziffern und jede nur einmal; Namen wie im Haus-Thema
+ * (a-z, 0-9, _, 1-40 Zeichen), je Geraet ohne Doppel.
+ */
+function mi_fenster_zuordnung($roh)
+{
+    $aus = array();
+    $t = trim((string) $roh);
+    if ($t === '') {
+        return $aus;
+    }
+    foreach (explode(',', $t) as $teil) {
+        $p = explode(':', trim($teil), 2);
+        if (count($p) !== 2) {
+            return null;
+        }
+        $gid = trim($p[0]);
+        if (!preg_match('/^[0-9]{10,19}\z/', $gid) || isset($aus[$gid])) {
+            return null;
+        }
+        $namen = array_map('trim', explode('+', $p[1]));
+        foreach ($namen as $n) {
+            if (!preg_match('/^[a-z0-9_]{1,40}\z/', $n)) {
+                return null;
+            }
+        }
+        if (count(array_unique($namen)) !== count($namen)) {
+            return null;
+        }
+        $aus[$gid] = $namen;
+    }
+    return $aus;
+}
+
+/**
+ * Der Stand der Kopplung "Fenster offen -> Geraet aus" (c1), wie der Dienst
+ * ihn in data/fenster.json ablegt: array(lage, daten|null, alter|null).
+ * lage: aus, fehlt, unlesbar, alt (aelter als 180 s - der Dienst schreibt
+ * bei jeder Aenderung und sonst einmal je Minute), ok.
+ */
+function mi_fenster_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    if (mi_cfg($cfg, 'fenster_ein', '0') !== '1') {
+        return array('aus', null, null);
+    }
+    $datei = mi_paths()['fenster'];
+    clearstatcache(true, $datei);
+    if (!is_readable($datei)) {
+        return array('fehlt', null, null);
+    }
+    $d = json_decode((string) @file_get_contents($datei), true);
+    if (!is_array($d) || !isset($d['ts']) || !isset($d['fenster']) || !is_array($d['fenster'])) {
+        return array('unlesbar', null, null);
+    }
+    $alter = time() - (int) $d['ts'];
+    return array($alter > 180 ? 'alt' : 'ok', $d, $alter);
 }
 
 /**
@@ -478,6 +551,59 @@ function mi_wert_taugt($v)
         return false;
     }
     return preg_match('/[\x00-\x08\x0A-\x1F\x7F]/', $s) !== 1;
+}
+
+/**
+ * Traegt der Wert am Rand Leerraum - so, wie Pythons str.strip() ihn sieht?
+ * (Verbesserungsbau 30.09.2026, b1)
+ *
+ * PHP trim() kennt nur " \t\n\r\0\x0B". configparser (discover.py) schneidet
+ * mit str.strip() auch \f, U+001C-U+001F, U+0085, U+00A0, U+1680,
+ * U+2000-U+200A, U+2028, U+2029, U+202F, U+205F und U+3000 ab. Mit trim()
+ * allein ging ein Kennwort, das mit einem geschuetzten Leerzeichen endet,
+ * durch und kam gekuerzt bei der Geraetesuche an.
+ */
+function mi_randleer($v)
+{
+    $s = (string) $v;
+    if ($s === '') {
+        return false;
+    }
+    if ($s !== trim($s) || strpbrk($s[0] . substr($s, -1), "\f") !== false) {
+        return true;
+    }
+    $zeichen = '[\x{1C}-\x{1F}\x{85}\x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}'
+             . '\x{202F}\x{205F}\x{3000}]';
+    $r = @preg_match('/^' . $zeichen . '|' . $zeichen . '$/u', $s);
+    return $r === 1;
+}
+
+/**
+ * Das Midea-Kennwort fuer midea2lox.cfg (b1). configparser schneidet Rand-
+ * Leerraum immer ab - ein solches Kennwort wird deshalb in EIN Paar
+ * Anfuehrungszeichen gesetzt. Jedes andere bleibt woertlich, ein bestehendes
+ * also byte-gleich. Gegenstueck: mi_kennwort_lesen() und kennwort_lesen() in
+ * data/discover.py.
+ */
+function mi_kennwort_kodieren($v)
+{
+    $s = (string) $v;
+    return mi_randleer($s) ? '"' . $s . '"' : $s;
+}
+
+/**
+ * Das gespeicherte Kennwort lesen (b1): in Anfuehrungszeichen UND innen am
+ * Rand Leerraum -> das Innere; sonst woertlich. Ein Altbestand "geheim" mit
+ * Anfuehrungszeichen als Teil des Kennworts bleibt, was er war.
+ */
+function mi_kennwort_lesen($s)
+{
+    $s = (string) $s;
+    if (strlen($s) >= 3 && $s[0] === '"' && substr($s, -1) === '"'
+        && mi_randleer(substr($s, 1, -1))) {
+        return substr($s, 1, -1);
+    }
+    return $s;
 }
 
 /**
@@ -596,18 +722,35 @@ function mi_wert_pruefen($schluessel, $wert)
                 }
             }
             return '';
+        /* c1: Fenster offen -> Klimageraet aus. */
+        case 'fenster_ein':
+            return ($w === '0' || $w === '1') ? '' : mi_t('UI.PRUEF_JANEIN');
+        case 'fenster_frist':
+            return (ctype_digit($w) && (int) $w <= 600) ? ''
+                 : mi_t('UI.PRUEF_FENSTER_FRIST');
+        case 'fenster_zuordnung':
+            return mi_fenster_zuordnung($w) !== null ? ''
+                 : mi_t('UI.PRUEF_FENSTER_ZUORDNUNG');
         case 'MideaUser':
+            // Freitext; Leerraum am RAND kann die Datei nicht halten
+            // (configparser schneidet ihn ab). Abweisen statt still kuerzen
+            // (Regeln/05) - seit b1 mit dem Leerraumbegriff von Python.
+            if (mi_randleer($wert)) {
+                return sprintf(mi_t('UI.PRUEF_RANDLEER'), mi_e($schluessel));
+            }
+            return '';
         case 'MideaPassword':
-            // Freitext. Geprueft wird nur, was mi_wert_taugt() ohnehin
-            // prueft; ein Kennwort darf jedes druckbare Zeichen enthalten -
+            // Freitext. Ein Kennwort darf jedes druckbare Zeichen enthalten -
             // seit 4.5.10 (C3) auch ';' und Anfuehrungszeichen, die
             // mi_ini_lesen() woertlich liest wie der Dienst.
-            // Nur Leerzeichen am RAND kann die Datei nicht halten:
-            // configparser schneidet sie ab, und der Dienst meldete sich mit
-            // einem anderen Kennwort an, als eingegeben wurde. Abweisen
-            // statt still kuerzen (Regeln/05).
-            if ((string) $wert !== trim((string) $wert)) {
-                return sprintf(mi_t('UI.PRUEF_RANDLEER'), mi_e($schluessel));
+            // Seit b1 (Verbesserungsbau 30.09.2026) auch Leerzeichen am Rand:
+            // mi_config_write() setzt ein solches Kennwort in
+            // Anfuehrungszeichen, mi_kennwort_lesen() und discover.py nehmen
+            // sie wieder weg. Abgewiesen wird nur die eine Form, die dieses
+            // Format nicht halten kann: ohne Rand-Leerraum, aber selbst wie
+            // ein kodierter Wert gebaut (Anfuehrungszeichen, dann Leerraum).
+            if (!mi_randleer($wert) && mi_kennwort_lesen($wert) !== (string) $wert) {
+                return sprintf(mi_t('UI.PRUEF_KENNWORT_ZITAT'), mi_e($schluessel));
             }
             return '';
     }
@@ -734,6 +877,8 @@ function mi_config_read()
             }
         }
     }
+    // b1: das Quotierformat des Kennworts aufloesen (mi_kennwort_kodieren).
+    $cfg['MideaPassword'] = mi_kennwort_lesen($cfg['MideaPassword']);
     return $cfg;
 }
 
@@ -853,6 +998,9 @@ function mi_config_write($cfg)
             return false;
         }
     }
+    // b1: ein Kennwort mit Rand-Leerraum in Anfuehrungszeichen; jedes andere
+    // bleibt woertlich (byte-gleich wie bis 4.5.11).
+    $voll['MideaPassword'] = mi_kennwort_kodieren($voll['MideaPassword']);
     $z = "[default]\n";
     foreach ($voll as $k => $v) {
         // Zeilenumbrueche wuerden die Datei zerlegen. mi_wert_taugt() weist
@@ -2441,9 +2589,12 @@ function mi_ist_key($v)
  * Rueckgabe: array(array(einstellungen, geraete)|null, Beanstandungen[],
  *                  Zahl uebernommener Werte, Zahl uebernommener Geraete).
  */
-function mi_sicherung_lesen($roh)
+function mi_sicherung_lesen($roh, &$namen = null)
 {
     $mangel = array();
+    // X-3 (Verbesserungsbau 30.09.2026): die Namen der beanstandeten
+    // Schluessel, nie ihre Werte.
+    $namen = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
         return array(null, array(mi_t('UI.SICH_KEIN_JSON')), 0, 0);
@@ -2500,14 +2651,18 @@ function mi_sicherung_lesen($roh)
         if (!in_array($k, $bekannt, true)) {
             $mangel[] = sprintf(mi_t('UI.SICH_FREMD'),
                                  htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
+            $namen[] = (string) $k;
             continue;
         }
         $fehler = mi_wert_pruefen($k, $w);
         if ($fehler !== '') {
             $mangel[] = mi_e($k) . ': ' . $fehler;
+            $namen[] = (string) $k;
             continue;
         }
-        $neu[$k] = trim((string) $w);
+        // b1: das Kennwort woertlich - Leerraum am Rand gehoert seit dem
+        // Verbesserungsbau 30.09.2026 dazu (mi_kennwort_kodieren).
+        $neu[$k] = ($k === 'MideaPassword') ? (string) $w : trim((string) $w);
         $gesehen[] = $k;
         $anzahl++;
     }
@@ -2522,8 +2677,15 @@ function mi_sicherung_lesen($roh)
     // Registeradresse.
     $geraete = array();
     $ids_gesehen = array();
+    $mi_gzahl = count($mangel);
+    $mi_gnr = 0;
     foreach ($roh_ger as $i => $g) {
+        if (count($mangel) > $mi_gzahl) {
+            $namen[] = 'geraete[' . $mi_gnr . ']';
+        }
+        $mi_gzahl = count($mangel);
         $nr = (int) $i + 1;
+        $mi_gnr = $nr;
         if (!is_array($g)) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_FORM'), $nr);
             continue;
@@ -2607,6 +2769,9 @@ function mi_sicherung_lesen($roh)
                            'port' => $port, 'bezeichnung' => $bez,
                            'token' => $token, 'key' => $key);
     }
+    if (count($mangel) > $mi_gzahl) {
+        $namen[] = 'geraete[' . $mi_gnr . ']';
+    }
 
     if ($mangel) {
         return array(null, $mangel, $anzahl, count($geraete), $unberuehrt);
@@ -2616,6 +2781,34 @@ function mi_sicherung_lesen($roh)
     // Elemente auslesen, stoert das nicht - list() nimmt weniger entgegen,
     // als das Feld hergibt.
     return array(array($neu, $geraete), array(), $anzahl, count($geraete), $unberuehrt);
+}
+
+/**
+ * X-3 (Verbesserungsbau 30.09.2026): Welche gespeicherten Werte bestuenden
+ * das eigene Zurueckspielen nicht? Die Sicherung wird gebaut und durch
+ * mi_sicherung_lesen() geschickt - dieselbe Pruefung wie beim Zurueckspielen.
+ * Rueckgabe: Liste der NAMEN (Schluessel bzw. geraete[<Nr>]), nie der Werte;
+ * leer = die Sicherung liesse sich zurueckspielen; '?' = abgewiesen ohne
+ * einen benennbaren Schluessel.
+ * Der Name traegt bewusst kein "sicherung": Werkzeuge/sicherung_pruefen.py
+ * nimmt die erste Funktion *_sicherung* fuer die Ausfuhr (so in Heimkino
+ * gemessen, Scheinbefund).
+ */
+function mi_rueckspiel_altwerte($sicherung = null)
+{
+    $s = is_array($sicherung) ? $sicherung : mi_sicherung_bauen();
+    $js = json_encode($s, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+                          | JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($js === false) {
+        // Nicht kodierbar: der Knopf meldet das selbst (UI.SICH_DL_FEHLER).
+        return array();
+    }
+    $namen = array();
+    $erg = mi_sicherung_lesen($js, $namen);
+    if ($erg[0] !== null) {
+        return array();
+    }
+    return $namen ? array_values(array_unique($namen)) : array('?');
 }
 
 /**
@@ -2698,6 +2891,128 @@ function mi_einmal_abholen()
         return null;
     }
     return $d;
+}
+
+/* ==================================================================
+ * X-2 (Verbesserungsbau 30.09.2026): nach einer Beanstandung stehen die
+ * eingetippten Werte wieder im Formular (Regeln/04).
+ *
+ * Seit der Umleitung nach jedem POST (O1) zeigte der GET die GESPEICHERTEN
+ * Werte; wer drei Felder richtig und eines falsch eingab, tippte alle vier
+ * neu. Jetzt reisen die Eingaben des einen beanstandeten Formulars mit der
+ * Einmalmeldung (0600, Datenordner, 120 s, beim GET gelesen und geloescht).
+ * Nie Geheimnisse: das Midea-Kennwort steht in keiner Feldliste unten.
+ * ================================================================== */
+function mi_x2_formulare()
+{
+    return array(
+        'settings'  => array('MINISERVER', 'UDP_PORT', 'lox_timeout', 'MideaUser', 'region',
+                             'abfragetakt', 'maxConnectionLifetime', 'DEBUG'),
+        'mqtt'      => array('mqtt_praefix'),
+        'automatik' => array('auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab',
+                             'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',
+                             'auto_turbo', 'auto_schalten', 'auto_sperrzeit',
+                             'auto_max_alter', 'auto_takt', 'auto_geraete',
+                             'fenster_ein', 'fenster_frist', 'fenster_zuordnung'),
+        // Die Bezeichnungen reisen unter "bezeichnung" (je Geraetenummer).
+        'geraete'   => array(),
+    );
+}
+
+/** Die Eingaben des beanstandeten Formulars aus $_POST - nur Zeichenketten. */
+function mi_x2_eingaben($form, array $falsch)
+{
+    $liste = mi_x2_formulare();
+    if (!isset($liste[$form])) {
+        return null;
+    }
+    $werte = array();
+    foreach ($liste[$form] as $k) {
+        if (isset($_POST[$k]) && is_string($_POST[$k]) && mi_wert_taugt($_POST[$k])) {
+            $werte[$k] = $_POST[$k];
+        }
+    }
+    $bez = array();
+    if ($form === 'geraete' && isset($_POST['bezeichnung']) && is_array($_POST['bezeichnung'])) {
+        foreach ($_POST['bezeichnung'] as $id => $w) {
+            if (is_string($w) && preg_match('/^\d{10,19}\z/', (string) $id) && mi_wert_taugt($w)) {
+                $bez[(string) $id] = $w;
+            }
+        }
+    }
+    return array('form' => $form, 'werte' => $werte, 'bezeichnung' => $bez,
+                 'falsch' => array_values(array_unique(array_filter($falsch, 'is_string'))));
+}
+
+/** Die mitgereisten Eingaben pruefen, bevor sie ein Formular fuellen. */
+function mi_x2_pruefen($roh)
+{
+    $liste = mi_x2_formulare();
+    if (!is_array($roh) || !isset($roh['form']) || !is_string($roh['form'])
+        || !isset($liste[$roh['form']])) {
+        return null;
+    }
+    $aus = array('form' => $roh['form'], 'werte' => array(), 'bezeichnung' => array(),
+                 'falsch' => array());
+    foreach ((isset($roh['werte']) && is_array($roh['werte'])) ? $roh['werte'] : array() as $k => $w) {
+        if (in_array($k, $liste[$roh['form']], true) && is_string($w)) {
+            $aus['werte'][$k] = $w;
+        }
+    }
+    foreach ((isset($roh['bezeichnung']) && is_array($roh['bezeichnung'])) ? $roh['bezeichnung'] : array() as $k => $w) {
+        if (preg_match('/^\d{10,19}\z/', (string) $k) && is_string($w)) {
+            $aus['bezeichnung'][(string) $k] = $w;
+        }
+    }
+    foreach ((isset($roh['falsch']) && is_array($roh['falsch'])) ? $roh['falsch'] : array() as $f) {
+        if (is_string($f) && preg_match('/^[A-Za-z_]{1,40}(\[\d{1,19}\])?\z/', $f)) {
+            $aus['falsch'][] = $f;
+        }
+    }
+    return $aus;
+}
+
+/** Die Konfiguration fuer DIESES Formular mit den Eingaben ueberlagern. */
+function mi_x2_ueberlagern($cfg, $x2, $form)
+{
+    if (is_array($x2) && $x2['form'] === $form) {
+        foreach ($x2['werte'] as $k => $w) {
+            $cfg[$k] = $w;
+        }
+    }
+    return $cfg;
+}
+
+/** Die mitgereiste Bezeichnung eines Geraets - sonst die gespeicherte. */
+function mi_x2_bezeichnung($x2, array $d)
+{
+    $id = (string) $d['id'];
+    if (is_array($x2) && $x2['form'] === 'geraete' && isset($x2['bezeichnung'][$id])) {
+        return $x2['bezeichnung'][$id];
+    }
+    return (string) $d['bezeichnung'];
+}
+
+/**
+ * Die beanstandeten Felder markieren und sagen, dass das Formular die
+ * Eingabe zeigt. Ueber Attributwaehler - die Feldnamen stammen aus der
+ * festen Liste oben bzw. sind "bezeichnung[<Ziffern>]" (mi_x2_pruefen).
+ */
+function mi_x2_markierung($x2, $form, $reiter)
+{
+    if (!is_array($x2) || $x2['form'] !== $form) {
+        return '';
+    }
+    $aus = '<div class="sm-alert sm-info">' . mi_t('UI.X2_EINGABEN') . '</div>' . "\n";
+    if ($x2['falsch']) {
+        $w = array();
+        foreach ($x2['falsch'] as $f) {
+            $w[] = '#' . $reiter . ' [name="' . $f . '"]';
+        }
+        $aus .= '<style>' . implode(', ', $w)
+              . ' { outline: 2px solid #c62828; background: #fdecea; }</style>' . "\n";
+    }
+    return $aus;
 }
 
 /* ==================================================================
