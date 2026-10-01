@@ -283,7 +283,12 @@ if (isset($_POST['mqtt_speichern'])) {
         $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'mqtt_praefix');
         $mi_x2_falsch[] = 'mqtt_praefix';
     } else {
-        $roh = trim($roh, "/ \t\n\r\0\x0B");
+        /* Nr. 19 (B-Nachzug 01.10.2026): nur Leerraum am Rand faellt still
+         * weg. Bis 4.5.12 schnitt diese Zeile auch Schraegstriche ab - aus
+         * "/midea/" wurde still "midea" gespeichert, obwohl die
+         * Positivliste den Schraegstrich am Rand abweist. Jetzt beanstandet
+         * sie ihn, und gespeichert wird nichts. */
+        $roh = trim($roh);
         $f = mi_wert_pruefen('mqtt_praefix', $roh);
         if ($f !== '') {
             $mi_fehler[] = $f;

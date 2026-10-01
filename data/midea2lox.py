@@ -467,10 +467,15 @@ async def arbeiter(warteschlange):
             # Automatik benutzt dieselbe Funktion, und dort gesetzt wuerde
             # sie sich bei jedem eigenen Griff selbst aussperren. Eine reine
             # Statusabfrage sperrt nicht - sie aendert nichts.
+            # X-7 (B-Nachzug 01.10.2026): derselbe Sollwert innerhalb von
+            # 60 s geht nicht erneut hinaus und sperrt auch die Automatik
+            # nicht neu - es aendert sich ja nichts.
+            if gleichwert_unterdruecken(daten, absender[0] if absender else ''):
+                continue
             if AUTO_EIN and len(daten) > 1 and 'status' not in daten:
                 hand_sperren()
             async with GERAETE_SCHLOSS:
-                await send_to_midea(daten)
+                await send_to_midea(daten, hand=True)
         except Exception as fehler:
             _LOGGER.error("Fehler bei der Verarbeitung: %s", fehler, exc_info=True)
         finally:
@@ -1155,9 +1160,248 @@ def soll_pruefen(device, wert, wort):
     return zahl
 
 
+# ===========================================================================
+# Gleichwert-Unterdrueckung (X-7, B-Nachzug 01.10.2026, Entscheidung 19)
+# ===========================================================================
+#
+# Ein Loxone-Ausgang, der denselben Sollwert immer wieder schickt (ein
+# Baustein, der bei jedem Programmdurchlauf neu ausgibt, oder zwei
+# Miniserver mit derselben Logik), hat bis 4.5.12 jedes Mal ein apply() an
+# das Klimageraet ausgeloest - samt Piepton am Geraet und Funkverkehr. Jetzt:
+#
+#   - derselbe Sollwert an dasselbe Geraet innerhalb von 60 s geht nicht
+#     erneut hinaus; im Protokoll steht UNVERAENDERT=1 (UDP hat keine Antwort);
+#   - ein ANDERER Wert geht sofort hinaus - kein 429, kein Mindestabstand;
+#   - Ereignisse sind ausgenommen: toggle_Display und toggle_self_clean
+#     wirken jedes Mal, "status" fragt nur ab;
+#   - der Knopf "Senden" im Reiter Test (Absender 127.0.0.1 bzw. LoxberryIP)
+#     ist ausgenommen: ein Handversuch soll wirken, auch wenn Loxone eben
+#     dasselbe geschickt hat (Entscheidung 19: "jetzt"-Knoepfe);
+#   - ein Paket, das neben Sollwerten etwas anderes traegt (ein Ereignis,
+#     die Altform aus 2.x, ein unbekanntes Wort), wird nie unterdrueckt.
+#
+# Gemerkt wird je Geraet und Art (power, temp, mode, fan, ...) der zuletzt
+# ERFOLGREICH gesendete Wert. Nicht gemerkt wird ein Wert, den das Geraet
+# nicht annimmt (Solltemperatur ausserhalb seines Bereichs, Faehigkeit fehlt)
+# - sonst stuende bei der Wiederholung "UNVERAENDERT" statt der Beanstandung.
+# Vergessen wird der Merker, sobald jemand anderes das Geraet stellt
+# (Automatik, Fenster offen -> Geraet aus) und sobald eine Statusabfrage
+# einen anderen Wert liefert (Fernbedienung). Ein gescheiterter Befehl merkt
+# nichts; seine Arten werden vergessen.
+#
+# Kein flock: der Merker lebt im Speicher des Dienstes, und alle Befehle
+# laufen der Reihe nach durch EINEN Arbeiter (Warteschlange, GERAETE_SCHLOSS);
+# zwei gleichzeitige Pakete gibt es hier nicht. Einen Fehlerfall, in dem der
+# Merker nicht lesbar waere, gibt es damit nicht. Nach einem Neustart des
+# Dienstes ist er leer - der erste Befehl geht dann immer hinaus.
+
+GLEICHWERT_S = 60
+_GLEICHWERT = {}   # (Geraetenummer, Art) -> (Wert als Text, Attribut, Sollobjekt, Zeitpunkt)
+
+# Ein/Aus-Schalter: Wort vor dem Punkt -> (Attribut am Geraet, Faehigkeit oder None)
+_GW_SCHALTER = {
+    'power': ('power_state', None),
+    'tone': ('beep', None),
+    'eco': ('eco', 'supports_eco'),
+    'turbo': ('turbo', 'supports_turbo'),
+    'sleep': ('sleep', None),
+    'follow': ('follow_me', None),
+    'freeze': ('freeze_protection', 'supports_freeze_protection'),
+    'purifier': ('purifier', 'supports_purifier'),
+    'breeze_away': ('breeze_away', 'supports_breeze_away'),
+    'breeze_mild': ('breeze_mild', 'supports_breeze_mild'),
+    'breezeless': ('breezeless', 'supports_breezeless'),
+    'ieco': ('ieco', 'supports_ieco'),
+}
+_GW_EREIGNISSE = ('toggle_Display', 'toggle_self_clean', 'status')
+
+
+def _gw_eine_art(wort):
+    """Ein Wort des Pakets -> (Art, Wert als Text, Attribut, Sollobjekt) oder None.
+
+    None heisst: kein Sollwert (oder ein unbrauchbarer) - das Paket wird dann
+    nie unterdrueckt, und send_to_midea() beanstandet wie bisher.
+    """
+    tab = mi_tabellen()
+    if '.' in wort and wort.split('.', 1)[0] in _GW_SCHALTER and wort.count('.') == 1:
+        art, roh = wort.split('.', 1)
+        if roh in ('True', 'False'):
+            return (art, roh, _GW_SCHALTER[art][0], roh == 'True')
+        return None
+    if wort in tab['operational_mode']:
+        wert = mi_enum(ac.OperationalMode, tab['operational_mode'][wort])
+        return None if wert is None else ('mode', wort, 'operational_mode', wert)
+    if wort in tab['swing_mode']:
+        wert = mi_enum(ac.SwingMode, tab['swing_mode'][wort])
+        return None if wert is None else ('swing', wort, 'swing_mode', wert)
+    if wort.startswith('ac.fan_speed_enum.'):
+        rest = wort.split('.')[2] if wort.count('.') == 2 else ''
+        if rest.isdigit():
+            return ('fan', rest, 'fan_speed', int(rest))
+        wert = mi_enum(ac.FanSpeed, tab['fan_speed'].get(wort))
+        return None if wert is None else ('fan', wort, 'fan_speed', wert)
+    roh = None
+    if len(wort) == 2 and wort.isdigit():
+        roh = wort
+    elif wort.startswith('temp.'):
+        roh = wort.split('.', 1)[1].replace(',', '.')
+    if roh is not None:
+        try:
+            zahl = float(roh)
+        except ValueError:
+            return None
+        if not math.isfinite(zahl):
+            return None
+        return ('temp', '%.2f' % zahl, 'target_temperature', zahl)
+    if wort.startswith('humidity.'):
+        roh = wort.split('.', 1)[1]
+        if roh.isdigit() and 0 <= int(roh) <= 100:
+            return ('humidity', str(int(roh)), 'target_humidity', int(roh))
+        return None
+    for art, attr in (('h_swing_angle', 'horizontal_swing_angle'),
+                      ('v_swing_angle', 'vertical_swing_angle')):
+        if wort.startswith(art + '.'):
+            wert = mi_enum(ac.SwingAngle, wort.split('.', 1)[1])
+            return None if wert is None else (art, wort, attr, wert)
+    if wort.startswith('rate_select.'):
+        return ('rate_select', wort, 'rate_select', None)
+    return None
+
+
+def gleichwert_zerlegen(daten):
+    """Paket -> (Geraetenummer, {Art: (Wert, Attribut, Sollobjekt)}, nur_soll).
+
+    nur_soll ist False, sobald das Paket etwas anderes als die Geraetenummer,
+    Adressangaben (IP, Schluessel, Token) und Sollwerte traegt. Bei mehr als
+    einer Geraetenummer oder keiner: (None, {}, False).
+    """
+    gid = None
+    arten = {}
+    nur_soll = True
+    if len(daten) == 10 and daten[0] in ('True', 'False'):
+        return None, {}, False       # Altform aus 2.x - nie unterdruecken
+    for wort in daten:
+        if len(wort) in range(10, 20) and wort.isdigit():
+            if gid is not None and gid != wort:
+                return None, {}, False
+            gid = wort
+            continue
+        if len(wort) in (64, 128):
+            continue
+        try:
+            if type(ip_address(wort)) is IPv4Address and not wort.isdigit():
+                continue
+        except ValueError:
+            pass
+        if wort in _GW_EREIGNISSE:
+            nur_soll = False
+            continue
+        teil = _gw_eine_art(wort)
+        if teil is None:
+            nur_soll = False
+            continue
+        arten[teil[0]] = teil[1:]
+    if gid is None:
+        return None, {}, False
+    return int(gid), arten, nur_soll
+
+
+def _gw_wirksam(device, art, attr, soll):
+    """Nimmt das Geraet diesen Wert an? Sonst wird er nicht gemerkt."""
+    if art == 'temp':
+        try:
+            return float(device.min_target_temperature) <= soll <= float(device.max_target_temperature)
+        except (AttributeError, TypeError, ValueError):
+            return True
+    if art in _GW_SCHALTER and _GW_SCHALTER[art][1]:
+        return bool(getattr(device, _GW_SCHALTER[art][1], False))
+    if art == 'fan' and isinstance(soll, int):
+        return bool(getattr(device, 'supports_custom_fan_speed', False))
+    if art == 'humidity':
+        return bool(getattr(device, 'supports_humidity', False))
+    if art == 'h_swing_angle':
+        return bool(getattr(device, 'supports_horizontal_swing_angle', False))
+    if art == 'v_swing_angle':
+        return bool(getattr(device, 'supports_vertical_swing_angle', False))
+    return True
+
+
+def gleichwert_unterdruecken(daten, absender):
+    """True: dieses Paket ist eine Wiederholung innerhalb von 60 s - nicht senden."""
+    if absender in ('127.0.0.1', LoxberryIP):
+        return False            # Reiter Test ("Senden") wirkt immer
+    gid, arten, nur_soll = gleichwert_zerlegen(daten)
+    if gid is None or not nur_soll or not arten:
+        return False
+    jetzt = time.time()
+    aelteste = None
+    for art, (wert, _attr, _soll) in arten.items():
+        eintrag = _GLEICHWERT.get((gid, art))
+        if eintrag is None or eintrag[0] != wert:
+            return False
+        alter = jetzt - eintrag[3]
+        if alter < 0 or alter >= GLEICHWERT_S:
+            return False
+        aelteste = alter if aelteste is None else max(aelteste, alter)
+    _LOGGER.info("Midea.%s: UNVERAENDERT=1 - %s wie vor %d s gesendet; nichts an das "
+                 "Geraet geschickt (gleicher Sollwert innerhalb von %d s).", gid,
+                 ', '.join('%s=%s' % (a, arten[a][0]) for a in sorted(arten)),
+                 int(aelteste), GLEICHWERT_S)
+    return True
+
+
+def gleichwert_vergessen(daten):
+    """Ein Befehl, der NICHT vom Anwender kommt (Automatik, Fenster), stellt
+    das Geraet: dessen Merker gilt nicht mehr."""
+    if 'status' in daten:
+        return
+    for wort in daten:
+        if len(wort) in range(10, 20) and wort.isdigit():
+            for schluessel in [s for s in _GLEICHWERT if s[0] == int(wort)]:
+                _GLEICHWERT.pop(schluessel, None)
+
+
+def gleichwert_nachfuehren(device, daten, status, ok):
+    """Nach einem Befehl vom Anwender (ok: das Geraet hat geantwortet) bzw.
+    nach einer Statusabfrage den Merker nachziehen."""
+    nummer = getattr(device, 'id', None)
+    if status:
+        if not ok:
+            return
+        for schluessel in [s for s in _GLEICHWERT if s[0] == nummer]:
+            _wert, attr, soll, _t = _GLEICHWERT[schluessel]
+            if soll is None:
+                continue
+            ist = getattr(device, attr, None)
+            if ist is None:
+                continue
+            if schluessel[1] == 'temp':
+                try:
+                    gleich = abs(float(ist) - soll) < 0.01
+                except (TypeError, ValueError):
+                    gleich = False
+            else:
+                gleich = (ist == soll)
+            if not gleich:
+                _GLEICHWERT.pop(schluessel, None)
+        return
+    gid, arten, _nur_soll = gleichwert_zerlegen(daten)
+    if gid is None or gid != nummer:
+        return
+    jetzt = time.time()
+    for art, (wert, attr, soll) in arten.items():
+        if ok and _gw_wirksam(device, art, attr, soll):
+            _GLEICHWERT[(gid, art)] = (wert, attr, soll, jetzt)
+        else:
+            _GLEICHWERT.pop((gid, art), None)
+
+
 # send to Midea Appliance over LAN/WLAN
-async def send_to_midea(data):
+async def send_to_midea(data, hand=False):
     global _letzter_erfolg
+    # X-7: Automatik und Fenster stellen das Geraet - der Merker gilt nicht mehr.
+    if not hand:
+        gleichwert_vergessen(data)
     runtime = time.time()
     try:
         oldLox = 0
@@ -1657,6 +1901,12 @@ async def send_to_midea(data):
         else:
             _letzter_erfolg = 0
             _LOGGER.error("Device is offline")
+
+        # X-7: Merker nachziehen - nach einer Statusabfrage (anderer Wert
+        # am Geraet, etwa per Fernbedienung, beendet die Unterdrueckung)
+        # und nach einem Befehl vom Anwender.
+        if statusupdate == 1 or hand:
+            gleichwert_nachfuehren(device, data, statusupdate == 1, device.online == True)
 
         await send_to_loxone(device, support_mode)
 

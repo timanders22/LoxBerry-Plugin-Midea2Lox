@@ -2031,10 +2031,13 @@ function mi_vorlage_ausgang($cfg = null)
         return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
     };
     $o  = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
-    $o .= '<VirtualOut Title="Midea2Lox Befehle" Comment="Erzeugt vom LoxBerry-Plugin Midea2Lox ('
+    $o .= '<VirtualOut HintText="" Title="Midea2Lox Befehle" Comment="Erzeugt vom LoxBerry-Plugin Midea2Lox ('
         . date('d.m.Y') . '). Befehle gehen per UDP an den LoxBerry." Address="'
         . $x('/dev/udp/' . $ip . '/' . $port) . '" CmdInit="" CloseAfterSend="false" CmdSeparator="">' . $crlf;
-    $o .= "\t" . '<Info templateType="1" minVersion="17010727"/>' . $crlf;
+    /* templateType 3 = virtueller Ausgang. Bis 4.5.12 stand hier 1 (der Typ
+     * des UDP-Eingangs), abgeschrieben aus derselben Vorlage wie AWM-Abfuhr
+     * (x4_werkzeug/BERICHT.md, Hinweis h13). */
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
     foreach ($geraete as $d) {
         if (!isset($d['id']) || $d['id'] === '') { continue; }
         $name = mi_geraetename($d);
@@ -3011,6 +3014,15 @@ function mi_x2_markierung($x2, $form, $reiter)
         }
         $aus .= '<style>' . implode(', ', $w)
               . ' { outline: 2px solid #c62828; background: #fdecea; }</style>' . "\n";
+        /* B-Nachzug 01.10.2026 (Nr. 16/19): dazu Klasse und aria-invalid,
+         * damit auch ein Bildschirmleser das Feld als beanstandet nennt.
+         * Die Waehler sind dieselben wie oben (Namen aus mi_x2_pruefen). */
+        $aus .= '<script>document.addEventListener("DOMContentLoaded", function () {'
+              . ' var l = document.querySelectorAll('
+              . json_encode(implode(', ', $w), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)
+              . '); for (var i = 0; i < l.length; i++) {'
+              . ' l[i].classList.add("sm-beanstandet"); l[i].setAttribute("aria-invalid", "true"); }'
+              . ' });</script>' . "\n";
     }
     return $aus;
 }

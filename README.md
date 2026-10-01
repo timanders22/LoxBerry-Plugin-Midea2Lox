@@ -975,6 +975,23 @@ Zahl, die richtig aussieht, ist schlimmer als keine.
 
 ---
 
+## Was 4.5.12 behebt
+
+Verbesserungen aus dem Durchgang (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidung 19).
+Gemessen an einer Klimagerät-Attrappe; nicht am Gerät.
+
+* **Befehlsbremse:** Schickt Loxone denselben Sollwert (Ein/Aus, Temperatur, Modus,
+  Lüfter) innerhalb von 60 s noch einmal an dasselbe Klimagerät, geht er nicht
+  erneut hinaus; im Protokoll steht `UNVERAENDERT=1`. Ein anderer Wert geht sofort
+  hinaus. Display, Selbstreinigung, Statusabfrage und „Senden“ im Reiter Test
+  wirken immer.
+* Die Befehlsvorlage für Loxone trägt den Vorlagentyp eines virtuellen Ausgangs und
+  das Feld HintText; wer sie nutzt, importiert sie neu.
+* Ein MQTT-Präfix mit Schrägstrich am Anfang oder Ende wird beanstandet statt still
+  gekürzt gespeichert.
+* Beanstandete Felder sind zusätzlich für Bildschirmleser markiert (`aria-invalid`).
+
 ## Was 4.5.11 behebt
 
 Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
@@ -1215,6 +1232,25 @@ Eine Einstellung im Reiter **Automatik**, **ab Werk aus**.
   Wiederverbinden nur aus dem Speicher des Brokers kommt, löst nichts aus –
   erst ein frisch gesendetes Öffnen. Schweigt die Quelle oder meldet sie `-`,
   passiert nichts; der Reiter **Test** zeigt je Fenster, was ankommt.
+
+## Gleicher Befehl innerhalb von 60 s
+
+Schickt Loxone denselben Sollwert an dasselbe Gerät innerhalb von 60 s noch
+einmal, geht er nicht erneut an das Gerät; im Protokoll steht
+`UNVERAENDERT=1`. Ein anderer Wert geht sofort hinaus – es gibt keinen
+Mindestabstand.
+
+* **Gilt für Sollwerte:** Ein/Aus, Temperatur, Betriebsart, Lüfter,
+  Schwenken, Eco, Turbo und die übrigen Ein/Aus-Schalter, Feuchte,
+  Schwenkwinkel, Stufe. Ein Paket mit mehreren Werten wird nur unterdrückt,
+  wenn **alle** gleich sind.
+* **Wirkt immer:** `toggle_Display`, `toggle_self_clean`, `status` und der
+  Knopf **Senden** im Reiter **Test**.
+* **Gilt wieder als neu**, sobald die Automatik oder die Fensterkopplung
+  das Gerät stellt, eine Statusabfrage am Gerät einen anderen Wert findet
+  (etwa nach der Fernbedienung) oder der letzte Befehl scheiterte. Nach
+  einem Neustart des Dienstes geht der erste Befehl immer hinaus.
+* Eine unterdrückte Wiederholung setzt die Automatik nicht erneut aus.
 
 ## Installation
 
