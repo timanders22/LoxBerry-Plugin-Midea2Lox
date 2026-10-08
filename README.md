@@ -10,6 +10,18 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.13
+
+Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
+
+* **Statusübersicht über den Reitern:** Dienst (mit PID), Zahl der gefundenen Klimageräte,
+  gewählter Miniserver, UDP-Port und ob ein eigenes Midea-Konto eingetragen ist – aus Werten, die
+  die Seite ohnehin liest, ohne eigene Abfrage. Die Dienstzeile stand bisher oben im Reiter
+  Einstellungen und ist dorthin umgezogen.
+* **Zusammenfassung** des Plugins in einem grünen Kasten oben im Reiter Einstellungen.
+* Der Sprachdatei-Erzeuger ist auf den Stand der Sprachdateien nachgezogen.
+* Nur Oberfläche; gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
+
 ## Neu in 4.5.10
 
 Durchgang vom 30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer, MQTT).

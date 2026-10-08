@@ -856,6 +856,36 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 <div class="sm-alert sm-info"><?php echo $h; ?></div>
 <?php } ?>
 
+<?php /* Kopf (Entscheidung Nr. 43, seit 4.5.13): Statusuebersicht ueber den
+   Reitern, immer sichtbar. Die Dienstzeile stand bis 4.5.12 im Reiter
+   Einstellungen. Keine eigene Abfrage: PID, Geraete und Port stehen oben
+   schon fest; die Miniserver-Liste kommt aus der LoxBerry-Konfiguration. */
+$mi_kms = mi_miniserver_liste();
+$mi_knr = (int) substr((string) $mi_cfg['MINISERVER'], 10);
+$mi_kname = isset($mi_kms[$mi_knr]['Name']) ? $mi_kms[$mi_knr]['Name'] : $mi_cfg['MINISERVER'];
+$mi_kip = isset($mi_kms[$mi_knr]['IPAddress']) ? $mi_kms[$mi_knr]['IPAddress'] : '';
+?>
+<table class="sm-tbl" style="max-width:620px">
+<tr><th><?php echo mi_te('KOPF.EIGENSCHAFT'); ?></th><th><?php echo mi_te('KOPF.WERT'); ?></th></tr>
+<tr><td><?php echo mi_te('SETTINGS.HEAD_SERVICE'); ?></td>
+    <td><span class="sm-scheibe <?php echo $mi_pid !== null ? 'sm-gruen' : 'sm-rot'; ?>"></span>
+<?php
+if ($mi_pid !== null) {
+    echo sprintf(mi_t('UI.DIENST_LAEUFT_PID'), mi_e($mi_pid));
+} else {
+    echo sprintf(mi_t('UI.DIENST_GESTOPPT_SIEHE'), mi_te('COMMON.LABEL_LOG'));
+}
+?></td></tr>
+<tr><td><?php echo mi_te('SETTINGS.HEAD_DEVICES'); ?></td>
+    <td><?php echo count($mi_geraete); ?></td></tr>
+<tr><td><?php echo mi_te('UI.MINISERVER'); ?></td>
+    <td><?php echo mi_e($mi_kname) . ($mi_kip !== '' ? ' (' . mi_e($mi_kip) . ')' : ''); ?></td></tr>
+<tr><td><?php echo mi_te('UI.UDP_PORT'); ?></td>
+    <td><span class="sm-mono"><?php echo mi_e($mi_port); ?></span></td></tr>
+<tr><td><?php echo mi_te('SETTINGS.HEAD_MIDEA'); ?></td>
+    <td><?php echo mi_te($mi_cfg['MideaUser'] !== '' ? 'KOPF.KONTO_EIGEN' : 'KOPF.KONTO_SAMMEL'); ?></td></tr>
+</table>
+
 <!--
  * Reiter als echte Verweise, sm-active vom SERVER.
  *
@@ -889,16 +919,11 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 
 <!-- ============================ Einstellungen ============================ -->
 <div class="sm-pane<?php echo $mi_tab === 'tab-settings' ? ' sm-active' : ''; ?>" id="tab-settings">
+<div class="sm-hinweis"><?php echo mi_t('KOPF.WAS_IST_DAS'); ?></div>
 
 <h2><?php echo mi_te('SETTINGS.HEAD_SERVICE'); ?></h2>
-<p><span class="sm-scheibe <?php echo $mi_pid !== null ? 'sm-gruen' : 'sm-rot'; ?>"></span>
-<?php
-if ($mi_pid !== null) {
-    echo sprintf(mi_t('UI.DIENST_LAEUFT_PID'), mi_e($mi_pid));
-} else {
-    echo sprintf(mi_t('UI.DIENST_GESTOPPT_SIEHE'), mi_te('COMMON.LABEL_LOG'));
-}
-?></p>
+<?php /* Die Zeile "Der Dienst laeuft (PID n)" steht seit 4.5.13 in der
+   Statusuebersicht ueber den Reitern (Entscheidung Nr. 43). */ ?>
 <?php
 /* O9 (ab 4.5.10): KEIN Python-Start fuer diese Zeile. Bis 4.5.9 startete
  * jeder Seitenaufruf die venv-Python fuenfmal (Bericht Oberflaeche Befund
