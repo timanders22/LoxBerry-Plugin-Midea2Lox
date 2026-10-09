@@ -10,6 +10,17 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.14
+
+Baustein-Liste in der Schreibweise des Leitungswerkzeugs.
+
+* **Baustein-Liste (Reiter Einbindung in Loxone):** Die Spalte „Eingänge verbinden mit“ nennt die
+  Quellen in fester Form: `Ausgang von #5` statt „vom Baustein 5“ (ebenso #11, #13, #15), `I1 = #12, I2 = #14` statt
+  „aus 12 und aus 14“, `I1 = #7` statt „I1 = 7“; die virtuellen Eingänge #1 bis #7 und der virtuelle
+  Ausgang #8 haben keinen Eingang aus der Liste (`— (kommt über das Gateway)`, `—`).
+  Gleiche Bausteine, gleiche Verbindungen.
+* Gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
+
 ## Neu in 4.5.13
 
 Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
