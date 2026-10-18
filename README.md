@@ -10,6 +10,18 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.16
+
+Textnachzug zum Musterprojekt, Reiter **Einbindung in Loxone**, Seite „Midea2Lox“:
+
+* Der Status „Automatik (Midea)“ (Nr. 30) zeigt den Grund der Automatik jetzt selbst: der Virtuelle
+  Texteingang `Midea2Lox_automatik_grund` (Nr. 29) liegt an V4 des Status und erscheint in den Zeilen
+  „greift“ und „greift nicht“ als `<v4>`. Tabelle und Bild der Seite sind nachgezogen.
+* **Kein Neuimport nötig** – die Vorlagen sind unverändert. Wer die Seite schon nachgebaut hat, legt im
+  eigenen Projekt den Texteingang `Midea2Lox_automatik_grund` an V4 des Status „Automatik (Midea)“ und
+  übernimmt die beiden Statuszeilen aus der Tabelle.
+* Der Dienst ist unverändert.
+
 ## Neu in 4.5.15
 
 Einbindung in Loxone in Vollausstattung: drei Seiten aus dem LoxBerry-Plugins Musterprojekt mit drei Bildern und
