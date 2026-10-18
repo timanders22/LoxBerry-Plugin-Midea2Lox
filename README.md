@@ -10,6 +10,25 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.17
+
+Namen in Loxone bei einem Themen-Präfix mit Schrägstrich:
+
+* Das MQTT-Gateway macht aus jedem „/“ im Thema einen Unterstrich (am 18.10.2026 am LoxBerry gemessen). Bei einem
+  Präfix mit Ebenen wie `Haus/Klima` hießen die Eingänge der Vorlage „Midea Klimageraete“, die Namen in Schritt 3
+  und in der Spalte „Name“ der drei Musterseiten bisher `Haus/Klima_<Gerätenummer>_power_state` usw. – das Gateway
+  liefert die Werte aber an `Haus_Klima_<Gerätenummer>_power_state`, die Eingänge bekamen keinen Wert. Jetzt folgen
+  Vorlage, Schritt 3 und Tabellen der Regel des Gateways. Das MQTT-Thema selbst (Abo `Haus/Klima/#`) bleibt, wie es ist.
+* **Neuimport nur bei einem Präfix mit „/“:** Wer mit einem solchen Präfix die Vorlage „Midea Klimageraete“ schon
+  eingelesen hat, benennt die betroffenen Eingänge in Loxone von Hand um (Name wie in Schritt 3) oder liest die neu
+  erzeugte Vorlage ein und entfernt die alten Eingänge – ein zweiter Import legt doppelte Objekte an.
+* **Beim Werks-Präfix `Midea2Lox` und jedem Präfix ohne „/“ ändert sich nichts** – Vorlage und Reiter sind
+  bytegleich mit 4.5.16, kein Neuimport.
+* Dienst: Ist kein Broker erreichbar, sendet er per HTTP an virtuelle Eingänge. Auch dort steht jetzt in jedem
+  Namen ein Unterstrich statt eines Schrägstrichs, auch im Präfix (`Haus_Klima_<Gerätenummer>_power_state`,
+  Lebenszeichen `Haus_Klima_status_dienst`) – dieselben Namen wie in Schritt 3. Bisher blieb der Schrägstrich des
+  Präfixes stehen. Beim Werks-Präfix ändert sich auch hier nichts.
+
 ## Neu in 4.5.16
 
 Textnachzug zum Musterprojekt, Reiter **Einbindung in Loxone**, Seite „Midea2Lox“:

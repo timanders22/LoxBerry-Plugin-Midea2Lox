@@ -1604,6 +1604,23 @@ function mi_mqtt_topic($cfg = null)
 }
 
 /**
+ * Name, unter dem das MQTT-Gateway ein Thema in Loxone fuehrt: Praefix_Rest, jeder Schraegstrich und jedes % zu _
+ * (am 18.10.2026 am Geraet gemessen, /dev/shm/mqttgateway_topics.json: Midea2Lox/status/dienst ->
+ * Midea2Lox_status_dienst; Regeln/07 "Umbenennungsregel des MQTT-Gateways"). Dieselbe Funktion fuer die Titel der
+ * Eingangsvorlage (mi_vorlage()), Schritt 3 und die Spalte Name der Musterseiten im Reiter "Einbindung in Loxone".
+ *
+ * Pflegewelle 22 (4.5.17, Muster ap_gateway_name() aus APC-UPS 1.2.21): bis 4.5.16 ersetzte mi_vorlage() den
+ * Schraegstrich nur im Thema, nicht im Praefix. Bei einem Praefix mit Ebenen (Haus/Klima, von mi_wert_pruefen()
+ * erlaubt) hiess der Eingang der Vorlage Haus/Klima_<Nummer>_power_state, das Gateway lieferte an
+ * Haus_Klima_<Nummer>_power_state - der Eingang der Vorlage bekam keinen Wert. Beim Werkspraefix Midea2Lox ist das
+ * Ergebnis dasselbe wie vorher. Das MQTT-Thema selbst (Abo <Praefix>/#) bleibt mit Schraegstrich.
+ */
+function mi_gateway_name($topic, $rest)
+{
+    return str_replace(array('/', '%'), '_', $topic . '_' . $rest);
+}
+
+/**
  * Die je Geraet veroeffentlichten Werte - ALLE 28.
  *
  * Bis 4.2.12 nannte diese Liste 7 Werte, waehrend der Dienst 28 sendete. Der
@@ -1939,7 +1956,7 @@ function mi_vorlage($cfg = null)
         $name = mi_geraetename($d);
         foreach (mi_werte() as $wert => $w) {
             if ($w[3] === null) { continue; }   // Textwert, kein Eingang
-            $titel = $topic . '_' . $d['id'] . '_' . $wert;
+            $titel = mi_gateway_name($topic, $d['id'] . '_' . $wert);   // 4.5.17: wie das Gateway
             $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
             $o .= 'Comment="' . $x(mi_t($w[1]) . ' ' . $name) . '" Check=" " ';
             $o .= 'Signed="' . $w[3][0] . '" Analog="true" SourceValLow="0" DestValLow="0" '
@@ -1955,7 +1972,7 @@ function mi_vorlage($cfg = null)
         // entstand daraus ein virtueller Eingang mit leerem Signed, MinVal,
         // MaxVal und Unit - und beim Rendern dreimal "array offset on null".
         if ($w[2] === null) { continue; }
-        $titel = $topic . '_' . str_replace('/', '_', $wert);
+        $titel = mi_gateway_name($topic, $wert);   // 4.5.17: Schraegstriche auch im Praefix zu _
         $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
         $o .= 'Comment="' . $x(mi_t($w[1])) . '" Check=" " ';
         $o .= 'Signed="' . $w[2][0] . '" Analog="true" SourceValLow="0" DestValLow="0" '

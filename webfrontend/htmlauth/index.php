@@ -1278,7 +1278,7 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <table class="sm-tbl">
 <tr><th><?php echo mi_te('UI.TITEL_EINGANG'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th style="width:34%"><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
 <?php foreach (mi_werte() as $wert => $info) { ?>
-<tr><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $d['id'] . '_' . $wert); ?></td>
+<tr><td class="sm-mono"><?php echo mi_e(mi_gateway_name($mi_topic, $d['id'] . '_' . $wert)); ?></td>
     <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
 <?php } ?>
 </table>
@@ -1510,7 +1510,8 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
     return $aus;
 }
 
-/** Name einer Listenzeile mit eigenem Praefix und eigener Geraetenummer (Liste: Midea2Lox, 123456789012). */
+/** Name einer Listenzeile mit eigenem Praefix und eigener Geraetenummer (Liste: Midea2Lox, 123456789012).
+ *  4.5.17: Eingangsnamen ('gw') ueber mi_gateway_name() - ein Schraegstrich im Praefix wird _, wie im Gateway. */
 function mi_baustein_name($name, $art, $topic, $bsp)
 {
     $name = (string) $name;
@@ -1519,7 +1520,7 @@ function mi_baustein_name($name, $art, $topic, $bsp)
         if (strpos($rest, '123456789012_') === 0) {
             $rest = $bsp . '_' . substr($rest, strlen('123456789012_'));
         }
-        return $topic . '_' . $rest;
+        return mi_gateway_name($topic, $rest);
     }
     if ($art === 'bf' && strpos($name, 'Midea2Lox 123456789012 ') === 0) {
         return 'Midea2Lox ' . $bsp . ' ' . substr($name, strlen('Midea2Lox 123456789012 '));

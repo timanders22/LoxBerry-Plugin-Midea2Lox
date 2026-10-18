@@ -2161,7 +2161,9 @@ async def veroeffentlichen(paare, support_mode=0):
         if support_mode == 1:   # Loxone-Konfigurationen aus Midea2Lox V2.x
             name = ('Midea/' + thema).replace('/', '.')
         else:
-            name = MQTT_PRAEFIX + '_' + thema.replace('/', '_')
+            # 4.5.17: wie das MQTT-Gateway und der Reiter (mi_gateway_name()) - jeder Schraegstrich wird _,
+            # auch der im Praefix (Haus/Klima -> Haus_Klima_...). Bis 4.5.16 nur der im Thema.
+            name = (MQTT_PRAEFIX + '_' + thema).replace('/', '_')
         ziel = address_loxone + name + '/' + str(wert)
         try:
             # Ohne Zeitgrenze wartet requests unbegrenzt. Haengt der

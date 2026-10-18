@@ -162,17 +162,20 @@ def main(argv):
         ms = wert(cfg, 'MINISERVER', 'MINISERVER1')
         allg = configparser.RawConfigParser()
         allg.read(home_path + '/config/system/general.cfg')
+        # 4.5.17: Name wie im MQTT-Gateway und im Reiter - jeder Schraegstrich wird _, auch der im Praefix
+        # (Haus/Klima -> Haus_Klima_status_dienst). Bis 4.5.16 blieb er stehen.
+        name = (praefix + '_status_dienst').replace('/', '_')
         ziel = ('http://%s:%s@%s:%s/dev/sps/io/%s/%s'
                 % (quote(allg.get(ms, 'ADMIN'), safe=''),
                    quote(allg.get(ms, 'PASS'), safe=''),
                    allg.get(ms, 'IPADDRESS'), allg.get(ms, 'PORT'),
-                   praefix + '_status_dienst', laeuft))
+                   name, laeuft))
         r = requests.get(ziel, timeout=5)
         if r.status_code != 200:
             _LOGGER.warning('Lebenszeichen: Miniserver antwortete mit %s auf '
-                            '%s_status_dienst.', r.status_code, praefix)
+                            '%s.', r.status_code, name)
             return 1
-        _LOGGER.info('Lebenszeichen %s_status_dienst=%s ueber HTTP zugestellt.', praefix, laeuft)
+        _LOGGER.info('Lebenszeichen %s=%s ueber HTTP zugestellt.', name, laeuft)
         return 0
     except Exception as fehler:
         # Ehrlich: weder MQTT noch HTTP haben es zugestellt (M5). Zugangsdaten
