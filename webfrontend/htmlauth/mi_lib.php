@@ -1926,9 +1926,11 @@ function mi_vorlage($cfg = null)
         return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
     };
     $o  = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
-    $o .= '<VirtualInHttp HintText="" Title="Midea Klimageraete" Comment="Erzeugt vom LoxBerry-Plugin Midea2Lox ('
-        . date('d.m.Y') . '). Werte kommen vom MQTT-Gateway - Abo ' . $x($topic)
-        . '/# noetig." Address="http://localhost" PollingTime="604800">' . $crlf;
+    /* Welle Bild 19 (4.5.15, E7): Kommentar des Behaelters aus der Sprachdatei, ohne Datum (wie die
+     * Vorlage im LoxBerry-Plugins Musterprojekt; bis 4.5.14 fest im Code mit dem Tag der Erzeugung). */
+    $o .= '<VirtualInHttp HintText="" Title="Midea Klimageraete" Comment="'
+        . $x(sprintf(mi_t('UI.VI_KOMMENTAR'), $topic))
+        . '" Address="http://localhost" PollingTime="604800">' . $crlf;
     $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
     foreach ($geraete as $d) {
         if (!isset($d['id']) || $d['id'] === '') { continue; }
@@ -1976,34 +1978,43 @@ function mi_vorlage($cfg = null)
  */
 function mi_befehle()
 {
+    /* Welle Bild 19 (4.5.15, Entwurf Welle 19 md E5-E7): vierte Spalte = fester deutscher Titel des
+     * Vorlagenbefehls (Sprachregel 13.10.2026: Titel einer erzeugten Vorlage bleiben in jeder Sprache
+     * deutsch, wie im LoxBerry-Plugins Musterprojekt; bis 4.5.14 kam der Titel aus mi_t() und war unter
+     * englischer Oberflaeche englisch). Die Beschriftung im Reiter bleibt der Sprachschluessel.
+     * Solltemperatur seit 4.5.15 'temp.<v.1>' statt '<v>': der Dienst nimmt nur ein zweistelliges ganzes
+     * Wort oder 'temp.<Zahl>' - '22.5' oder '8' verwarf er. Neu 'humidity.<v.0>' (der Dienst kennt
+     * humidity.<0-100> seit langem, die Vorlage nicht). Analog ist jeder Befehl mit '<v'. Umlaute als
+     * UTF-8-Bytes: diese Datei bleibt in ihrem Code ASCII. */
     return array(
-        array('BEF.EIN_AUS',     'power.True',                       'power.False'),
-        array('BEF.MODE_AUTO',   'ac.operational_mode_enum.auto',    null),
-        array('BEF.MODE_COOL',   'ac.operational_mode_enum.cool',    null),
-        array('BEF.MODE_HEAT',   'ac.operational_mode_enum.heat',    null),
-        array('BEF.MODE_DRY',    'ac.operational_mode_enum.dry',     null),
-        array('BEF.MODE_FAN',    'ac.operational_mode_enum.fan_only', null),
-        array('BEF.FAN_AUTO',    'ac.fan_speed_enum.Auto',           null),
-        array('BEF.FAN_SILENT',  'ac.fan_speed_enum.Silent',         null),
-        array('BEF.FAN_LOW',     'ac.fan_speed_enum.Low',            null),
-        array('BEF.FAN_MEDIUM',  'ac.fan_speed_enum.Medium',         null),
-        array('BEF.FAN_HIGH',    'ac.fan_speed_enum.High',           null),
-        array('BEF.FAN_FULL',    'ac.fan_speed_enum.Full',           null),
-        array('BEF.SWING_OFF',   'ac.swing_mode_enum.Off',           null),
-        array('BEF.SWING_VERT',  'ac.swing_mode_enum.Vertical',      null),
-        array('BEF.SWING_HORZ',  'ac.swing_mode_enum.Horizontal',    null),
-        array('BEF.SWING_BOTH',  'ac.swing_mode_enum.Both',          null),
-        array('BEF.ECO',         'eco.True',                         'eco.False'),
-        array('BEF.TURBO',       'turbo.True',                       'turbo.False'),
-        array('BEF.SLEEP',       'sleep.True',                       'sleep.False'),
-        array('BEF.FOLLOW',      'follow.True',                      'follow.False'),
-        array('BEF.FREEZE',      'freeze.True',                      'freeze.False'),
-        array('BEF.PURIFIER',    'purifier.True',                    'purifier.False'),
-        array('BEF.TONE',        'tone.True',                        'tone.False'),
-        array('BEF.DISPLAY',     'toggle_Display',                   null),
-        array('BEF.SELFCLEAN',   'toggle_self_clean',                null),
-        array('BEF.STATUS',      'status',                           null),
-        array('BEF.TEMP',        '<v>',                              null),
+        array('BEF.EIN_AUS',     'power.True',                          'power.False',   "Ein- und ausschalten"),
+        array('BEF.MODE_AUTO',   'ac.operational_mode_enum.auto',       null,            "Betriebsart Automatik"),
+        array('BEF.MODE_COOL',   'ac.operational_mode_enum.cool',       null,            "Betriebsart K\xc3\xbchlen"),
+        array('BEF.MODE_HEAT',   'ac.operational_mode_enum.heat',       null,            "Betriebsart Heizen"),
+        array('BEF.MODE_DRY',    'ac.operational_mode_enum.dry',        null,            "Betriebsart Entfeuchten"),
+        array('BEF.MODE_FAN',    'ac.operational_mode_enum.fan_only',   null,            "Betriebsart nur L\xc3\xbcften"),
+        array('BEF.FAN_AUTO',    'ac.fan_speed_enum.Auto',              null,            "L\xc3\xbcfterstufe Automatik"),
+        array('BEF.FAN_SILENT',  'ac.fan_speed_enum.Silent',            null,            "L\xc3\xbcfterstufe leise"),
+        array('BEF.FAN_LOW',     'ac.fan_speed_enum.Low',               null,            "L\xc3\xbcfterstufe niedrig"),
+        array('BEF.FAN_MEDIUM',  'ac.fan_speed_enum.Medium',            null,            "L\xc3\xbcfterstufe mittel"),
+        array('BEF.FAN_HIGH',    'ac.fan_speed_enum.High',              null,            "L\xc3\xbcfterstufe hoch"),
+        array('BEF.FAN_FULL',    'ac.fan_speed_enum.Full',              null,            "L\xc3\xbcfterstufe h\xc3\xb6chste"),
+        array('BEF.SWING_OFF',   'ac.swing_mode_enum.Off',              null,            "Schwenken aus"),
+        array('BEF.SWING_VERT',  'ac.swing_mode_enum.Vertical',         null,            "Schwenken senkrecht"),
+        array('BEF.SWING_HORZ',  'ac.swing_mode_enum.Horizontal',       null,            "Schwenken waagerecht"),
+        array('BEF.SWING_BOTH',  'ac.swing_mode_enum.Both',             null,            "Schwenken in beide Richtungen"),
+        array('BEF.ECO',         'eco.True',                            'eco.False',     "Sparbetrieb"),
+        array('BEF.TURBO',       'turbo.True',                          'turbo.False',   "Schnellbetrieb"),
+        array('BEF.SLEEP',       'sleep.True',                          'sleep.False',   "Nachtbetrieb"),
+        array('BEF.FOLLOW',      'follow.True',                         'follow.False',  "Regelung nach Fernbedienung"),
+        array('BEF.FREEZE',      'freeze.True',                         'freeze.False',  "Frostschutz"),
+        array('BEF.PURIFIER',    'purifier.True',                       'purifier.False', "Luftreinigung"),
+        array('BEF.TONE',        'tone.True',                           'tone.False',    "Quittungston"),
+        array('BEF.DISPLAY',     'toggle_Display',                      null,            "Anzeige am Ger\xc3\xa4t umschalten"),
+        array('BEF.SELFCLEAN',   'toggle_self_clean',                   null,            "Selbstreinigung starten"),
+        array('BEF.STATUS',      'status',                              null,            "Zustand abfragen"),
+        array('BEF.TEMP',        'temp.<v.1>',                          null,            "Solltemperatur stufenlos"),
+        array('BEF.HUM',         'humidity.<v.0>',                      null,            "Sollfeuchte stufenlos"),
     );
 }
 
@@ -2031,8 +2042,9 @@ function mi_vorlage_ausgang($cfg = null)
         return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
     };
     $o  = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
-    $o .= '<VirtualOut HintText="" Title="Midea2Lox Befehle" Comment="Erzeugt vom LoxBerry-Plugin Midea2Lox ('
-        . date('d.m.Y') . '). Befehle gehen per UDP an den LoxBerry." Address="'
+    // Welle Bild 19 (4.5.15, E7): Kommentar aus der Sprachdatei, ohne Datum (wie mi_vorlage()).
+    $o .= '<VirtualOut HintText="" Title="Midea2Lox Befehle" Comment="'
+        . $x(mi_t('UI.VQ_KOMMENTAR')) . '" Address="'
         . $x('/dev/udp/' . $ip . '/' . $port) . '" CmdInit="" CloseAfterSend="false" CmdSeparator="">' . $crlf;
     /* templateType 3 = virtueller Ausgang. Bis 4.5.12 stand hier 1 (der Typ
      * des UDP-Eingangs), abgeschrieben aus derselben Vorlage wie AWM-Abfuhr
@@ -2042,7 +2054,8 @@ function mi_vorlage_ausgang($cfg = null)
         if (!isset($d['id']) || $d['id'] === '') { continue; }
         $name = mi_geraetename($d);
         foreach (mi_befehle() as $b) {
-            $titel = 'Midea2Lox ' . $d['id'] . ' ' . mi_t($b[0]);
+            // Welle Bild 19 (E7): fester deutscher Titel aus mi_befehle(), nicht mi_t($b[0]).
+            $titel = 'Midea2Lox ' . $d['id'] . ' ' . $b[3];
             /* LEERZEICHEN, nicht Komma.
              *
              * Am laufenden Dienst gemessen (31.08.2026): der Empfaenger
@@ -2064,7 +2077,7 @@ function mi_vorlage_ausgang($cfg = null)
             $o .= 'Comment="' . $x($name) . '" ';
             $o .= 'CmdOn="' . $x($ein) . '" CmdOnMethod="UDP" ';
             $o .= 'CmdOff="' . $x($aus) . '" CmdOffMethod="UDP" ';
-            $o .= 'Analog="' . ($b[1] === '<v>' ? 'true' : 'false') . '" ';
+            $o .= 'Analog="' . (strpos($b[1], '<v') !== false ? 'true' : 'false') . '" ';
             $o .= 'Repeat="0" RepeatRate="0" HintText=""/>' . $crlf;
         }
     }

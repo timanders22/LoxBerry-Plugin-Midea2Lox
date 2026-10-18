@@ -10,6 +10,37 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.15
+
+Einbindung in Loxone in Vollausstattung: drei Seiten aus dem LoxBerry-Plugins Musterprojekt mit drei Bildern und
+je einer Schritt-für-Schritt-Anleitung („So übernehmen Sie diese Seite“). Sie ersetzen die Baustein-Liste mit
+20 Zeilen in Schritt 6 des Reiters.
+
+* **Seite „Midea2Lox“** (30 Zeilen): läuft das Plugin, antwortet das Klimagerät – Analogwertvalidierung am
+  Lebenszeichen `status/zaehler` (Tmc 300 s) und „online“ des Geräts, 600 s Bestätigung, eine Meldung und ein
+  Status; Ein/Aus mit Fenster- und Abwesenheitssperre; Solltemperatur; Rückmeldung der Automatik.
+* **Seite „Midea2Lox Betrieb“** (27 Zeilen): Betriebsart, Lüfterstufe und Schwenken über Radiotasten,
+  Sollfeuchte, Rückmeldung des Geräts als Virtuelle Texteingänge, „Jetzt abfragen“.
+* **Seite „Midea2Lox Komfort und Energie“** (33 Zeilen): Spar-, Schnell- und Nachtbetrieb, Frostschutz,
+  Luftreinigung, Regelung nach Fernbedienung, Quittungston, Anzeige, Selbstreinigung, Filter-Meldung, Leistung
+  und Energie mit Statistik.
+* **Berichtigt – wer nach der bisherigen Liste gebaut hat, bitte ansehen:** die Formel „Alter des
+  Lebenszeichens“ (#13) hatte einen Eingang „T“, den es an einer Formel nicht gibt, und das falsche Vorzeichen –
+  „Plugin steht“ meldete nie. Jetzt prüft eine Analogwertvalidierung das Lebenszeichen `status/zaehler`.
+  „online“ kommt nur mit eingestelltem Abfragetakt (Reiter Einstellungen, 60 s empfohlen) – ohne ihn meldete die
+  alte Liste nach 10 Minuten Dauerstörung. Intelligente Raumregelung und Merker als Quelle sind entfallen.
+* **Befehlsvorlage (Ausgang) – Befehl von Hand ändern oder neu importieren:** „Solltemperatur stufenlos“ schickt
+  `<Nummer> temp.<v.1>` statt `<Nummer> <v>` (halbe Grad und einstellige Werte verwarf der Dienst); neu ist
+  „Sollfeuchte stufenlos“ (`<Nummer> humidity.<v.0>`). Wer die Vorlage schon importiert hat, ändert den
+  Solltemperatur-Befehl von Hand und legt die Sollfeuchte von Hand an – ein zweiter Import legt alle Befehle
+  doppelt an. Die Befehlstitel stehen in jeder Sprache deutsch wie im Musterprojekt (nur unter englischer
+  Oberfläche sichtbar); die Kommentare beider Behälter kommen aus der Sprachdatei, ohne Datum.
+* Reiter Einbindung: Schritte 1, 3, 4, 5 und der Hinweis zur Vorlage berichtigt (der Rückfallweg ohne Broker ist
+  HTTP, nicht UDP; die Eingangsvorlage trägt sieben zusätzliche Eingänge; Lebenszeichen statt „Baustein 13“).
+* Englische Oberfläche: die Bausteinnamen stehen deutsch wie im Musterprojekt.
+* Der Dienst ist unverändert. Gerendert unter PHP 7.4, 8.4 und 8.5, Vorlagen gegen das Musterprojekt geprüft;
+  nicht am Gerät (kein Midea-Klimagerät im Haus).
+
 ## Neu in 4.5.14
 
 Baustein-Liste in der Schreibweise des Leitungswerkzeugs.
@@ -1284,8 +1315,10 @@ Mindestabstand.
 4. Reiter **Test**: Selbstprüfung ansehen. Erst wenn dort kein **Kreuz** mehr
    steht, lohnt der Weg nach Loxone. Ein **Strich** ist kein Kreuz - er heißt
    nur, dass sich die Frage nicht messen ließ.
-5. Reiter **Einbindung in Loxone**: Schritt für Schritt, mit vollständiger
-   Baustein-Liste zum Nachbauen.
+5. Reiter **Einbindung in Loxone**: Schritt für Schritt, mit drei fertig verbundenen Seiten
+   („Midea2Lox“, „Midea2Lox Betrieb“, „Midea2Lox Komfort und Energie“) aus dem
+   [LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt), einer gemeinsamen
+   Projektdatei mit allen Plugin-Seiten und Vorlagen.
 
 ## Voraussetzungen
 

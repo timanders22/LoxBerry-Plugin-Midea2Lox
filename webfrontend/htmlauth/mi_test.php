@@ -481,7 +481,8 @@ function mi_schalten($cfg, $id, $befehl, $trocken)
     }
     $erlaubt = array();
     foreach (mi_befehle() as $b) {
-        if ($b[1] !== '<v>') { $erlaubt[] = $b[1]; }
+        // Seit 4.5.15 jeder Befehl mit '<v' (temp.<v.1>, humidity.<v.0>): ein Platzhalter, kein Befehl.
+        if (strpos($b[1], '<v') === false) { $erlaubt[] = $b[1]; }
         if ($b[2] !== null)  { $erlaubt[] = $b[2]; }
     }
     if (!in_array((string) $befehl, $erlaubt, true)) {

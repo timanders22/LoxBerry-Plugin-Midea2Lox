@@ -758,6 +758,14 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-wrap h2 { color: #4f7d17; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px;
   font-size: 1.15em; margin: 22px 0 8px; }
 .sm-wrap h3 { color: #4f7d17; font-size: 1.02em; margin: 16px 0 6px; }
+/* Welle Bild 19 (4.5.15): Seiten, Schritte, Hinweise und Bild je Baustein-Liste (Bauart Sprachsteuerung 0.12.5). */
+.sm-wrap h4.sm-h4 { color: #4f7d17; font-size: 0.98em; font-weight: 700; margin: 22px 0 4px;
+    padding-top: 10px; border-top: 1px solid #e0e0e0; }
+.sm-schritte { margin: 6px 0 0 18px; padding: 0; }
+.sm-schritte li { margin: 3px 0; }
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 .sm-small { font-size: 0.88em; color: #555; }
 .sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
@@ -1326,35 +1334,235 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT6'); ?></b><br><br>
 <?php echo mi_t('UI.SCHRITT6_TEXT'); ?>
+<?php
+/**
+ * Die Baustein-Listen von Schritt 6 - Welle Bild 19 (4.5.15, Hausherr 11.10.2026: Vollausstattung, ein
+ * absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 19 md, E1-E18, 18.10.2026). DREI
+ * Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt, Abschnitte "Midea2Lox" 30,
+ * "Midea2Lox Betrieb" 27, "Midea2Lox Komfort und Energie" 33 Zeilen). Bis 4.5.14 stand hier EINE Liste mit
+ * 20 Zeilen (Schluessel UI.BL_*). Berichtigt gegen sie: die Formel "Alter des Lebenszeichens" hatte einen
+ * Eingang T, den es an einer Formel nicht gibt, und das falsche Vorzeichen - "Plugin steht" meldete nie (jetzt
+ * Analogwertvalidierung am Lebenszeichen status/zaehler); "online" kommt nur mit Abfragetakt; die
+ * Solltemperatur schickt temp.<v.1>; Intelligente Raumregelung und Merker als Quelle hatten kein Muster.
+ *
+ * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge" (Zeilen mit
+ * Prozentzeichen dort doppelt und ueber sprintf() geholt, angezeigt mit einem; deutsch wortgleich mit der Liste;
+ * Bausteinnamen auch englisch deutsch). DIE NAMEN WERDEN GERECHNET, NICHT ABGESCHRIEBEN: 'gw' = Name eines
+ * Eingangs aus dem MQTT-Gateway (Praefix aus dem Reiter MQTT, Nummer des ersten Geraets - wie mi_vorlage() sie
+ * bildet), 'bf' = Titel eines Vorlagenbefehls (Nummer des ersten Geraets - wie mi_vorlage_ausgang()). Mit dem
+ * Werkspraefix und ohne Geraet steht genau der Name der Liste da (Beispielnummer 123456789012).
+ *
+ * Rueckgabe: Liste von array('seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter, Eingaenge),
+ * ...), 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (unten maskiert), die Hinweise
+ * freigegebenes HTML aus der Sprachdatei.
+ */
+function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
+{
+    // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
+    $seiten = array(
+        array('Midea2Lox', 'einbindung_loxone.png', array(
+            array(mi_t('BAUSTEIN.Z1_01'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_02'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_03'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_04')),
+            array(mi_t('BAUSTEIN.Z1_05')),
+            array(mi_t('BAUSTEIN.Z1_06')),
+            array(mi_t('BAUSTEIN.Z1_07')),
+            array(mi_t('BAUSTEIN.Z1_08')),
+            array(mi_t('BAUSTEIN.Z1_09')),
+            array(mi_t('BAUSTEIN.Z1_10')),
+            array(mi_t('BAUSTEIN.Z1_11'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_12'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_13'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_14'), 'gw'),
+            array(sprintf(mi_t('BAUSTEIN.Z1_15')), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_16')),
+            array(mi_t('BAUSTEIN.Z1_17')),
+            array(mi_t('BAUSTEIN.Z1_18')),
+            array(mi_t('BAUSTEIN.Z1_19')),
+            array(mi_t('BAUSTEIN.Z1_20')),
+            array(mi_t('BAUSTEIN.Z1_21')),
+            array(mi_t('BAUSTEIN.Z1_22'), 'bf'),
+            array(mi_t('BAUSTEIN.Z1_23')),
+            array(mi_t('BAUSTEIN.Z1_24'), 'bf'),
+            array(sprintf(mi_t('BAUSTEIN.Z1_25'))),
+            array(mi_t('BAUSTEIN.Z1_26'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_27'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_28'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_29'), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_30')),
+        ), array(
+            'BAUSTEIN.SEITE1_SCHRITT1',
+            'BAUSTEIN.SEITE1_SCHRITT2',
+            'BAUSTEIN.SEITE1_SCHRITT3',
+            'BAUSTEIN.SEITE1_SCHRITT4',
+            'BAUSTEIN.SEITE1_SCHRITT5',
+            'BAUSTEIN.SEITE1_SCHRITT6',
+            'BAUSTEIN.SEITE1_SCHRITT7',
+        ), array(
+            'BAUSTEIN.SEITE1_H1',
+            'BAUSTEIN.SEITE1_H2',
+            'BAUSTEIN.SEITE1_H3',
+            'BAUSTEIN.SEITE1_H4',
+            'BAUSTEIN.SEITE1_H5',
+            'BAUSTEIN.SEITE1_H6',
+            'BAUSTEIN.SEITE1_H7',
+            'BAUSTEIN.SEITE1_H8',
+            'BAUSTEIN.SEITE1_H9',
+        )),
+        array('Midea2Lox Betrieb', 'einbindung_loxone_betrieb.png', array(
+            array(mi_t('BAUSTEIN.Z2_01')),
+            array(mi_t('BAUSTEIN.Z2_02'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_03'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_04'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_05'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_06'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_07')),
+            array(mi_t('BAUSTEIN.Z2_08'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_09'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_10'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_11'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_12'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_13'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_14')),
+            array(mi_t('BAUSTEIN.Z2_15'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_16'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_17'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_18'), 'bf'),
+            array(mi_t('BAUSTEIN.Z2_19')),
+            array(mi_t('BAUSTEIN.Z2_20'), 'bf'),
+            array(sprintf(mi_t('BAUSTEIN.Z2_21')), 'gw'),
+            array(mi_t('BAUSTEIN.Z2_22'), 'gw'),
+            array(mi_t('BAUSTEIN.Z2_23'), 'gw'),
+            array(mi_t('BAUSTEIN.Z2_24'), 'gw'),
+            array(mi_t('BAUSTEIN.Z2_25')),
+            array(mi_t('BAUSTEIN.Z2_26'), 'bf'),
+            array(sprintf(mi_t('BAUSTEIN.Z2_27'))),
+        ), array(
+            'BAUSTEIN.SEITE2_SCHRITT1',
+            'BAUSTEIN.SEITE2_SCHRITT2',
+            'BAUSTEIN.SEITE2_SCHRITT3',
+            'BAUSTEIN.SEITE2_SCHRITT4',
+        ), array(
+            'BAUSTEIN.SEITE2_H1',
+            'BAUSTEIN.SEITE2_H2',
+            'BAUSTEIN.SEITE2_H3',
+            'BAUSTEIN.SEITE2_H4',
+        )),
+        array('Midea2Lox Komfort und Energie', 'einbindung_loxone_komfort_energie.png', array(
+            array(mi_t('BAUSTEIN.Z3_01')),
+            array(mi_t('BAUSTEIN.Z3_02'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_03')),
+            array(mi_t('BAUSTEIN.Z3_04'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_05')),
+            array(mi_t('BAUSTEIN.Z3_06'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_07')),
+            array(mi_t('BAUSTEIN.Z3_08'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_09')),
+            array(mi_t('BAUSTEIN.Z3_10'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_11')),
+            array(mi_t('BAUSTEIN.Z3_12'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_13')),
+            array(mi_t('BAUSTEIN.Z3_14'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_15')),
+            array(mi_t('BAUSTEIN.Z3_16'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_17')),
+            array(mi_t('BAUSTEIN.Z3_18'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_19'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_20'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_21'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_22'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_23'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_24'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_25'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_26'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_27')),
+            array(mi_t('BAUSTEIN.Z3_28'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_29')),
+            array(mi_t('BAUSTEIN.Z3_30'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_31'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_32'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_33')),
+        ), array(
+            'BAUSTEIN.SEITE3_SCHRITT1',
+            'BAUSTEIN.SEITE3_SCHRITT2',
+            'BAUSTEIN.SEITE3_SCHRITT3',
+        ), array(
+            'BAUSTEIN.SEITE3_H1',
+            'BAUSTEIN.SEITE3_H2',
+            'BAUSTEIN.SEITE3_H3',
+            'BAUSTEIN.SEITE3_H4',
+        )),
+    );
+    $aus = array();
+    foreach ($seiten as $mi_s) {
+        $mi_zeilen = array();
+        foreach ($mi_s[2] as $mi_i => $mi_z) {
+            $mi_c = array_pad(explode(' | ', $mi_z[0], 4), 4, '');
+            if (isset($mi_z[1])) {
+                $mi_c[1] = mi_baustein_name($mi_c[1], $mi_z[1], $mi_bl_topic, $mi_bl_bsp);
+            }
+            $mi_zeilen[] = array_merge(array($mi_i + 1), $mi_c);
+        }
+        $aus[] = array('seite' => $mi_s[0], 'bild' => $mi_s[1], 'zeilen' => $mi_zeilen,
+                       'schritte' => array_map('mi_t', $mi_s[3]), 'hinweise' => array_map('mi_t', $mi_s[4]));
+    }
+    return $aus;
+}
+
+/** Name einer Listenzeile mit eigenem Praefix und eigener Geraetenummer (Liste: Midea2Lox, 123456789012). */
+function mi_baustein_name($name, $art, $topic, $bsp)
+{
+    $name = (string) $name;
+    if ($art === 'gw' && strpos($name, 'Midea2Lox_') === 0) {
+        $rest = substr($name, strlen('Midea2Lox_'));
+        if (strpos($rest, '123456789012_') === 0) {
+            $rest = $bsp . '_' . substr($rest, strlen('123456789012_'));
+        }
+        return $topic . '_' . $rest;
+    }
+    if ($art === 'bf' && strpos($name, 'Midea2Lox 123456789012 ') === 0) {
+        return 'Midea2Lox ' . $bsp . ' ' . substr($name, strlen('Midea2Lox 123456789012 '));
+    }
+    return $name;
+}
+
+/** Eine Seite: Ueberschrift (= Seitenname in Config), Kasten, Tabelle, Hinweise, Bild, Link. */
+function mi_bausteinseite_zeigen($mi_bs)
+{ ?>
+<h4 class="sm-h4"><?php echo mi_e($mi_bs['seite']); ?></h4>
+<div class="sm-hinweis"><b><?php echo mi_te('UI.SCHRITTE_TITEL'); ?></b>
+<ol class="sm-schritte">
+<?php foreach ($mi_bs['schritte'] as $mi_bx) { ?>
+<li><?php echo mi_e($mi_bx); ?></li>
+<?php } ?>
+</ol></div>
 <div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th>#</th><th><?php echo mi_te('UI.BAUSTEIN_TYP'); ?></th><th><?php echo mi_te('UI.NAME_VORSCHLAG'); ?></th><th><?php echo mi_te('UI.PARAMETER'); ?></th><th><?php echo mi_te('UI.EINGAENGE'); ?></th></tr>
-<tr><td>1</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_indoor_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>2</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_outdoor_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>3</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_target_temperature'); ?></td><td><?php echo mi_te('UI.BL_P_TEMP1'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>4</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_power_state'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>5</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_online'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>6</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ok'); ?></td><td><?php echo mi_te('UI.BL_P_DIGITAL'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>7</td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_status_ts'); ?></td><td><?php echo mi_te('UI.BL_P_SEKUNDEN'); ?></td><td><?php echo mi_te('UI.BL_GATEWAY'); ?></td></tr>
-<tr><td>8</td><td><?php echo mi_te('UI.BL_VA'); ?></td><td>Midea2Lox</td><td><?php echo mi_te('UI.BL_P_ADRESSE'); ?> <span class="sm-mono">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></span></td><td>&mdash;</td></tr>
-<tr><td>9</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_EINAUS'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ' power.True'); ?> / <?php echo mi_e($mi_bsp . ' power.False'); ?></td><td><?php echo mi_te('UI.BL_VOM_SCHALTER'); ?></td></tr>
-<tr><td>10</td><td><?php echo mi_te('UI.BL_VAB'); ?></td><td><?php echo mi_te('UI.BL_N_SOLL'); ?></td><td class="sm-mono"><?php echo mi_e($mi_bsp . ' <v>'); ?></td><td><?php echo mi_te('UI.BL_VON_18'); ?></td></tr>
-<tr><td>11</td><td><?php echo mi_te('UI.BL_NICHT'); ?></td><td><?php echo mi_te('UI.BL_N_OFFLINE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_EINGANG5'); ?></td></tr>
-<tr><td>12</td><td><?php echo mi_te('UI.BL_EINVERZ'); ?></td><td><?php echo mi_te('UI.BL_N_AUSFALL'); ?></td><td><?php echo mi_te('UI.BL_P_VERZ'); ?> <b>600</b> s</td><td><?php echo mi_te('UI.BL_EINGANG11'); ?></td></tr>
-<tr><td>13</td><td><?php echo mi_te('UI.BL_FORMEL'); ?></td><td><?php echo mi_te('UI.BL_N_ALTER'); ?></td><td class="sm-mono">(T-1230768000)-I1</td><td><?php echo mi_te('UI.BL_ALTER_EIN'); ?></td></tr>
-<tr><td>14</td><td><?php echo mi_te('UI.BL_SCHWELLE'); ?></td><td><?php echo mi_te('UI.BL_N_ZUALT'); ?></td><td><?php echo mi_te('UI.BL_P_SCHWELLE'); ?></td><td><?php echo mi_te('UI.BL_ALTER_AUS'); ?></td></tr>
-<tr><td>15</td><td><?php echo mi_te('UI.BL_ODER_TYP'); ?></td><td><?php echo mi_te('UI.BL_N_SAMMEL'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_ODER'); ?></td></tr>
-<tr><td>16</td><td><?php echo mi_te('UI.BL_STATUS'); ?></td><td><?php echo mi_te('UI.BL_N_STATUS'); ?></td><td><?php echo mi_te('UI.BL_P_STATUS'); ?></td><td>v1 = #1, v2 = #3</td></tr>
-<tr><td>17</td><td><?php echo mi_te('UI.BL_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_N_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_P_BENACHR'); ?></td><td><?php echo mi_te('UI.BL_VOM_ODER'); ?></td></tr>
-<tr><td>18 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_N_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_P_RAUMREG'); ?></td><td><?php echo mi_te('UI.BL_RAUMREG_EIN'); ?></td></tr>
-<tr><td>19 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_MERKER'); ?></td><td><?php echo mi_te('UI.BL_N_FREIGABE'); ?></td><td><?php echo mi_te('UI.BL_KEINE'); ?></td><td><?php echo mi_te('UI.BL_FREIGABE_EIN'); ?></td></tr>
-<tr><td>20 <i><?php echo mi_te('UI.OPTIONAL'); ?></i></td><td><?php echo mi_te('UI.BL_VE'); ?></td><td class="sm-mono"><?php echo mi_e($mi_topic . '_' . $mi_bsp . '_real_time_power_usage'); ?></td><td><?php echo mi_te('UI.BL_P_WATT'); ?></td><td><?php echo mi_te('UI.BL_ENERGIE_EIN'); ?></td></tr>
+<tr><th>#</th><th><?php echo mi_te('UI.BAUSTEIN_TYP'); ?></th><th><?php echo mi_te('UI.NAME_VORSCHLAG'); ?></th>
+    <th><?php echo mi_te('UI.PARAMETER'); ?></th><th><?php echo mi_te('UI.EINGAENGE'); ?></th></tr>
+<?php foreach ($mi_bs['zeilen'] as $mi_bz) { ?>
+<tr><td><?php echo (int) $mi_bz[0]; ?></td><td><?php echo mi_e($mi_bz[1]); ?></td><td><?php echo mi_e($mi_bz[2]); ?></td>
+    <td><?php echo mi_e($mi_bz[3]); ?></td><td><?php echo mi_e($mi_bz[4]); ?></td></tr>
+<?php } ?>
 </table>
 </div>
-<br>
-<b><?php echo mi_te('UI.BL_STATUSTEXT'); ?></b>
-<pre class="sm-pre"><?php echo mi_e(mi_t('UI.BL_STATUSTEXT_MUSTER')); ?></pre>
-<?php echo mi_t('UI.BL_ERLAEUTERUNGEN'); ?>
+<div class="sm-warnung"><b><?php echo mi_te('UI.HINWEISE_TITEL'); ?></b>
+<ul class="sm-schritte">
+<?php foreach ($mi_bs['hinweise'] as $mi_bx) { ?>
+<li><?php echo $mi_bx; ?></li>
+<?php } ?>
+</ul></div>
+<figure class="sm-bild">
+<img src="<?php echo mi_e($mi_bs['bild']); ?>" alt="<?php echo mi_e(sprintf(mi_t('UI.BILD_ALT'), $mi_bs['seite'])); ?>" loading="lazy">
+<figcaption><?php echo mi_e(sprintf(mi_t('UI.BILD_UNTERSCHRIFT'), $mi_bs['seite'])); ?></figcaption>
+</figure>
+<p class="sm-hilfe"><?php echo mi_t('UI.MUSTERPROJEKT'); ?></p>
+<?php }
+foreach (mi_bausteinliste($mi_topic, $mi_bsp) as $mi_bs) {
+    mi_bausteinseite_zeigen($mi_bs);
+}
+?>
 </div>
 
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT7'); ?></b><br><br>
@@ -1602,7 +1810,7 @@ foreach (mi_pruefungen($mi_cfg) as $c) {
   <label for="schalt_bef"><?php echo mi_t('UI.SCHALT_BEFEHL'); ?></label>
   <select data-role="none" id="schalt_bef" name="schalt_bef">
 <?php foreach (mi_befehle() as $b) {
-        if ($b[1] === '<v>') { continue; } ?>
+        if (strpos($b[1], '<v') !== false) { continue; } ?>
     <option value="<?php echo mi_e($b[1]); ?>"><?php echo mi_e(mi_t($b[0]) . ' - ' . $b[1]); ?></option>
 <?php   if ($b[2] !== null) { ?>
     <option value="<?php echo mi_e($b[2]); ?>"><?php echo mi_e(mi_t($b[0]) . ' - ' . $b[2]); ?></option>
