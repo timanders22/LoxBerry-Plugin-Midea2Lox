@@ -125,6 +125,7 @@ function mi_paths()
             'leben'     => $basis . '/data/lebenszeichen.json',
             'automatik' => $basis . '/data/automatik.json',
             'fenster'   => $basis . '/data/fenster.json',
+            'anwesenheit' => $basis . '/data/anwesenheit.json',
             'bin'       => $basis . '/bin',
             'venv'      => '',
             'daemon'    => '',
@@ -176,6 +177,8 @@ function mi_paths()
         // c1 (Verbesserungsbau 30.09.2026): der Stand der Kopplung
         // "Fenster offen -> Geraet aus", geschrieben vom Dienst.
         'fenster'   => $home . '/data/plugins/' . $ordner . '/fenster.json',
+        // Gruppe 15 (4.5.18, V1): der Stand der Anwesenheit, geschrieben vom Dienst.
+        'anwesenheit' => $home . '/data/plugins/' . $ordner . '/anwesenheit.json',
         'bin'     => $home . '/bin/plugins/' . $ordner,
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
         'daemon'  => $home . '/system/daemons/plugins/' . $ordner,
@@ -468,6 +471,16 @@ function mi_vorgaben()
         'fenster_ein'           => '0',
         'fenster_frist'         => '60',
         'fenster_zuordnung'     => '',
+        /* Gruppe 15 (4.5.18): Befehle ueber MQTT (zwei Haken) und die Anwesenheit (V1) - AB WERK AUS, neue
+         * Schluessel HINTEN. Jeder neue Schluessel steht auch in config/midea2lox.cfg, und deren SHA256 in
+         * MI_VORGABE_MIDEA aller drei Hakenskripte (M23). Verschiebung in Zehntelkelvin (30 = 3,0 K). */
+        'befehle_mqtt_ein'        => '0',
+        'befehle_eingreifend_ein' => '0',
+        'anwesenheit_ein'         => '0',
+        'anwesenheit_verhalten'   => 'verschieben',
+        'anwesenheit_verschiebung' => '30',
+        'anwesenheit_frist'       => '300',
+        'anwesenheit_geraete'     => '',
     );
 }
 
@@ -731,6 +744,26 @@ function mi_wert_pruefen($schluessel, $wert)
         case 'fenster_zuordnung':
             return mi_fenster_zuordnung($w) !== null ? ''
                  : mi_t('UI.PRUEF_FENSTER_ZUORDNUNG');
+        /* Gruppe 15 (4.5.18): Haken der MQTT-Befehle und die Anwesenheit (V1). */
+        case 'befehle_mqtt_ein':
+        case 'befehle_eingreifend_ein':
+        case 'anwesenheit_ein':
+            return ($w === '0' || $w === '1') ? '' : mi_t('UI.PRUEF_JANEIN');
+        case 'anwesenheit_verhalten':
+            return in_array($w, array('verschieben', 'spar', 'aus'), true) ? ''
+                 : mi_t('UI.PRUEF_ANW_VERHALTEN');
+        case 'anwesenheit_verschiebung':
+            return (ctype_digit($w) && (int) $w <= 100) ? '' : mi_t('UI.PRUEF_VERSCHIEBUNG');
+        case 'anwesenheit_frist':
+            return (ctype_digit($w) && (int) $w <= 3600) ? '' : mi_t('UI.PRUEF_ANW_FRIST');
+        case 'anwesenheit_geraete':
+            if ($w === '') { return ''; }
+            foreach (explode(',', $w) as $teil) {
+                if (!preg_match('/^\d{10,19}$/', trim($teil))) {
+                    return sprintf(mi_t('UI.PRUEF_AUTO_GERAETE'), mi_e(trim($teil)));
+                }
+            }
+            return '';
         case 'MideaUser':
             // Freitext; Leerraum am RAND kann die Datei nicht halten
             // (configparser schneidet ihn ab). Abweisen statt still kuerzen
@@ -1643,38 +1676,41 @@ function mi_werte()
 {
     $g = '&mdash;';
     $c = '&deg;C';
+    /* Gruppe 15 (4.5.18, F-E5): die Spalte vorlage traegt den Fehlwert im Bereich - -1 fuer Zustaende, Feuchte und
+     * Energie, -999 fuer Temperaturen (mi_fehlwert, mi_mqtt.FEHLWERT im Dienst). Sie speist die Namenstabelle; die
+     * Eingangsvorlage (VirtualInHttp-Kunstgriff) ist entfallen. online bleibt 0/1 - es kommt immer. */
     return array(
         // ---- Grundwerte ----
-        'power_state'            => array($g,      'WERT.POWER_STATE',        'grund',   array('false', '0',   '1',    '<v.0>')),
-        'online'                 => array($g,      'WERT.ONLINE',             'grund',   array('false', '0',   '1',    '<v.0>')),
-        'indoor_temperature'     => array($c,      'WERT.INDOOR_TEMPERATURE', 'grund',   array('true',  '-50', '80',   '<v.1> °C')),
-        'outdoor_temperature'    => array($c,      'WERT.OUTDOOR_TEMPERATURE','grund',   array('true',  '-50', '80',   '<v.1> °C')),
-        'target_temperature'     => array($c,      'WERT.TARGET_TEMPERATURE', 'grund',   array('true',  '0',   '40',   '<v.1> °C')),
+        'power_state'            => array($g,      'WERT.POWER_STATE',        'grund',   array('true',  '-1',   '1',    '<v.0>')),
+        'online'                 => array($g,      'WERT.ONLINE',             'grund',   array('false', '0',    '1',    '<v.0>')),
+        'indoor_temperature'     => array($c,      'WERT.INDOOR_TEMPERATURE', 'grund',   array('true',  '-999', '80',   '<v.1> °C')),
+        'outdoor_temperature'    => array($c,      'WERT.OUTDOOR_TEMPERATURE','grund',   array('true',  '-999', '80',   '<v.1> °C')),
+        'target_temperature'     => array($c,      'WERT.TARGET_TEMPERATURE', 'grund',   array('true',  '-999', '40',   '<v.1> °C')),
         'operational_mode'       => array('Text',  'WERT.OPERATIONAL_MODE',   'grund',   null),
         'fan_speed'              => array('Text',  'WERT.FAN_SPEED',          'grund',   null),
         'swing_mode'             => array('Text',  'WERT.SWING_MODE',         'grund',   null),
         // ---- Komfort ----
-        'audible_feedback'       => array($g,      'WERT.AUDIBLE_FEEDBACK',   'komfort', array('false', '0',   '1',    '<v.0>')),
-        'eco_mode'               => array($g,      'WERT.ECO_MODE',           'komfort', array('false', '0',   '1',    '<v.0>')),
-        'turbo_mode'             => array($g,      'WERT.TURBO_MODE',         'komfort', array('false', '0',   '1',    '<v.0>')),
-        'display_on'             => array($g,      'WERT.DISPLAY_ON',         'komfort', array('false', '0',   '1',    '<v.0>')),
-        'sleep_mode'             => array($g,      'WERT.SLEEP_MODE',         'komfort', array('false', '0',   '1',    '<v.0>')),
-        'follow_me'              => array($g,      'WERT.FOLLOW_ME',          'komfort', array('false', '0',   '1',    '<v.0>')),
-        'freeze_protection_mode' => array($g,      'WERT.FREEZE_PROTECTION',  'komfort', array('false', '0',   '1',    '<v.0>')),
-        'purifier'               => array($g,      'WERT.PURIFIER',           'komfort', array('false', '0',   '1',    '<v.0>')),
-        'self_clean_active'      => array($g,      'WERT.SELF_CLEAN',         'komfort', array('false', '0',   '1',    '<v.0>')),
-        'filter_alert'           => array($g,      'WERT.FILTER_ALERT',       'komfort', array('false', '0',   '1',    '<v.0>')),
-        'target_humidity'        => array('%',     'WERT.TARGET_HUMIDITY',    'komfort', array('false', '0',   '100',  '<v.0> %')),
-        'indoor_humidity'        => array('%',     'WERT.INDOOR_HUMIDITY',    'komfort', array('false', '0',   '100',  '<v.0> %')),
+        'audible_feedback'       => array($g,      'WERT.AUDIBLE_FEEDBACK',   'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'eco_mode'               => array($g,      'WERT.ECO_MODE',           'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'turbo_mode'             => array($g,      'WERT.TURBO_MODE',         'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'display_on'             => array($g,      'WERT.DISPLAY_ON',         'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'sleep_mode'             => array($g,      'WERT.SLEEP_MODE',         'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'follow_me'              => array($g,      'WERT.FOLLOW_ME',          'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'freeze_protection_mode' => array($g,      'WERT.FREEZE_PROTECTION',  'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'purifier'               => array($g,      'WERT.PURIFIER',           'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'self_clean_active'      => array($g,      'WERT.SELF_CLEAN',         'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'filter_alert'           => array($g,      'WERT.FILTER_ALERT',       'komfort', array('true',  '-1',   '1',    '<v.0>')),
+        'target_humidity'        => array('%',     'WERT.TARGET_HUMIDITY',    'komfort', array('true',  '-1',   '100',  '<v.0> %')),
+        'indoor_humidity'        => array('%',     'WERT.INDOOR_HUMIDITY',    'komfort', array('true',  '-1',   '100',  '<v.0> %')),
         'horizontal_swing_angle' => array('Text',  'WERT.H_SWING_ANGLE',      'komfort', null),
         'vertical_swing_angle'   => array('Text',  'WERT.V_SWING_ANGLE',      'komfort', null),
         'rate_select'            => array('Text',  'WERT.RATE_SELECT',        'komfort', null),
         'breeze_mode'            => array('Text',  'WERT.BREEZE_MODE',        'komfort', null),
-        'ieco'                   => array($g,      'WERT.IECO',               'komfort', array('false', '0',   '1',    '<v.0>')),
+        'ieco'                   => array($g,      'WERT.IECO',               'komfort', array('true',  '-1',   '1',    '<v.0>')),
         // ---- Energie ----
-        'total_energy_usage'     => array('kWh',   'WERT.TOTAL_ENERGY',       'energie', array('false', '0',   '100000', '<v.2> kWh')),
-        'current_energy_usage'   => array('kWh',   'WERT.CURRENT_ENERGY',     'energie', array('false', '0',   '100000', '<v.2> kWh')),
-        'real_time_power_usage'  => array('W',     'WERT.REAL_TIME_POWER',    'energie', array('false', '0',   '20000',  '<v.0> W')),
+        'total_energy_usage'     => array('kWh',   'WERT.TOTAL_ENERGY',       'energie', array('true',  '-1',   '100000', '<v.2> kWh')),
+        'current_energy_usage'   => array('kWh',   'WERT.CURRENT_ENERGY',     'energie', array('true',  '-1',   '100000', '<v.2> kWh')),
+        'real_time_power_usage'  => array('W',     'WERT.REAL_TIME_POWER',    'energie', array('true',  '-1',   '20000',  '<v.0> W')),
     );
 }
 
@@ -1690,6 +1726,8 @@ function mi_status_werte()
         'status/ts'      => array('s',       'WERT.ST_TS',      array('false', '0', '4000000000', '<v.0>')),
         'status/zaehler' => array('&mdash;', 'WERT.ST_ZAEHLER', array('false', '0', '999',      '<v.0>')),
         'status/dienst'  => array('&mdash;', 'WERT.ST_DIENST',  array('false', '0', '1',        '<v.0>')),
+        // Gruppe 15 (4.5.18): ob MQTT-Befehle angenommen werden (1/0/-1), mit dem Herzschlag, nie retained.
+        'status/befehle' => array('&mdash;', 'WERT.ST_BEFEHLE', array('true',  '-1', '1',       '<v.0>')),
         // M4 (ab 4.5.10): der Letzte Wille - connected bei jedem Verbinden,
         // disconnected vom Broker, beide retained (das Paar aus Regeln/07).
         // Bis 4.5.9 stand das Thema in keiner Tabelle, obwohl die
@@ -1716,6 +1754,9 @@ function mi_automatik_werte()
         'automatik/geraete'  => array('&mdash;', 'WERT.AU_GERAETE',
                                       array('false', '0', '99', '<v.0>')),
         'automatik/grund'    => array('Text',    'WERT.AU_GRUND', null),
+        // Gruppe 15 (4.5.18, V1): der Abwesenheitsbetrieb - 1/0/-1, mit dem Herzschlag, nie retained.
+        'anwesenheit/aktiv'  => array('&mdash;', 'WERT.ANW_AKTIV',
+                                      array('true', '-1', '1', '<v.0>')),
     );
 }
 
@@ -1923,65 +1964,10 @@ function mi_log_tail($max = 200)
  * Loxone-Vorlagen
  * ================================================================== */
 
-/** Vorlage der Gateway-Eingaenge nach dem Heimkino-Kunstgriff (12.08.2026):
- *  VirtualInHttp mit Dummy-Adresse http://localhost und Abfragezyklus 604800 s,
- *  nur damit Loxone die richtig benannten Eingaenge anlegt - die Werte kommen
- *  vom MQTT-Gateway. Format wie Original-Export aus Loxone Config 17.1.
- *
- *  Seit 4.3.0 enthaelt sie ALLE Zahlenwerte aus mi_werte() statt fuenf, dazu
- *  die vier Themen des Lebenszeichens. Die Textwerte (operational_mode,
- *  fan_speed, swing_mode, die beiden Schwenkwinkel, rate_select, breeze_mode)
- *  bleiben aussen vor: ein Textthema bekommt keinen virtuellen Eingang.
- */
-function mi_vorlage($cfg = null)
-{
-    if ($cfg === null) { $cfg = mi_config_read(); }
-    $topic   = mi_mqtt_topic($cfg);
-    $geraete = mi_devices();
-    $crlf = "\r\n";
-    $x = function ($s) {
-        return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
-    };
-    $o  = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
-    /* Welle Bild 19 (4.5.15, E7): Kommentar des Behaelters aus der Sprachdatei, ohne Datum (wie die
-     * Vorlage im LoxBerry-Plugins Musterprojekt; bis 4.5.14 fest im Code mit dem Tag der Erzeugung). */
-    $o .= '<VirtualInHttp HintText="" Title="Midea Klimageraete" Comment="'
-        . $x(sprintf(mi_t('UI.VI_KOMMENTAR'), $topic))
-        . '" Address="http://localhost" PollingTime="604800">' . $crlf;
-    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
-    foreach ($geraete as $d) {
-        if (!isset($d['id']) || $d['id'] === '') { continue; }
-        // Nicht $d['name'] benutzen: der ist fuer die Oberflaeche bereits
-        // HTML-maskiert und wuerde im XML doppelt maskiert.
-        $name = mi_geraetename($d);
-        foreach (mi_werte() as $wert => $w) {
-            if ($w[3] === null) { continue; }   // Textwert, kein Eingang
-            $titel = mi_gateway_name($topic, $d['id'] . '_' . $wert);   // 4.5.17: wie das Gateway
-            $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
-            $o .= 'Comment="' . $x(mi_t($w[1]) . ' ' . $name) . '" Check=" " ';
-            $o .= 'Signed="' . $w[3][0] . '" Analog="true" SourceValLow="0" DestValLow="0" '
-                . 'SourceValHigh="1" DestValHigh="1" DefVal="0" MinVal="' . $w[3][1]
-                . '" MaxVal="' . $w[3][2] . '" Unit="' . $x($w[3][3]) . '" HintText=""/>' . $crlf;
-        }
-    }
-    // Das Lebenszeichen gilt fuer das Plugin, nicht je Geraet.
-    foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $wert => $w) {
-        // Textwert, kein Eingang - dieselbe Wache wie in der Schleife
-        // darueber. Sie fehlte hier seit 4.5.0: 'automatik/grund' traegt
-        // einen Satz und hat deshalb keine Vorlagenangabe; ohne diese Zeile
-        // entstand daraus ein virtueller Eingang mit leerem Signed, MinVal,
-        // MaxVal und Unit - und beim Rendern dreimal "array offset on null".
-        if ($w[2] === null) { continue; }
-        $titel = mi_gateway_name($topic, $wert);   // 4.5.17: Schraegstriche auch im Praefix zu _
-        $o .= "\t" . '<VirtualInHttpCmd Title="' . $x($titel) . '" ';
-        $o .= 'Comment="' . $x(mi_t($w[1])) . '" Check=" " ';
-        $o .= 'Signed="' . $w[2][0] . '" Analog="true" SourceValLow="0" DestValLow="0" '
-            . 'SourceValHigh="1" DestValHigh="1" DefVal="0" MinVal="' . $w[2][1]
-            . '" MaxVal="' . $w[2][2] . '" Unit="' . $x($w[2][3]) . '" HintText=""/>' . $crlf;
-    }
-    $o .= '</VirtualInHttp>' . $crlf;
-    return array('VI_midea2lox.xml', $o);
-}
+/* Gruppe 15 (4.5.18, Entwurf 2.6, E3/M15): die Vorlage der Gateway-Eingaenge (mi_vorlage(), VirtualInHttp mit
+ * Dummy-Adresse http://localhost, der Heimkino-Kunstgriff vom 12.08.2026) ist entfallen - die Bauform ist nach
+ * R2_078 verboten. An ihre Stelle tritt die Namenstabelle (mi_mqtt_namen): einfache Virtuelle Eingaenge, Name
+ * wie das Gateway ihn vergibt. */
 
 /**
  * Die Befehle, die Loxone an das Plugin schicken kann.
@@ -2002,7 +1988,10 @@ function mi_befehle()
      * Solltemperatur seit 4.5.15 'temp.<v.1>' statt '<v>': der Dienst nimmt nur ein zweistelliges ganzes
      * Wort oder 'temp.<Zahl>' - '22.5' oder '8' verwarf er. Neu 'humidity.<v.0>' (der Dienst kennt
      * humidity.<0-100> seit langem, die Vorlage nicht). Analog ist jeder Befehl mit '<v'. Umlaute als
-     * UTF-8-Bytes: diese Datei bleibt in ihrem Code ASCII. */
+     * UTF-8-Bytes: diese Datei bleibt in ihrem Code ASCII.
+     * Gruppe 15 (4.5.18, E4/F-E8): die acht rate_select-Befehle, die der Dienst seit langem kennt - nur Geraete,
+     * die sie melden (supported_rate_selects); andere uebergehen den Befehl mit Protokollzeile. Diese Liste ist
+     * auch die Positivliste, gegen die mi_mqtt_zuordnung_probe() die MQTT-Befehle haelt. */
     return array(
         array('BEF.EIN_AUS',     'power.True',                          'power.False',   "Ein- und ausschalten"),
         array('BEF.MODE_AUTO',   'ac.operational_mode_enum.auto',       null,            "Betriebsart Automatik"),
@@ -2032,6 +2021,14 @@ function mi_befehle()
         array('BEF.STATUS',      'status',                              null,            "Zustand abfragen"),
         array('BEF.TEMP',        'temp.<v.1>',                          null,            "Solltemperatur stufenlos"),
         array('BEF.HUM',         'humidity.<v.0>',                      null,            "Sollfeuchte stufenlos"),
+        array('BEF.RATE_OFF',    'rate_select.OFF',                     null,            "Leistungsbegrenzung aus"),
+        array('BEF.RATE_50',     'rate_select.GEAR_50',                 null,            "Leistungsbegrenzung 50 Prozent"),
+        array('BEF.RATE_75',     'rate_select.GEAR_75',                 null,            "Leistungsbegrenzung 75 Prozent"),
+        array('BEF.LEVEL_1',     'rate_select.LEVEL_1',                 null,            "Leistungsstufe 1"),
+        array('BEF.LEVEL_2',     'rate_select.LEVEL_2',                 null,            "Leistungsstufe 2"),
+        array('BEF.LEVEL_3',     'rate_select.LEVEL_3',                 null,            "Leistungsstufe 3"),
+        array('BEF.LEVEL_4',     'rate_select.LEVEL_4',                 null,            "Leistungsstufe 4"),
+        array('BEF.LEVEL_5',     'rate_select.LEVEL_5',                 null,            "Leistungsstufe 5"),
     );
 }
 
@@ -2416,6 +2413,9 @@ function mi_themen_probe()
      * diese Zeile stuenden sie dauerhaft als "genannt, aber nicht gesendet"
      * in der Zeile. Geeicht in beide Richtungen. */
     preg_match_all("/'(automatik\\/[a-z]+)'/", $q, $ma);
+    // Gruppe 15 (4.5.18, V1): anwesenheit/aktiv kommt als Paar wie die Automatik.
+    preg_match_all("/'(anwesenheit\\/[a-z]+)'/", $q, $mw);
+    $ma[1] = array_merge($ma[1], $mw[1]);
     $gesendet = array_merge($gesendet, array_values(array_unique($ma[1])));
 
     /* M4 (ab 4.5.10): das Thema, das der Dienst woertlich an das Praefix
@@ -2479,8 +2479,12 @@ function mi_sprache_probe()
 /** Sind die erzeugbaren Loxone-Vorlagen wohlgeformt? */
 function mi_vorlagen_probe($cfg = null)
 {
+    /* Gruppe 15 (4.5.18): die Eingangsvorlage (mi_vorlage, VirtualInHttp-Kunstgriff) ist entfallen; geprueft werden
+     * die UDP-Vorlage und die Vorlage MQTT-Befehle - wohlgeformt, und kein Titel der MQTT-Vorlage gleicht einem
+     * Gateway-Namen (sonst eine Schleife, Wiki widget_mqtt), alle Befehle beginnen mit publish <praefix>/befehl/. */
     $anzahl = 0;
-    foreach (array('mi_vorlage', 'mi_vorlage_ausgang') as $f) {
+    $p = mi_mqtt_topic($cfg);
+    foreach (array('mi_vorlage_ausgang', 'mi_vorlage_mqtt_out') as $f) {
         if (!function_exists($f)) { continue; }
         list($name, $inhalt) = $f($cfg);
         $anzahl++;
@@ -2491,6 +2495,15 @@ function mi_vorlagen_probe($cfg = null)
         libxml_use_internal_errors($alt);
         if (!$ok) {
             return array(false, $anzahl, $name);
+        }
+        if ($f === 'mi_vorlage_mqtt_out') {
+            foreach ($d->getElementsByTagName('VirtualOutCmd') as $c) {
+                $t = $c->getAttribute('Title');
+                if (strpos($t, ': ') === false || strpos($t, $p . '_') === 0
+                    || strpos($c->getAttribute('CmdOn'), 'publish ' . $p . '/befehl/') !== 0) {
+                    return array(false, $anzahl, $name . ' (' . $t . ')');
+                }
+            }
         }
     }
     return array($anzahl > 0, $anzahl, '');
@@ -2941,12 +2954,14 @@ function mi_x2_formulare()
     return array(
         'settings'  => array('MINISERVER', 'UDP_PORT', 'lox_timeout', 'MideaUser', 'region',
                              'abfragetakt', 'maxConnectionLifetime', 'DEBUG'),
-        'mqtt'      => array('mqtt_praefix'),
+        'mqtt'      => array('mqtt_praefix', 'befehle_mqtt_ein', 'befehle_eingreifend_ein'),
         'automatik' => array('auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab',
                              'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',
                              'auto_turbo', 'auto_schalten', 'auto_sperrzeit',
                              'auto_max_alter', 'auto_takt', 'auto_geraete',
-                             'fenster_ein', 'fenster_frist', 'fenster_zuordnung'),
+                             'fenster_ein', 'fenster_frist', 'fenster_zuordnung',
+                             'anwesenheit_ein', 'anwesenheit_verhalten', 'anwesenheit_verschiebung',
+                             'anwesenheit_frist', 'anwesenheit_geraete'),
         // Die Bezeichnungen reisen unter "bezeichnung" (je Geraetenummer).
         'geraete'   => array(),
     );
@@ -3085,4 +3100,359 @@ function mi_praefix_merken($praefix)
     }
     $liste[] = $praefix;
     return mi_datei_schreiben($datei, implode("\n", $liste) . "\n", 0644);
+}
+
+/* ==================================================================
+ * Gruppe 15 (4.5.18): Fehlwerte, Namenstabelle, MQTT-Befehle, Anwesenheit
+ * (Entwurf Gruppe 15 Abschnitte 2.3-2.5, 3.2-3.8, 7)
+ * ================================================================== */
+
+/** Der Fehlwert eines Geraetethemas - dieselbe Regel wie mi_mqtt.fehlwert_fuer() im Dienst. */
+function mi_fehlwert($name)
+{
+    if (in_array($name, array('target_temperature', 'indoor_temperature', 'outdoor_temperature'), true)) {
+        return '-999';
+    }
+    if (in_array($name, array('operational_mode', 'fan_speed', 'swing_mode', 'horizontal_swing_angle',
+                              'vertical_swing_angle', 'rate_select', 'breeze_mode'), true)) {
+        return '-';
+    }
+    return '-1';
+}
+
+/**
+ * Fuehren Dienst (mi_mqtt.FEHLWERT) und Oberflaeche (mi_fehlwert) dieselben Fehlwerte? Und traegt die
+ * Spalte MinVal von mi_werte() jeden Zahlen-Fehlwert? Bauart mi_retain_probe(): die Python-Tabelle wird bis
+ * zur ersten schliessenden Klammer gelesen. Rueckgabe array(ok|null, Zahl der Themen, Abweichungen).
+ */
+function mi_fehlwert_probe()
+{
+    $datei = mi_paths()['mqtt_py'];
+    if (!is_readable($datei)) {
+        return array(null, 0, array());
+    }
+    $q = (string) @file_get_contents($datei);
+    if (!preg_match('/FEHLWERT\s*=\s*\((.*?)\)/s', $q, $m)) {
+        return array(null, 0, array());
+    }
+    preg_match_all("/'([a-z_]+)=(-999|-1|-)'/", $m[1], $t, PREG_SET_ORDER);
+    $py = array();
+    foreach ($t as $z) { $py[$z[1]] = $z[2]; }
+    $ab = array();
+    $n = 0;
+    foreach (mi_werte() as $name => $w) {
+        $n++;
+        $dienst = isset($py[$name]) ? $py[$name] : '-1';
+        if ($dienst !== mi_fehlwert($name)) {
+            $ab[] = $name . ' (' . $dienst . '/' . mi_fehlwert($name) . ')';
+            continue;
+        }
+        if ($name !== 'online' && $w[3] !== null && $dienst !== '-'
+            && (float) $w[3][1] > (float) $dienst) {
+            $ab[] = $name . ' MinVal ' . $w[3][1];
+        }
+    }
+    foreach (array_keys($py) as $k) {
+        if (!array_key_exists($k, mi_werte())) { $ab[] = $k . ' (nur im Dienst)'; }
+    }
+    return array($n > 0 && count($py) > 0 && !$ab, $n, $ab);
+}
+
+/**
+ * Die Tabelle der MQTT-Befehle aus dem Dienst (data/mi_mqtt.py, MQTT_BEFEHLE) - die EINE Quelle; die
+ * Oberflaeche liest sie zeilenweise (Bauart mi_retain_probe). Rueckgabe array(name => array('art', 'werte'
+ * => Liste, 'karte' => array(Wert => UDP-Wort), 'eingreifend' => bool)) oder null, wenn nicht lesbar.
+ */
+function mi_mqtt_befehle_python()
+{
+    static $tab = false;
+    if ($tab !== false) {
+        return $tab;
+    }
+    $tab = null;
+    $datei = mi_paths()['mqtt_py'];
+    if (!is_readable($datei)) {
+        return $tab;
+    }
+    $q = (string) @file_get_contents($datei);
+    if (!preg_match('/MQTT_BEFEHLE\s*=\s*\((.*?)\n\)/s', $q, $m)) {
+        return $tab;
+    }
+    preg_match_all("/^\s*'([^']+)',\s*$/m", $m[1], $z);
+    $aus = array();
+    foreach ($z[1] as $zeile) {
+        $f = explode('|', $zeile);
+        if (count($f) !== 5) { continue; }
+        $karte = array();
+        foreach (explode(' ', $f[3]) as $paar) {
+            $p = explode('=', $paar, 2);
+            if (count($p) === 2) { $karte[$p[0]] = $p[1]; }
+        }
+        $aus[$f[0]] = array('art' => $f[1], 'werte' => explode(',', $f[2]), 'karte' => $karte,
+                            'eingreifend' => $f[4] === '1');
+    }
+    $tab = $aus ? $aus : null;
+    return $tab;
+}
+
+/** Den festen deutschen Titel zu einem UDP-Wort aus mi_befehle() - fuer Schalter das Paar EIN/AUS. */
+function mi_mqtt_titel_zu($ein, $aus = null)
+{
+    foreach (mi_befehle() as $b) {
+        $vergleich = $b[1];
+        if (strpos($ein, '<v>') !== false) {
+            // temp.<v> gegen temp.<v.1>: gleich bis zum Platzhalter; "stufenlos" gehoert zur UDP-Vorlage.
+            $a = substr($ein, 0, strpos($ein, '<'));
+            if (strpos($vergleich, '<v') !== false && substr($vergleich, 0, strpos($vergleich, '<')) === $a) {
+                return array(str_replace(' stufenlos', '', $b[3]), $b[0]);
+            }
+            continue;
+        }
+        if ($vergleich === $ein && ($aus === null || $b[2] === $aus)) {
+            return array($b[3], $b[0]);
+        }
+    }
+    return array('', '');
+}
+
+/**
+ * Die Befehle fuer Loxone (Tabelle Schritt 4 und Vorlage MQTT-Befehle): je Schalter EIN Befehl mit EIN/AUS,
+ * je Auswahlwert ein Befehl, Puls einer, Zahl analog. Titel fest deutsch aus mi_befehle() (Sprachregel
+ * 13.10.2026), im Musterprojekt "Midea2Lox: <Titel>". Je Zeile: name, art, ein, aus (oder ''), titel,
+ * text (Sprachschluessel), eingreifend, udp (UDP-Wort bzw. Paar).
+ */
+function mi_mqtt_befehle()
+{
+    $py = mi_mqtt_befehle_python();
+    if (!is_array($py)) {
+        return array();
+    }
+    $aus = array();
+    foreach ($py as $name => $b) {
+        if ($b['art'] === 'schalter') {
+            list($t, $k) = mi_mqtt_titel_zu($b['karte']['1'], $b['karte']['0']);
+            $aus[] = array('name' => $name, 'art' => 'schalter', 'ein' => '1', 'aus' => '0', 'titel' => $t,
+                           'text' => $k, 'eingreifend' => $b['eingreifend'],
+                           'udp' => $b['karte']['1'] . ' / ' . $b['karte']['0']);
+        } elseif ($b['art'] === 'auswahl') {
+            foreach ($b['werte'] as $w) {
+                $u = isset($b['karte'][$w]) ? $b['karte'][$w] : '';
+                list($t, $k) = mi_mqtt_titel_zu($u);
+                $aus[] = array('name' => $name, 'art' => 'auswahl', 'ein' => $w, 'aus' => '', 'titel' => $t,
+                               'text' => $k, 'eingreifend' => $b['eingreifend'], 'udp' => $u);
+            }
+        } elseif ($b['art'] === 'puls') {
+            list($t, $k) = mi_mqtt_titel_zu($b['karte']['1']);
+            $aus[] = array('name' => $name, 'art' => 'puls', 'ein' => '1', 'aus' => '', 'titel' => $t,
+                           'text' => $k, 'eingreifend' => $b['eingreifend'], 'udp' => $b['karte']['1']);
+        } else {
+            $u = isset($b['karte']['<v>']) ? $b['karte']['<v>'] : '';
+            list($t, $k) = mi_mqtt_titel_zu($u);
+            $aus[] = array('name' => $name, 'art' => $b['art'],
+                           'ein' => $b['art'] === 'zahl' ? '<v.1>' : '<v.0>', 'aus' => '', 'titel' => $t,
+                           'text' => $k, 'eingreifend' => $b['eingreifend'], 'udp' => $u);
+        }
+    }
+    return $aus;
+}
+
+/**
+ * Pruefzeile "Zuordnung MQTT = UDP" (Entwurf 3.6): jede Abbildung der Python-Tabelle steht in der
+ * Positivliste von mi_befehle() und bekommt einen Titel; jeder Befehl von mi_befehle() ist ueber MQTT
+ * erreichbar. Rueckgabe array(ok|null, Zahl der MQTT-Befehle, Abweichungen).
+ */
+function mi_mqtt_zuordnung_probe()
+{
+    $py = mi_mqtt_befehle_python();
+    if (!is_array($py)) {
+        return array(null, 0, array());
+    }
+    $ab = array();
+    $erreicht = array();
+    foreach (mi_mqtt_befehle() as $z) {
+        if ($z['titel'] === '') { $ab[] = $z['name'] . ' ' . $z['ein'] . ' (' . $z['udp'] . ')'; }
+        foreach (explode(' / ', $z['udp']) as $u) { $erreicht[] = $u; }
+    }
+    foreach (mi_befehle() as $b) {
+        foreach (array($b[1], $b[2]) as $u) {
+            if ($u === null) { continue; }
+            $u2 = preg_replace('/<v\.[0-9]>/', '<v>', $u);
+            if (!in_array($u2, $erreicht, true)) { $ab[] = $u . ' (nicht ueber MQTT)'; }
+        }
+    }
+    return array(!$ab, count($py), array_values(array_unique($ab)));
+}
+
+/** Der UDP-Eingang des MQTT-Gateways (general.json Mqtt.Udpinport), sonst 11884. */
+function mi_udp_eingang()
+{
+    $h = mi_paths()['home'];
+    $g = $h !== '' ? @json_decode((string) @file_get_contents($h . '/config/system/general.json'), true) : null;
+    $m = (is_array($g) && isset($g['Mqtt']) && is_array($g['Mqtt'])) ? $g['Mqtt'] : array();
+    $port = isset($m['Udpinport']) && is_numeric($m['Udpinport']) ? (int) $m['Udpinport'] : 0;
+    return ($port >= 1 && $port <= 65535) ? $port : 11884;
+}
+
+/**
+ * Vorlage "MQTT-Befehle" (Entwurf 3.8): Virtueller Ausgang "Midea2Lox MQTT-Befehle" an
+ * /dev/udp/<LoxBerry>/<UDP-Eingang des Gateways>, je Geraet und Befehl ein VirtualOutCmd mit
+ * "publish <praefix>/befehl/<id>/<name> <wert>" (nie retain). Titel "Midea2Lox <id>: <Titel>" - je Geraet
+ * eindeutig; kein Titel gleicht einem Gateway-Namen (Doppelpunkt und Leerzeichen). Rueckgabe
+ * array(Dateiname, Inhalt).
+ */
+function mi_vorlage_mqtt_out($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    $p = mi_mqtt_topic($cfg);
+    $ip = mi_cfg($cfg, 'LoxberryIP', mi_localip());
+    $x = function ($s) {
+        return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+    };
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualOut HintText="" Title="Midea2Lox MQTT-Befehle" Comment="' . $x(mi_t('UI.VQ_MQTT_KOMMENTAR'))
+        . '" Address="' . $x('/dev/udp/' . $ip . '/' . mi_udp_eingang())
+        . '" CmdInit="" CloseAfterSend="true" CmdSep=";">' . $crlf;
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
+    $geraete = mi_devices();
+    foreach ($geraete as $d) {
+        if (!isset($d['id']) || $d['id'] === '') { continue; }
+        foreach (mi_mqtt_befehle() as $b) {
+            $thema = $p . '/befehl/' . $d['id'] . '/' . $b['name'];
+            $an = 'publish ' . $thema . ' ' . $b['ein'];
+            $ab = $b['aus'] !== '' ? 'publish ' . $thema . ' ' . $b['aus'] : '';
+            $titel = 'Midea2Lox ' . $d['id'] . ': ' . $b['titel'];
+            $analog = ($b['art'] === 'zahl' || $b['art'] === 'ganz') ? 'true' : 'false';
+            $o .= "\t" . '<VirtualOutCmd Title="' . $x($titel) . '" Comment="' . $x($b['titel'])
+                . '" CmdOnMethod="GET" CmdOffMethod="GET" CmdOn="' . $x($an) . '" CmdOnHTTP="" CmdOnPost="" '
+                . 'CmdOff="' . $x($ab) . '" CmdOffHTTP="" CmdOffPost="" CmdAnswer="" Analog="' . $analog
+                . '" Repeat="0" RepeatRate="0" HintText=""/>' . $crlf;
+        }
+    }
+    $o .= '</VirtualOut>' . $crlf;
+    return array('VQ_midea2lox_mqtt.xml', $o);
+}
+
+/**
+ * Die V2-Hakenliste des Musterprojekts (Entwurf 2.4, F-E7 mit F-E14: 30 Haken). Schluessel ist das Thema
+ * mit <id> fuer die Geraetenummer; Wert true = Noncached.
+ */
+function mi_v2_haken()
+{
+    return array(
+        'status/zaehler' => false, 'status/ok' => true, '<id>/online' => true, '<id>/power_state' => false,
+        '<id>/indoor_temperature' => false, '<id>/outdoor_temperature' => false,
+        '<id>/target_temperature' => false, '<id>/indoor_humidity' => false, 'automatik/aktiv' => false,
+        'automatik/gesperrt' => false, 'automatik/geraete' => false, 'automatik/grund' => false,
+        'anwesenheit/aktiv' => false,
+        '<id>/target_humidity' => false, '<id>/operational_mode' => false, '<id>/fan_speed' => false,
+        '<id>/swing_mode' => false,
+        '<id>/eco_mode' => false, '<id>/turbo_mode' => false, '<id>/sleep_mode' => false,
+        '<id>/freeze_protection_mode' => false, '<id>/purifier' => false, '<id>/follow_me' => false,
+        '<id>/display_on' => false, '<id>/self_clean_active' => false, '<id>/filter_alert' => false,
+        '<id>/real_time_power_usage' => false, '<id>/total_energy_usage' => false,
+        '<id>/current_energy_usage' => false, '<id>/rate_select' => false,
+    );
+}
+
+/**
+ * Die Namenstabelle (Entwurf 2.4): je Thema der Name, den das MQTT-Gateway am Miniserver vergibt
+ * (mi_gateway_name - EINE Stelle), Zahl/Text, retained, V2-Kennzeichen, Fehlwert, Bedeutung. Aus DERSELBEN
+ * Quelle wie die Thementabellen (mi_werte, mi_status_werte, mi_automatik_werte). Je Geraet (ohne Geraet
+ * die Beispielnummer) die Geraetethemen, danach die Themen des Plugins einmal.
+ * Je Zeile: thema, name, text (bool), retained, v2 ('' | 'H' | 'N'), fehlwert, s (Sprachschluessel), id.
+ */
+function mi_mqtt_namen($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    $topic = mi_mqtt_topic($cfg);
+    $haken = mi_v2_haken();
+    $ids = array();
+    foreach (mi_devices() as $d) { $ids[] = (string) $d['id']; }
+    if (!$ids) { $ids[] = '123456789012'; }
+    $aus = array();
+    foreach ($ids as $id) {
+        foreach (mi_werte() as $wert => $w) {
+            $schl = '<id>/' . $wert;
+            $aus[] = array('thema' => $id . '/' . $wert, 'name' => mi_gateway_name($topic, $id . '_' . $wert),
+                'text' => $w[3] === null, 'retained' => mi_retain($wert),
+                'v2' => isset($haken[$schl]) ? ($haken[$schl] ? 'N' : 'H') : '',
+                'fehlwert' => $wert === 'online' ? '' : mi_fehlwert($wert), 's' => $w[1], 'id' => $id);
+        }
+    }
+    foreach (array_merge(mi_status_werte(), mi_automatik_werte()) as $thema => $w) {
+        $aus[] = array('thema' => $thema, 'name' => mi_gateway_name($topic, $thema),
+            'text' => $w[2] === null, 'retained' => mi_retain($thema),
+            'v2' => isset($haken[$thema]) ? ($haken[$thema] ? 'N' : 'H') : '',
+            'fehlwert' => ($thema === 'status/ok' || $thema === 'status/befehle' || $thema === 'anwesenheit/aktiv')
+                          ? '-1' : '', 's' => $w[1], 'id' => '');
+    }
+    return $aus;
+}
+
+/**
+ * Pruefzeile Namenstabelle: jeder Name folgt der Gateway-Regel aus seinem Thema, keine Doppelten, und die
+ * V2-Hakenliste steht vollstaendig darin (30, davon 2 Noncached). Rueckgabe array(ok, Zahl, Haken, Befunde).
+ */
+function mi_namen_probe($cfg = null)
+{
+    $namen = mi_mqtt_namen($cfg);
+    $topic = mi_mqtt_topic($cfg);
+    $befund = array();
+    $gesehen = array();
+    $haken = 0;
+    $erstes = $namen ? $namen[0]['id'] : '';
+    foreach ($namen as $z) {
+        if ($z['name'] !== str_replace(array('/', '%'), '_', $topic . '/' . $z['thema'])) { $befund[] = $z['name']; }
+        if (isset($gesehen[$z['name']])) { $befund[] = $z['name'] . ' doppelt'; }
+        $gesehen[$z['name']] = true;
+        if ($z['v2'] !== '' && ($z['id'] === '' || $z['id'] === $erstes)) { $haken++; }
+    }
+    if ($haken !== count(mi_v2_haken())) { $befund[] = 'V2 ' . $haken . '/' . count(mi_v2_haken()); }
+    return array(!$befund, count($namen), $haken, $befund);
+}
+
+/** Lage der MQTT-Befehle aus lebenszeichen.json: array(lage, letzte Quittung|null, Alter). */
+function mi_befehle_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    if (mi_cfg($cfg, 'befehle_mqtt_ein', '0') !== '1') {
+        return array('aus', null, null);
+    }
+    list($alter, , , $roh) = mi_lebenszeichen();
+    if ($alter === null) {
+        return array('fehlt', null, null);
+    }
+    if ($alter > 180) {
+        return array('alt', null, $alter);
+    }
+    $b = isset($roh['befehle']) ? (int) $roh['befehle'] : null;
+    $q = (isset($roh['befehl_zuletzt']) && is_array($roh['befehl_zuletzt'])) ? $roh['befehl_zuletzt'] : null;
+    if ($b === 1) {
+        return array('ok', $q, $alter);
+    }
+    return array('abgelehnt', $q, $alter);
+}
+
+/**
+ * Der Stand der Anwesenheit (V1), wie der Dienst ihn in data/anwesenheit.json ablegt:
+ * array(lage, daten|null, alter|null); lage aus, fehlt, unlesbar, alt (> 180 s), ok.
+ */
+function mi_anwesenheit_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    if (mi_cfg($cfg, 'anwesenheit_ein', '0') !== '1') {
+        return array('aus', null, null);
+    }
+    $datei = mi_paths()['anwesenheit'];
+    clearstatcache(true, $datei);
+    if (!is_readable($datei)) {
+        return array('fehlt', null, null);
+    }
+    $d = json_decode((string) @file_get_contents($datei), true);
+    if (!is_array($d) || !isset($d['ts'])) {
+        return array('unlesbar', null, null);
+    }
+    $alter = time() - (int) $d['ts'];
+    return array($alter > 180 ? 'alt' : 'ok', $d, $alter);
 }

@@ -3,7 +3,8 @@
  * Midea2Lox - Bedienoberflaeche
  *
  * Ausschliesslich Oberflaeche. Die Werte holt der Dienst data/midea2lox.py,
- * der ueber system/daemons laeuft; Befehle nimmt er per UDP entgegen.
+ * der ueber system/daemons laeuft; Befehle nimmt er per UDP und - seit 4.5.18,
+ * Haken im Reiter MQTT - ueber MQTT entgegen.
  *
  * ==================================================================
  * REIHENFOLGE IN DIESER DATEI - BAUVORSCHRIFT, NICHT GESCHMACK
@@ -44,10 +45,13 @@ $mi_fehlten = mi_cfg_fehlende();
  * Sicherungsdatei samt Midea-Passwort abzuholen.
  * ---------------------------------------------------------------- */
 $mi_wache = mi_wachposten();
+/* M9 (4.5.18, Gruppe 15): den gewuenschten Reiter VOR dem Leeren merken - bis 4.5.17 landete jede Abweisung
+ * auf Einstellungen, und die Meldung stand unter "Es wurde nichts gespeichert", auch wenn der Knopf nichts
+ * speichern wollte. Jetzt: derselbe Reiter, Meldung "Es wurde nichts ausgefuehrt" (unten, $mi_misslungen). */
+$mi_wunsch_wache = (isset($_POST['activetab']) && is_string($_POST['activetab'])) ? $_POST['activetab'] : '';
 if ($mi_wache !== '') {
     // Abgewiesen heisst gemeldet - und es wird NICHTS ausgefuehrt.
     $_POST = array();
-    $mi_fehler[] = $mi_wache;
 }
 
 /* Aktiver Reiter.
@@ -60,8 +64,8 @@ if ($mi_wache !== '') {
  * und die id der Flaechen muessen deckungsgleich bleiben; der Reiter Test
  * zaehlt das nach (mi_smactive_probe). */
 $mi_muster = '/^tab-(settings|mqtt|loxone|automatik|test|log)$/';
-$mi_wunsch = isset($_POST['activetab']) && is_string($_POST['activetab'])
-    ? $_POST['activetab']
+$mi_wunsch = $mi_wunsch_wache !== ''
+    ? $mi_wunsch_wache
     : (isset($_GET['form']) && is_string($_GET['form']) ? 'tab-' . $_GET['form'] : '');
 $mi_tab = preg_match($mi_muster, $mi_wunsch) ? $mi_wunsch : 'tab-settings';
 
@@ -71,6 +75,9 @@ $mi_test_text  = '';
 // fuer Vorgaenge, die nichts speichern (Dienstknoepfe) oder halb gelangen.
 $mi_test_ok    = true;
 $mi_misslungen = array();
+if ($mi_wache !== '') {
+    $mi_misslungen[] = sprintf(mi_t('UI.WACHE_NICHTS'), $mi_wache);
+}
 // X-2 (Verbesserungsbau 30.09.2026): die Eingaben eines beanstandeten
 // Formulars fuer das GET nach der Umleitung (mi_x2_eingaben) - und beim GET
 // die mitgereisten (mi_x2_pruefen).
@@ -130,7 +137,9 @@ if (mi_formtoken() === '') {
 
 /* Fehlende Schluessel werden AUFGESCHRIEBEN, nicht bei jedem Lauf neu
  * angenommen. Ein stiller Vorgabewert ist eine Annahme, keine Auskunft. */
-if ($mi_fehlten && $mi_wache === '') {
+/* M10 (4.5.18): NICHT waehrend einer Aktualisierung - sonst wird im Upgrade-Fenster aus der mitgelieferten
+ * Vorgabe "Eigenes", und postinstall.sh spielt die Zweitschrift nicht zurueck. */
+if ($mi_fehlten && $mi_wache === '' && !mi_upgrade_laeuft()) {
     if (mi_config_write($mi_cfg)) {
         $mi_hinweise[] = sprintf(mi_t('UI.CFG_ERGAENZT'), mi_e(implode(', ', $mi_fehlten)));
     }
@@ -297,6 +306,11 @@ if (isset($_POST['mqtt_speichern'])) {
             $neu = $mi_cfg;
             $mi_alt_praefix = mi_mqtt_topic($mi_cfg);
             $neu['mqtt_praefix'] = $roh;
+            // Gruppe 15 (4.5.18): die Haken der MQTT-Befehle (Kaestchen - fehlt heisst aus; der zweite ist ohne
+            // den ersten ausgegraut und kommt dann nicht mit).
+            $neu['befehle_mqtt_ein'] = (isset($_POST['befehle_mqtt_ein']) && $_POST['befehle_mqtt_ein'] === '1') ? '1' : '0';
+            $neu['befehle_eingreifend_ein'] = (isset($_POST['befehle_eingreifend_ein'])
+                && $_POST['befehle_eingreifend_ein'] === '1') ? '1' : '0';
             if (mi_config_write($neu)) {
                 $mi_cfg = mi_config_read();
                 /* M1 (ab 4.5.10): das bisherige Praefix merken. Der Dienst
@@ -353,7 +367,9 @@ if (isset($_POST['auto_speichern'])) {
                    'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',
                    'auto_turbo', 'auto_schalten', 'auto_sperrzeit',
                    'auto_max_alter', 'auto_takt', 'auto_geraete',
-                   'fenster_ein', 'fenster_frist', 'fenster_zuordnung') as $mi_k) {
+                   'fenster_ein', 'fenster_frist', 'fenster_zuordnung',
+                   'anwesenheit_ein', 'anwesenheit_verhalten', 'anwesenheit_verschiebung',
+                   'anwesenheit_frist', 'anwesenheit_geraete') as $mi_k) {
         if (!isset($_POST[$mi_k])) { continue; }
         if (!is_string($_POST[$mi_k])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($mi_k));
@@ -525,10 +541,11 @@ if (isset($_POST['schalten'])) {
 if (isset($_SERVER['REQUEST_METHOD'])
     && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['vorlage'])) {
     $welche = is_string($_POST['vorlage']) ? $_POST['vorlage'] : '';
+    // Gruppe 15 (4.5.18): die Eingangsvorlage ist entfallen; neu die Vorlage MQTT-Befehle.
     if ($welche === 'ausgang') {
         list($mi_vname, $mi_vinhalt) = mi_vorlage_ausgang($mi_cfg);
     } else {
-        list($mi_vname, $mi_vinhalt) = mi_vorlage($mi_cfg);
+        list($mi_vname, $mi_vinhalt) = mi_vorlage_mqtt_out($mi_cfg);
     }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $mi_vname . '"');
@@ -1185,6 +1202,25 @@ echo mi_x2_markierung($mi_x2, 'mqtt', 'tab-mqtt');
          value="<?php echo mi_e($mi_cfg['mqtt_praefix']); ?>">
   <p class="sm-small"><?php echo mi_t('UI.MQTT_PRAEFIX_HILFE'); ?></p>
 </div>
+<?php /* Gruppe 15 (4.5.18, Entwurf 3.6): zwei Haken der MQTT-Befehle, ab Werk aus; der zweite gilt fuer
+   ein, betriebsart, frostschutz und selbstreinigung und ist ohne den ersten ausgegraut. */ ?>
+<div class="sm-row">
+  <label style="font-weight:normal;"><input data-role="none" type="checkbox" id="befehle_mqtt_ein" name="befehle_mqtt_ein" value="1" style="width:auto; display:inline;"<?php
+    echo mi_cfg($mi_cfg, 'befehle_mqtt_ein', '0') === '1' ? ' checked' : ''; ?>> <?php echo mi_t('UI.F_BEFEHLE_MQTT'); ?></label>
+</div>
+<div class="sm-row">
+  <label style="font-weight:normal;"><input data-role="none" type="checkbox" id="befehle_eingreifend_ein" name="befehle_eingreifend_ein" value="1" style="width:auto; display:inline;"<?php
+    echo mi_cfg($mi_cfg, 'befehle_eingreifend_ein', '0') === '1' ? ' checked' : '';
+    echo mi_cfg($mi_cfg, 'befehle_mqtt_ein', '0') === '1' ? '' : ' disabled'; ?>> <?php echo mi_t('UI.F_BEFEHLE_EINGREIFEND'); ?></label>
+  <p class="sm-small"><?php echo mi_t('UI.BEFEHLE_HILFE'); ?> <?php echo mi_t('UI.BEFEHLE_HEIMNETZ'); ?></p>
+</div>
+<script>
+(function () {
+    var a = document.getElementById('befehle_mqtt_ein'), b = document.getElementById('befehle_eingreifend_ein');
+    if (!a || !b) { return; }
+    a.addEventListener('change', function () { b.disabled = !a.checked; });
+})();
+</script>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mqtt_speichern" value="1"><?php echo mi_t('UI.MQTT_SPEICHERN'); ?></button>
 </div>
@@ -1254,7 +1290,12 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 </div>
 
 <h2><?php echo mi_te('UI.H_EINBINDUNG'); ?></h2>
-<p class="sm-small"><?php echo mi_t('UI.EINBINDUNG_EINLEITUNG'); ?></p>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.EINBINDUNG_EINLEITUNG'), mi_e($mi_port)); ?></p>
+<?php /* Gruppe 15 (4.5.18, Entwurf 2.5/2.6, 3.8): die Werte kommen ueber das MQTT-Gateway in einfache Virtuelle
+   Eingaenge (Namenstabelle), Befehle ueber MQTT (der Dienst abonniert sie selbst). Die Vorlage mit Virtuellen
+   HTTP-Eingaengen (Kunstgriff http://localhost, R2_078) ist entfallen; der UDP-Weg steht zugeklappt unten. */
+$mi_namen = mi_mqtt_namen($mi_cfg);
+$mi_mbef = mi_mqtt_befehle(); ?>
 
 <?php if (!$mi_geraete) { ?>
 <div class="sm-alert sm-warn"><?php echo sprintf(mi_t('UI.EINBINDUNG_OHNE_GERAETE'), mi_e($mi_bsp)); ?></div>
@@ -1268,64 +1309,81 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 <?php echo mi_t('UI.SCHRITT2_TEXT'); ?>
 <pre class="sm-pre"><?php echo mi_e($mi_topic); ?>/#</pre>
 <?php echo mi_abo_text(); ?>
+<p class="sm-hilfe"><?php echo mi_t('UI.ABO_BEFEHL_NICHT_ANHAKEN'); ?></p>
 </div>
 
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT3'); ?></b><br><br>
 <?php echo mi_t('UI.SCHRITT3_TEXT'); ?>
-<?php foreach (($mi_geraete ?: array(array('id' => $mi_bsp, 'typ' => '', 'bezeichnung' => '', 'name' => mi_e(mi_t('UI.KLIMAGERAET'))))) as $d) { ?>
-<p class="sm-small"><?php echo sprintf(mi_t('UI.GERAET_UEBERSCHRIFT'), $d['name'], mi_e($d['id'])); ?></p>
+<div class="sm-rollen">
+<table class="sm-tbl" id="mi-namen">
+<tr><th style="width:34%"><?php echo mi_te('UI.SP_GATEWAYNAME'); ?></th><th style="width:7%"><?php echo mi_te('UI.SP_ART'); ?></th>
+    <th style="width:8%"><?php echo mi_te('UI.THEMA_RETAIN'); ?></th><th style="width:9%">V2</th>
+    <th style="width:8%"><?php echo mi_te('UI.SP_FEHLWERT'); ?></th><th><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
+<?php foreach ($mi_namen as $mi_nz) { ?>
+<tr><td><span class="sm-mono mi-gwname"><?php echo mi_e($mi_nz['name']); ?></span><br><span class="sm-small sm-mono"><?php echo mi_e($mi_topic . '/' . $mi_nz['thema']); ?></span></td>
+    <td><?php echo mi_te($mi_nz['text'] ? 'UI.ART_TEXT' : 'UI.ART_ZAHL'); ?></td>
+    <td><?php echo mi_te($mi_nz['retained'] ? 'UI.RETAIN_JA' : 'UI.RETAIN_NEIN'); ?></td>
+    <td><?php if ($mi_nz['v2'] === 'N') { echo mi_te('UI.V2_NONCACHED'); } elseif ($mi_nz['v2'] === 'H') { echo mi_te('UI.V2_HAKEN'); } ?></td>
+    <td class="sm-mono"><?php echo mi_e($mi_nz['fehlwert']); ?></td>
+    <td><?php echo mi_e(mi_t($mi_nz['s'])); ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<p class="sm-hilfe"><?php echo mi_t('UI.NAMENSTABELLE_HILFE'); ?></p>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="button" id="mi-namen-kopieren"><?php echo mi_te('UI.K_NAMEN_KOPIEREN'); ?></button>
+<span class="sm-small" id="mi-namen-kopiert"></span>
+</div>
+<script>
+(function () {
+    var k = document.getElementById('mi-namen-kopieren');
+    if (!k) { return; }
+    k.addEventListener('click', function () {
+        var n = [];
+        var l = document.querySelectorAll('#mi-namen .mi-gwname');
+        for (var i = 0; i < l.length; i++) { n.push(l[i].textContent); }
+        var t = n.join('\n');
+        var fertig = function () { document.getElementById('mi-namen-kopiert').textContent = <?php echo json_encode(mi_t('UI.KOPIERT'), JSON_HEX_TAG | JSON_HEX_AMP); ?>; };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(t).then(fertig, function () { window.prompt('', t); });
+        } else {
+            window.prompt('', t);
+        }
+    });
+})();
+</script>
+</div>
+
+<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT4_MQTT'); ?></b><br><br>
+<?php echo mi_t('UI.SCHRITT4_MQTT_TEXT'); ?>
+<?php if (!$mi_mbef) { ?>
+<div class="sm-alert sm-warn"><?php echo mi_t('UI.MQTT_BEFEHLE_UNLESBAR'); ?></div>
+<?php } else { ?>
 <div class="sm-rollen">
 <table class="sm-tbl">
-<tr><th><?php echo mi_te('UI.TITEL_EINGANG'); ?></th><th style="width:12%"><?php echo mi_te('UI.EINHEIT'); ?></th><th style="width:34%"><?php echo mi_te('UI.BEDEUTUNG'); ?></th></tr>
-<?php foreach (mi_werte() as $wert => $info) { ?>
-<tr><td class="sm-mono"><?php echo mi_e(mi_gateway_name($mi_topic, $d['id'] . '_' . $wert)); ?></td>
-    <td><?php echo $info[0]; ?></td><td><?php echo mi_e(mi_t($info[1])); ?></td></tr>
+<tr><th style="width:26%"><?php echo mi_te('UI.SP_BEFEHLSTITEL'); ?></th><th style="width:36%"><?php echo mi_te('UI.SP_THEMA'); ?></th>
+    <th><?php echo mi_te('UI.BEFEHL_EIN'); ?></th><th><?php echo mi_te('UI.BEFEHL_AUS'); ?></th><th><?php echo mi_te('UI.SP_HAKEN'); ?></th></tr>
+<?php foreach ($mi_mbef as $mi_mb) { ?>
+<tr><td><?php echo mi_e('Midea2Lox: ' . $mi_mb['titel']); ?></td>
+    <td class="sm-mono"><?php echo mi_e($mi_topic . '/befehl/' . $mi_bsp . '/' . $mi_mb['name']); ?></td>
+    <td class="sm-mono"><?php echo mi_e($mi_mb['ein']); ?></td>
+    <td class="sm-mono"><?php echo $mi_mb['aus'] !== '' ? mi_e($mi_mb['aus']) : '&mdash;'; ?></td>
+    <td><?php echo mi_te($mi_mb['eingreifend'] ? 'UI.HAKEN_BEIDE' : 'UI.HAKEN_EINER'); ?></td></tr>
 <?php } ?>
 </table>
 </div>
 <?php } ?>
-<?php /* M7 (ab 4.5.10): hier stand die Anleitung fuer einen virtuellen
-          UDP-Eingang auf dem Befehlsport. Auf diesem Port horcht der Dienst
-          selbst; einen UDP-Sender Richtung Miniserver gibt es im Plugin nicht
-          (Bericht mqtt M7). Wer der Anleitung folgte, legte einen Eingang an,
-          der nie einen Wert bekam. */ ?>
-<p class="sm-small"><?php echo sprintf(mi_t('UI.UDP_WEG'), mi_e($mi_port), mi_e($mi_topic)); ?></p>
-</div>
-
-<?php if ($mi_geraete) { ?>
-<div class="sm-step"><b><?php echo mi_te('UI.H_VORLAGE'); ?></b><br><br>
-<div class="sm-hinweis"><?php echo mi_t('UI.H_VORLAGE_TEXT'); ?></div>
+<p class="sm-hilfe"><?php echo mi_t('UI.BEFEHLE_GATEWAY'); ?> <?php echo mi_t('UI.BEFEHLE_HEIMNETZ'); ?></p>
+<?php if ($mi_geraete && $mi_mbef) { ?>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post">
     <?php echo mi_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
-    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="eingang"><?php echo mi_t('UI.K_VORLAGE'); ?></button>
-  </form>
-  <form action="index.php" method="post">
-    <?php echo mi_fmt(); ?>
-    <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
-    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="ausgang"><?php echo mi_t('UI.K_VORLAGE_AUS'); ?></button>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="mqtt"><?php echo mi_t('UI.K_VORLAGE_MQTT'); ?></button>
   </form>
 </div>
 <p class="sm-hilfe"><?php echo mi_t('UI.VORLAGE_WARNUNG'); ?></p>
-</div>
 <?php } ?>
-
-<div class="sm-step"><b><?php echo mi_te('UI.SCHRITT4'); ?></b><br><br>
-<?php echo sprintf(mi_t('UI.SCHRITT4_TEXT'), mi_e($mi_ip), mi_e($mi_port)); ?>
-<pre class="sm-pre">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></pre>
-<?php echo mi_t('UI.SCHRITT4_TEXT2'); ?>
-<div class="sm-rollen">
-<table class="sm-tbl">
-<tr><th style="width:34%"><?php echo mi_te('UI.WAS'); ?></th><th><?php echo mi_te('UI.BEFEHL_EIN'); ?></th><th><?php echo mi_te('UI.BEFEHL_AUS'); ?></th></tr>
-<?php foreach (mi_befehle() as $b) { ?>
-<tr><td><?php echo mi_e(mi_t($b[0])); ?></td>
-    <td class="sm-mono"><?php echo mi_e($mi_bsp . ' ' . $b[1]); ?></td>
-    <td class="sm-mono"><?php echo $b[2] !== null ? mi_e($mi_bsp . ' ' . $b[2]) : '&mdash;'; ?></td></tr>
-<?php } ?>
-</table>
-</div>
-<?php echo mi_t('UI.SCHRITT4_TEMP'); ?>
 </div>
 
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT5'); ?></b><br><br>
@@ -1338,8 +1396,8 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
 /**
  * Die Baustein-Listen von Schritt 6 - Welle Bild 19 (4.5.15, Hausherr 11.10.2026: Vollausstattung, ein
  * absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 19 md, E1-E18, 18.10.2026). DREI
- * Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt, Abschnitte "Midea2Lox" 30,
- * "Midea2Lox Betrieb" 27, "Midea2Lox Komfort und Energie" 33 Zeilen). Bis 4.5.14 stand hier EINE Liste mit
+ * Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt, Abschnitte "Midea2Lox" 31,
+ * "Midea2Lox Betrieb" 27, "Midea2Lox Komfort und Energie" 40 Zeilen - Stand Gruppe 15, 4.5.18). Bis 4.5.14 stand hier EINE Liste mit
  * 20 Zeilen (Schluessel UI.BL_*). Berichtigt gegen sie: die Formel "Alter des Lebenszeichens" hatte einen
  * Eingang T, den es an einer Formel nicht gibt, und das falsche Vorzeichen - "Plugin steht" meldete nie (jetzt
  * Analogwertvalidierung am Lebenszeichen status/zaehler); "online" kommt nur mit Abfragetakt; die
@@ -1358,7 +1416,9 @@ foreach ($mi_gruppen as $mi_g => $mi_gt) { ?>
  */
 function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
 {
-    // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
+    // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise.
+    // Gruppe 15 (4.5.18): Liste 79b695e2 (31/27/40 Zeilen); 'gw' = Name aus dem MQTT-Gateway, 'bf' = Befehl
+    // ueber MQTT (Thema im Parameter mit eigenem Praefix und eigener Geraetenummer gerechnet).
     $seiten = array(
         array('Midea2Lox', 'einbindung_loxone.png', array(
             array(mi_t('BAUSTEIN.Z1_01'), 'gw'),
@@ -1375,7 +1435,7 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             array(mi_t('BAUSTEIN.Z1_12'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_13'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_14'), 'gw'),
-            array(sprintf(mi_t('BAUSTEIN.Z1_15')), 'gw'),
+            array(mi_t('BAUSTEIN.Z1_15'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_16')),
             array(mi_t('BAUSTEIN.Z1_17')),
             array(mi_t('BAUSTEIN.Z1_18')),
@@ -1385,12 +1445,13 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             array(mi_t('BAUSTEIN.Z1_22'), 'bf'),
             array(mi_t('BAUSTEIN.Z1_23')),
             array(mi_t('BAUSTEIN.Z1_24'), 'bf'),
-            array(sprintf(mi_t('BAUSTEIN.Z1_25'))),
+            array(mi_t('BAUSTEIN.Z1_25')),
             array(mi_t('BAUSTEIN.Z1_26'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_27'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_28'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_29'), 'gw'),
             array(mi_t('BAUSTEIN.Z1_30')),
+            array(mi_t('BAUSTEIN.Z1_31'), 'gw'),
         ), array(
             'BAUSTEIN.SEITE1_SCHRITT1',
             'BAUSTEIN.SEITE1_SCHRITT2',
@@ -1431,13 +1492,13 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             array(mi_t('BAUSTEIN.Z2_18'), 'bf'),
             array(mi_t('BAUSTEIN.Z2_19')),
             array(mi_t('BAUSTEIN.Z2_20'), 'bf'),
-            array(sprintf(mi_t('BAUSTEIN.Z2_21')), 'gw'),
+            array(mi_t('BAUSTEIN.Z2_21'), 'gw'),
             array(mi_t('BAUSTEIN.Z2_22'), 'gw'),
             array(mi_t('BAUSTEIN.Z2_23'), 'gw'),
             array(mi_t('BAUSTEIN.Z2_24'), 'gw'),
             array(mi_t('BAUSTEIN.Z2_25')),
             array(mi_t('BAUSTEIN.Z2_26'), 'bf'),
-            array(sprintf(mi_t('BAUSTEIN.Z2_27'))),
+            array(mi_t('BAUSTEIN.Z2_27')),
         ), array(
             'BAUSTEIN.SEITE2_SCHRITT1',
             'BAUSTEIN.SEITE2_SCHRITT2',
@@ -1483,6 +1544,13 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             array(mi_t('BAUSTEIN.Z3_31'), 'gw'),
             array(mi_t('BAUSTEIN.Z3_32'), 'gw'),
             array(mi_t('BAUSTEIN.Z3_33')),
+            array(mi_t('BAUSTEIN.Z3_34')),
+            array(mi_t('BAUSTEIN.Z3_35')),
+            array(mi_t('BAUSTEIN.Z3_36'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_37'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_38'), 'bf'),
+            array(mi_t('BAUSTEIN.Z3_39'), 'gw'),
+            array(mi_t('BAUSTEIN.Z3_40')),
         ), array(
             'BAUSTEIN.SEITE3_SCHRITT1',
             'BAUSTEIN.SEITE3_SCHRITT2',
@@ -1492,6 +1560,7 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             'BAUSTEIN.SEITE3_H2',
             'BAUSTEIN.SEITE3_H3',
             'BAUSTEIN.SEITE3_H4',
+            'BAUSTEIN.SEITE3_H5',
         )),
     );
     $aus = array();
@@ -1501,6 +1570,10 @@ function mi_bausteinliste($mi_bl_topic, $mi_bl_bsp)
             $mi_c = array_pad(explode(' | ', $mi_z[0], 4), 4, '');
             if (isset($mi_z[1])) {
                 $mi_c[1] = mi_baustein_name($mi_c[1], $mi_z[1], $mi_bl_topic, $mi_bl_bsp);
+                if ($mi_z[1] === 'bf') {
+                    $mi_c[2] = str_replace('Midea2Lox/befehl/123456789012/',
+                                           $mi_bl_topic . '/befehl/' . $mi_bl_bsp . '/', $mi_c[2]);
+                }
             }
             $mi_zeilen[] = array_merge(array($mi_i + 1), $mi_c);
         }
@@ -1522,9 +1595,8 @@ function mi_baustein_name($name, $art, $topic, $bsp)
         }
         return mi_gateway_name($topic, $rest);
     }
-    if ($art === 'bf' && strpos($name, 'Midea2Lox 123456789012 ') === 0) {
-        return 'Midea2Lox ' . $bsp . ' ' . substr($name, strlen('Midea2Lox 123456789012 '));
-    }
+    // Gruppe 15 (4.5.18): Befehle heissen fest "Midea2Lox: <Titel>" (wie im Musterprojekt); Praefix und Nummer
+    // stehen im Thema des Parameters (mi_bausteinliste).
     return $name;
 }
 
@@ -1569,6 +1641,35 @@ foreach (mi_bausteinliste($mi_topic, $mi_bsp) as $mi_bs) {
 <div class="sm-step"><b><?php echo mi_te('UI.SCHRITT7'); ?></b><br><br>
 <?php echo mi_t('UI.SCHRITT7_TEXT'); ?>
 </div>
+<?php /* Gruppe 15 (4.5.18): der UDP-Befehlseingang bleibt fuer bestehende Anlagen (F-E16) - zugeklappt. Die
+   Vorlage traegt jetzt auch die acht rate_select-Befehle (E4, F-E8). */ ?>
+<details class="sm-step"><summary><b><?php echo mi_te('UI.UDP_ALT_TITEL'); ?></b></summary><br>
+<?php echo sprintf(mi_t('UI.SCHRITT4_TEXT'), mi_e($mi_ip), mi_e($mi_port)); ?>
+<pre class="sm-pre">/dev/udp/<?php echo mi_e($mi_ip); ?>/<?php echo mi_e($mi_port); ?></pre>
+<?php echo mi_t('UI.SCHRITT4_TEXT2'); ?>
+<div class="sm-rollen">
+<table class="sm-tbl">
+<tr><th style="width:34%"><?php echo mi_te('UI.WAS'); ?></th><th><?php echo mi_te('UI.BEFEHL_EIN'); ?></th><th><?php echo mi_te('UI.BEFEHL_AUS'); ?></th></tr>
+<?php foreach (mi_befehle() as $b) { ?>
+<tr><td><?php echo mi_e(mi_t($b[0])); ?></td>
+    <td class="sm-mono"><?php echo mi_e($mi_bsp . ' ' . $b[1]); ?></td>
+    <td class="sm-mono"><?php echo $b[2] !== null ? mi_e($mi_bsp . ' ' . $b[2]) : '&mdash;'; ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<?php echo mi_t('UI.SCHRITT4_TEMP'); ?>
+<p class="sm-small"><?php echo sprintf(mi_t('UI.UDP_WEG'), mi_e($mi_port), mi_e($mi_topic)); ?></p>
+<?php if ($mi_geraete) { ?>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php echo mi_fmt(); ?>
+    <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="ausgang"><?php echo mi_t('UI.K_VORLAGE_AUS'); ?></button>
+  </form>
+</div>
+<p class="sm-hilfe"><?php echo mi_t('UI.VORLAGE_WARNUNG'); ?></p>
+<?php } ?>
+</details>
 </div>
 
 <!-- ============================== Automatik =============================== -->
@@ -1707,6 +1808,38 @@ echo mi_x2_markierung($mi_x2, 'automatik', 'tab-automatik');
         placeholder="<?php echo mi_e($mi_bsp . ':wohnzimmer_links+wohnzimmer_rechts'); ?>"></td></tr>
 </table>
 <p class="sm-small"><?php echo mi_t('UI.FENSTER_S_HINWEIS'); ?></p>
+</div>
+
+<?php /* Gruppe 15 (4.5.18, V1, Entwurf Abschnitt 7): Anwesenheit ueber haus/anwesenheit/jemand, ab Werk aus. */ ?>
+<div class="sm-step">
+<h3><?php echo mi_te('UI.ANW_S'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.ANW_S_TEXT'); ?></p>
+<table class="sm-tbl">
+<tr><td><?php echo mi_te('UI.ANW_F_EIN'); ?></td>
+    <td><select data-role="none" name="anwesenheit_ein">
+      <option value="0"<?php echo mi_cfg($mi_cfg, 'anwesenheit_ein', '0') === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.AUS'); ?></option>
+      <option value="1"<?php echo mi_cfg($mi_cfg, 'anwesenheit_ein', '0') === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.EIN'); ?></option>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.ANW_F_VERHALTEN'); ?></td>
+    <td><select data-role="none" name="anwesenheit_verhalten">
+<?php foreach (array('verschieben' => 'UI.ANW_V_VERSCHIEBEN', 'spar' => 'UI.ANW_V_SPAR', 'aus' => 'UI.ANW_V_AUS') as $mi_av => $mi_ak) { ?>
+      <option value="<?php echo $mi_av; ?>"<?php echo mi_cfg($mi_cfg, 'anwesenheit_verhalten', 'verschieben') === $mi_av ? ' selected' : ''; ?>><?php echo mi_te($mi_ak); ?></option>
+<?php } ?>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.ANW_F_VERSCHIEBUNG'); ?></td>
+    <td><input data-role="none" type="text" name="anwesenheit_verschiebung" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'anwesenheit_verschiebung', '30')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_F_VERSCHIEBUNG_EINHEIT'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.ANW_F_FRIST'); ?></td>
+    <td><input data-role="none" type="text" name="anwesenheit_frist" size="8"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'anwesenheit_frist', '300')); ?>">
+        <span class="sm-small"><?php echo mi_te('UI.AUTO_SEKUNDEN'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.ANW_F_GERAETE'); ?></td>
+    <td><input data-role="none" type="text" name="anwesenheit_geraete" size="42"
+        value="<?php echo mi_e(mi_cfg($mi_cfg, 'anwesenheit_geraete', '')); ?>"
+        placeholder="<?php echo mi_e(mi_t('UI.AUTO_F_GERAETE_LEER')); ?>"></td></tr>
+</table>
+<p class="sm-small"><?php echo mi_t('UI.ANW_S_HINWEIS'); ?></p>
 </div>
 
 <div class="sm-legende">
@@ -1901,6 +2034,10 @@ $mi_zeilen = mi_log_tail();
         }
         for (var j = 0; j < seiten.length; j++) {
             seiten[j].classList.toggle('sm-active', seiten[j].id === ziel);
+        }
+        // M11 (4.5.18): F5 bleibt auf dem gewaehlten Reiter.
+        if (window.history && history.replaceState) {
+            history.replaceState(null, '', 'index.php?form=' + ziel.substr(4));
         }
     }
     for (var k = 0; k < reiter.length; k++) {

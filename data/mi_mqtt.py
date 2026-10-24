@@ -3,6 +3,8 @@
 """Midea2Lox - welche Themen zurueckbehalten werden, und das Abraeumen am Broker.
 
 Aufruf (aus uninstall/uninstall):  mi_mqtt.py --mqtt-leeren
+Seit 4.5.18 (Gruppe 15) auch die Fehlwerte (FEHLWERT) und die Tabelle der
+MQTT-Befehle (MQTT_BEFEHLE, befehl_deuten) - eine Quelle fuer Dienst und Oberflaeche.
 Sonst ein Modul: midea2lox.py holt sich daraus retain_fuer(),
 altlast_thema(), altlast_kennung() und broker_leeren(). Beim Import tut es
 nichts - kein Protokoll, keine Verbindung, keine Datei.
@@ -98,6 +100,159 @@ _GERAET_ID = re.compile(r'^([0-9]{10,19})/([a-z_]+)$')
 # Ein Themenpraefix, wie die Oberflaeche es zulaesst (mi_wert_pruefen).
 _PRAEFIX = re.compile(r'^[A-Za-z0-9_.\-]{1,48}(/[A-Za-z0-9_.\-]{1,48}){0,3}$')
 
+# ---------------------------------------------------------------------------
+# Fehlwerte (ab 4.5.18, Gruppe 15 - Entscheidungen Gruppe 3/4: ohne Vorzeichen -1,
+# Temperaturen -999; Texte bleiben "-")
+# ---------------------------------------------------------------------------
+# Was ein ERFOLGREICHER Abruf nicht liefert, geht nicht mehr als "-" hinaus:
+# ein Virtueller Eingang liest "-" als 0, und power_state 0 hiesse "aus" - eine
+# Falschaussage. -1 sagt "keine Aussage", -999 "Temperatur fehlt". Texte
+# (Betriebsart, Luefter, Schwenken, Winkel, Leistungsstufe, Breeze) bleiben
+# "-": ein Virtueller Texteingang zeigt es ehrlich. Ein OFFLINE-Geraet sendet
+# weiter nur <id>/online = 0 - die Zustaende bleiben stehen (begruendete
+# Ausnahme, Entwurf Gruppe 15 Abschnitt 2.3, F-E5).
+# Eine Zeile je Thema, keine Klammer in einem Kommentar: die Pruefzeile im
+# Reiter Test (mi_fehlwert_probe() in mi_lib.php) liest diese Tabelle bis zur
+# ersten schliessenden Klammer und haelt sie gegen mi_werte().
+FEHLWERT = (
+    'target_temperature=-999',
+    'indoor_temperature=-999',
+    'outdoor_temperature=-999',
+    'operational_mode=-',
+    'fan_speed=-',
+    'swing_mode=-',
+    'horizontal_swing_angle=-',
+    'vertical_swing_angle=-',
+    'rate_select=-',
+    'breeze_mode=-',
+)
+
+
+def fehlwert_fuer(name):
+    """Der Fehlwert eines Geraetethemas (Name ohne Nummer): -999, - oder -1."""
+    for zeile in FEHLWERT:
+        k, _gleich, w = zeile.partition('=')
+        if k == name:
+            return w
+    return '-1'
+
+
+# ---------------------------------------------------------------------------
+# Befehle ueber MQTT (ab 4.5.18, Gruppe 15 - Entwurf 3.2, F-E1/F-E2)
+# ---------------------------------------------------------------------------
+# Thema <praefix>/befehl/<Geraetenummer>/<name>, Nutzlast wie die gemeinsame
+# Befehlsbruecke (puls 1, schalter 0/1, auswahl ein Wort, zahl mit Punkt oder
+# Komma, ganz). Jeder Befehl wird zu GENAU dem UDP-Wort, das Loxone bisher
+# schickte, und laeuft durch dieselbe Warteschlange wie UDP (Gleichwert-Sperre,
+# Handvorrang, Positivliste in send_to_midea). Spalten je Zeile, durch "|"
+# getrennt: Name | Art | Werte | Abbildung | eingreifend.
+#   Werte:     schalter 0,1 - puls 1 - auswahl die Woerter - zahl/ganz min..max
+#   Abbildung: Wert=UDP-Wort, durch Leerzeichen getrennt; <v> = der Wert
+#   eingreifend: 1 = nur mit dem zweiten Haken befehle_eingreifend_ein
+# Eine Zeile je Befehl, keine Klammer in einem Kommentar: die Oberflaeche
+# (mi_mqtt_befehle_python() in mi_lib.php) liest diese Tabelle zeilenweise und
+# prueft, dass jede Abbildung in der Positivliste von mi_befehle() steht.
+MQTT_BEFEHLE = (
+    'ein|schalter|0,1|1=power.True 0=power.False|1',
+    'betriebsart|auswahl|automatik,kuehlen,heizen,entfeuchten,lueften|automatik=ac.operational_mode_enum.auto kuehlen=ac.operational_mode_enum.cool heizen=ac.operational_mode_enum.heat entfeuchten=ac.operational_mode_enum.dry lueften=ac.operational_mode_enum.fan_only|1',
+    'luefter|auswahl|automatik,leise,niedrig,mittel,hoch,hoechste|automatik=ac.fan_speed_enum.Auto leise=ac.fan_speed_enum.Silent niedrig=ac.fan_speed_enum.Low mittel=ac.fan_speed_enum.Medium hoch=ac.fan_speed_enum.High hoechste=ac.fan_speed_enum.Full|0',
+    'schwenken|auswahl|aus,senkrecht,waagerecht,beide|aus=ac.swing_mode_enum.Off senkrecht=ac.swing_mode_enum.Vertical waagerecht=ac.swing_mode_enum.Horizontal beide=ac.swing_mode_enum.Both|0',
+    'soll|zahl|5..35|<v>=temp.<v>|0',
+    'feuchte|ganz|0..100|<v>=humidity.<v>|0',
+    'spar|schalter|0,1|1=eco.True 0=eco.False|0',
+    'schnell|schalter|0,1|1=turbo.True 0=turbo.False|0',
+    'nacht|schalter|0,1|1=sleep.True 0=sleep.False|0',
+    'fernbedienung|schalter|0,1|1=follow.True 0=follow.False|0',
+    'frostschutz|schalter|0,1|1=freeze.True 0=freeze.False|1',
+    'luftreinigung|schalter|0,1|1=purifier.True 0=purifier.False|0',
+    'ton|schalter|0,1|1=tone.True 0=tone.False|0',
+    'anzeige|puls|1|1=toggle_Display|0',
+    'selbstreinigung|puls|1|1=toggle_self_clean|1',
+    'abfragen|puls|1|1=status|0',
+    'leistungsstufe|auswahl|aus,gear_50,gear_75,level_1,level_2,level_3,level_4,level_5|aus=rate_select.OFF gear_50=rate_select.GEAR_50 gear_75=rate_select.GEAR_75 level_1=rate_select.LEVEL_1 level_2=rate_select.LEVEL_2 level_3=rate_select.LEVEL_3 level_4=rate_select.LEVEL_4 level_5=rate_select.LEVEL_5|0',
+)
+NUTZLAST_MAX = 64
+_ZAHL = re.compile(r'^-?[0-9]{1,9}(?:[.,][0-9]{1,3})?$')
+_GANZ = re.compile(r'^-?[0-9]{1,9}$')
+
+
+def mqtt_befehle():
+    """{Name: (Art, Werte, {Wert: UDP-Wort}, eingreifend)} aus MQTT_BEFEHLE."""
+    aus = {}
+    for zeile in MQTT_BEFEHLE:
+        name, art, werte, abbildung, eingreifend = zeile.split('|')
+        karte = {}
+        for paar in abbildung.split(' '):
+            w, _gleich, wort = paar.partition('=')
+            karte[w] = wort
+        aus[name] = (art, werte, karte, eingreifend == '1')
+    return aus
+
+
+def _zahl_text(f):
+    """22.0 -> '22', 22.5 -> '22.5' (wie bb_zahl_text der gemeinsamen Bruecke)."""
+    t = ('%.3f' % f).rstrip('0').rstrip('.')
+    return '0' if t in ('', '-0') else t
+
+
+def befehl_deuten(name, roh, eingreifend_erlaubt):
+    """Einen MQTT-Befehl formal pruefen und in das UDP-Wort uebersetzen.
+
+    Rueckgabe (UDP-Wort, None) oder (None, Grund fuer die Quittung ohne
+    'abgelehnt: '). Geschaltet wird hier nichts - das tut der Arbeiter.
+    """
+    tab = mqtt_befehle()
+    if name not in tab:
+        return None, 'unbekannter Befehl'
+    art, werte, karte, eingreifend = tab[name]
+    if not isinstance(roh, str):
+        return None, 'Wert ungueltig (Text)'
+    if len(roh.encode('utf-8', 'replace')) > NUTZLAST_MAX:
+        return None, 'Wert ungueltig (hoechstens %d Byte)' % NUTZLAST_MAX
+    w = roh.strip()
+    if art == 'puls':
+        if w != '1':
+            return None, 'Wert ungueltig (1)'
+        wort = karte['1']
+    elif art == 'schalter':
+        if w not in ('0', '1'):
+            return None, 'Wert ungueltig (0 oder 1)'
+        wort = karte[w]
+    elif art == 'auswahl':
+        k = w.lower()
+        liste = werte.split(',')
+        if k not in liste:
+            return None, 'Wert ungueltig (%s)' % '|'.join(liste)
+        wort = karte[k]
+    elif art in ('zahl', 'ganz'):
+        unten, _p, oben = werte.partition('..')
+        unten, oben = float(unten), float(oben)
+        if art == 'ganz':
+            er = 'ganze Zahl %s bis %s' % (_zahl_text(unten), _zahl_text(oben))
+            if not _GANZ.match(w) or not unten <= int(w) <= oben:
+                return None, 'Wert ungueltig (%s)' % er
+            text = str(int(w))
+        else:
+            er = 'Zahl %s bis %s' % (_zahl_text(unten), _zahl_text(oben))
+            if not _ZAHL.match(w):
+                return None, 'Wert ungueltig (%s)' % er
+            f = float(w.replace(',', '.'))
+            if not unten <= f <= oben:
+                return None, 'Wert ungueltig (%s)' % er
+            text = _zahl_text(f)
+        wort = karte['<v>'].replace('<v>', text)
+    else:
+        return None, 'Wert ungueltig (unbekannte Art)'
+    if eingreifend and not eingreifend_erlaubt:
+        return None, 'zweiter Haken aus'
+    return wort, None
+
+
+def grund_ascii(g):
+    """Grund fuer die Quittung: ASCII, hoechstens 120 Zeichen (wie bb_grund_ascii)."""
+    g = re.sub(r'[^A-Za-z0-9 _:.,()/=+|-]', '_', str(g))[:120].strip()
+    return g or 'ohne Grund'
+
 
 def geraet_und_wert(unter):
     """(Geraetenummer, Name) eines Themas ohne Praefix - oder None (M2)."""
@@ -139,6 +294,9 @@ def eigenes_thema(unter):
     fremdes Thema unter demselben Praefix bleibt stehen.
     """
     if unter in MIT_RETAIN or unter in DIENST_ALTLAST:
+        return True
+    # Gruppe 15 (M14-Rest): ein versehentlich retained gesendeter Befehl gehoert dazu.
+    if re.match(r'^befehl/[0-9]{10,19}/[a-z_]+$', unter):
         return True
     name = _geraetewert(unter)
     return name is not None and (name in MIT_RETAIN or name in GERAET_ALTLAST)

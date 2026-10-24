@@ -354,6 +354,69 @@ function mi_pruefungen($cfg)
         }
     }
 
+
+    // ---- Gruppe 15 (4.5.18): Testknopf/UDP, MQTT-Befehle, Fehlwerte, Namenstabelle, Anwesenheit ----
+    //
+    // M16/E5: der Dienst horcht seit 4.5.18 auf allen Adressen, der Knopf "Senden" schickt an 127.0.0.1.
+    // LoxberryIP bleibt Ziel der UDP-Vorlage - weicht er von der lokalen Adresse ab (DHCP), zeigt die
+    // Vorlage in Loxone auf eine alte Adresse. Auskunft, kein Urteil (Strich).
+    $lip = mi_cfg($cfg, 'LoxberryIP', '');
+    $loc = mi_localip();
+    if ($lip !== '' && $lip !== $loc) {
+        $z[] = array(mi_e(mi_t('PRUEF.LOXBERRYIP')), 2, sprintf(mi_t('UI.LOXBERRYIP_ALT'), mi_e($lip), mi_e($loc)));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.LOXBERRYIP')), 1, sprintf(mi_t('UI.LOXBERRYIP_OK'), mi_e($lip !== '' ? $lip : $loc)));
+    }
+
+    list($bl, $bq, $balter) = mi_befehle_lage($cfg);
+    if ($bl === 'aus') {
+        $z[] = array(mi_e(mi_t('PRUEF.MQTT_BEFEHLE')), 2, mi_t('UI.BEFEHLE_LAGE_AUS'));
+    } elseif ($bl === 'fehlt' || $bl === 'alt') {
+        $z[] = array(mi_e(mi_t('PRUEF.MQTT_BEFEHLE')), 0, mi_t('UI.BEFEHLE_LAGE_STUMM'));
+    } elseif ($bl === 'ok') {
+        $z[] = array(mi_e(mi_t('PRUEF.MQTT_BEFEHLE')), 1, (is_array($bq) && isset($bq['ts']))
+            ? sprintf(mi_t('UI.BEFEHLE_LAGE_ZULETZT'), mi_e((string) $bq['thema']), mi_e((string) $bq['quittung']),
+                      max(0, time() - (int) $bq['ts']))
+            : mi_t('UI.BEFEHLE_LAGE_OK'));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.MQTT_BEFEHLE')), 0, mi_t('UI.BEFEHLE_LAGE_ABO'));
+    }
+
+    list($zok, $zanz, $zab) = mi_mqtt_zuordnung_probe();
+    $z[] = array(mi_e(mi_t('PRUEF.ZUORDNUNG')), $zok === null ? 2 : ($zok ? 1 : 0),
+        $zok === null ? mi_t('UI.DIENST_NICHT_LESBAR')
+            : ($zok ? sprintf(mi_t('UI.ZUORDNUNG_GLEICH'), $zanz)
+                    : sprintf(mi_t('UI.ZUORDNUNG_UNGLEICH'), mi_e(implode(', ', $zab)))));
+
+    list($fok, $fanz, $fab) = mi_fehlwert_probe();
+    $z[] = array(mi_e(mi_t('PRUEF.FEHLWERTE')), $fok === null ? 2 : ($fok ? 1 : 0),
+        $fok === null ? mi_t('UI.DIENST_NICHT_LESBAR')
+            : ($fok ? sprintf(mi_t('UI.FEHLWERTE_GLEICH'), $fanz)
+                    : sprintf(mi_t('UI.FEHLWERTE_UNGLEICH'), mi_e(implode(', ', $fab)))));
+
+    list($nok, $nanz, $nhaken, $nab) = mi_namen_probe($cfg);
+    $z[] = array(mi_e(mi_t('PRUEF.NAMEN')), $nok ? 1 : 0,
+        $nok ? sprintf(mi_t('UI.NAMEN_OK'), $nanz, $nhaken)
+             : sprintf(mi_t('UI.NAMEN_FALSCH'), mi_e(implode(', ', $nab))));
+
+    // V1: hoert die Kopplung etwas? Schweigt die Quelle, gilt das Verhalten ohne Anwesenheit.
+    list($al2, $ad2, $aalter2) = mi_anwesenheit_lage($cfg);
+    if ($al2 === 'aus') {
+        $z[] = array(mi_e(mi_t('PRUEF.ANWESENHEIT')), 2, mi_t('UI.ANW_LAGE_AUS'));
+    } elseif ($al2 === 'fehlt' || $al2 === 'unlesbar' || $al2 === 'alt') {
+        $z[] = array(mi_e(mi_t('PRUEF.ANWESENHEIT')), 0, mi_t('UI.ANW_LAGE_STUMM'));
+    } elseif (empty($ad2['mqtt'])) {
+        $z[] = array(mi_e(mi_t('PRUEF.ANWESENHEIT')), 0, mi_t('UI.ANW_OHNE_MQTT'));
+    } elseif (empty($ad2['lebt']) || !in_array($ad2['wert'], array('0', '1'), true)) {
+        $z[] = array(mi_e(mi_t('PRUEF.ANWESENHEIT')), 0,
+            ($ad2['zaehler_alter'] === null) ? mi_t('UI.ANW_NIE') : sprintf(mi_t('UI.ANW_SCHWEIGT'), (int) $ad2['zaehler_alter']));
+    } else {
+        $halt = (isset($ad2['halt']) && is_array($ad2['halt'])) ? $ad2['halt'] : array();
+        $z[] = array(mi_e(mi_t('PRUEF.ANWESENHEIT')), 1,
+            sprintf(mi_t('UI.ANW_LAEUFT'), mi_e((string) $ad2['wert']), (int) $ad2['zaehler_alter'], count($halt),
+                    mi_e((string) $ad2['verhalten'])));
+    }
+
     return $z;
 }
 
@@ -375,6 +438,10 @@ function mi_discover()
      * gruenen Kasten. Eine leere Ausgabe bei Rueckgabewert ungleich 0 ist
      * kein "nichts gefunden", sondern das Gegenteil. */
     $text = trim($aus);
+    // M7 (4.5.18): Rueckgabe 3 = es laeuft schon eine Suche - kein Abbruch, nur warten.
+    if ($code === 3) {
+        return array($text !== '' ? $text : mi_t('UI.DISCOVER_OHNE_AUSGABE'), false);
+    }
     if ($code !== 0) {
         // O2 (ab 4.5.10): eine abgebrochene Suche steht nicht mehr im gruenen
         // Kasten (Bericht Oberflaeche Befund 4).
@@ -489,7 +556,9 @@ function mi_schalten($cfg, $id, $befehl, $trocken)
         return array($trocken ? $titel : $nicht, mi_block(mi_t('UI.SCHALT_BEFEHL_UNBEKANNT')), false);
     }
 
-    $ip   = mi_cfg($cfg, 'LoxberryIP', '127.0.0.1');
+    // M16 (4.5.18, Gruppe 15): an 127.0.0.1 - der Dienst horcht seit 4.5.18 auf allen Adressen (E5), und
+    // LoxberryIP war nach einem DHCP-Wechsel ohne erneutes Speichern ein totes Ziel.
+    $ip   = '127.0.0.1';
     $port = (int) mi_cfg($cfg, 'UDP_PORT', '7013');
     $paket = $id . ' ' . $befehl;
 

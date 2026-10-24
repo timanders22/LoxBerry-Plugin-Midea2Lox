@@ -30,6 +30,16 @@ lb_wurzel_suchen() {
 # Wird beim Deinstallieren des Plugins ausgefuehrt.
 # Aufruf durch plugininstall.pl: <tempordner> <name> <ordner> <fassung> <wurzel>
 
+# ---------- Praefixschutz (4.5.18, Gruppe 15; Hausregel Gruppe 4) ----------
+# plugininstall.pl fuehrt beim Deinstallieren JEDES data/system/uninstall/<name>* aus - auch
+# dieses Skript, wenn ein Plugin deinstalliert wird, dessen NAME ein Praefix von "Midea2Lox"
+# ist (am Geraet 08.10.2026: zigbee2mqtt riss zigbee2mqttng mit). $2 ist dann der Name DES
+# ANDEREN Plugins. Ein fremder Name heisst: nichts anfassen.
+if [ -n "${2:-}" ] && [ "${2:-}" != "Midea2Lox" ]; then
+    echo "<INFO> Midea2Lox: aufgerufen fuer das Plugin '${2:-}', nicht fuer Midea2Lox - nichts angefasst."
+    exit 0
+fi
+
 # ---------- Wurzel und Ordner: GELESEN, nicht geraten ----------
 #
 # Bis 4.5.8 fiel ein fehlender Ordner auf "midea2lox" zurueck und eine
@@ -200,6 +210,10 @@ if [ -d "$VENV" ]; then
 	echo "<INFO> entferne die virtuelle Python-Umgebung ($VENV)"
 	rm -rf "$VENV"
 fi
+# M1 (4.5.18): die von preupgrade.sh beiseitegelegte Umgebung - genauer Name, kein Muster.
+if [ -d "$BASE/bin/plugins/$PDIR.venv_vorher" ]; then
+	rm -rf "${BASE:?}/bin/plugins/${PDIR:?}.venv_vorher" && echo "<OK> Beiseitegelegte Python-Umgebung entfernt."
+fi
 
 # Die Zweitschriften der Konfiguration liegen neben dem Konfigordner, damit
 # sie Update und Neuinstallation ueberstehen. Beim Deinstallieren ist genau
@@ -251,6 +265,8 @@ if [ -n "$UN_FOLDER" ] && [ -n "$UN_BASE" ] && [ -d "$UN_BASE/data/plugins" ]; t
     done
     # Der Startmerker aus preupgrade.sh (I2) liegt ebenfalls neben dem Ordner.
     rm -f "$UN_BASE/data/plugins/$UN_FOLDER.lief_vorher" 2>/dev/null
+    # V1 (4.5.18): der Halt der Anwesenheit (welches Geraet wie verstellt ist).
+    rm -f "$UN_BASE/data/plugins/$UN_FOLDER.anwesenheit_halt" 2>/dev/null
     # Dasselbe gilt fuer die Marke aus preupgrade.sh (seit 4.5.7). Sie liegt
     # aus demselben Grund neben dem Ordner und bliebe sonst liegen - eine
     # abgebrochene Aktualisierung, gefolgt von einer Deinstallation, liesse

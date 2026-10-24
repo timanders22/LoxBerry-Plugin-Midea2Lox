@@ -6,6 +6,11 @@ Nimmt Befehle vom Miniserver per UDP entgegen, schickt sie an die
 Klimageraete im lokalen Netz und meldet deren Zustand zurueck - per MQTT,
 sonst per HTTP an virtuelle Eingaenge.
 
+Seit 4.5.18 (Gruppe 15) nimmt derselbe Dienst auf Wunsch auch Befehle ueber
+MQTT an (<praefix>/befehl/<Geraetenummer>/<name>, Haken befehle_mqtt_ein, ab
+Werk aus) - sie laufen durch DIESELBE Warteschlange wie ein UDP-Paket. Dazu
+die Anwesenheit (haus/anwesenheit/jemand, ab Werk aus) neben der Automatik.
+
 WAS SICH IN 4.3.0 AM AUFBAU GEAENDERT HAT
 
 Bis 4.2.12 war die asyncio-Fassade dekorativ: soc.recvfrom() war ein
@@ -29,6 +34,7 @@ zwei gleichzeitige refresh() auf DEMSELBEN Geraet einander vertragen.
 import logging
 import sys
 import os
+import signal
 import threading
 import time
 
@@ -334,6 +340,15 @@ def absender_erlaubt(adresse):
 # Empfang
 # ===========================================================================
 
+_BEENDET = {'sigterm': False}
+
+
+def _beim_sigterm(haupt):
+    """M18 (4.5.18): SIGTERM - die Hauptaufgabe abbrechen (Abschlusszeile in __main__)."""
+    _BEENDET['sigterm'] = True
+    haupt.cancel()
+
+
 async def start_server():
     """Empfang, Verarbeitung, Herzschlag und Abfragetakt nebeneinander."""
     _LOGGER.info("Midea2Lox Version: {} msmart Version: {} Python Version: {}.{}.{}".format(
@@ -373,7 +388,7 @@ async def start_server():
             if not absender_erlaubt(absender[0] if absender else ''):
                 return
             try:
-                warteschlange.put_nowait((daten, absender))
+                warteschlange.put_nowait((daten, absender, None))
             except asyncio.QueueFull:
                 _LOGGER.error(
                     "Warteschlange voll (%d) - Paket von %s verworfen. "
@@ -390,13 +405,28 @@ async def start_server():
             Empfang, sock=UDP_SOCKET)
     except OSError as fehler:
         _LOGGER.error("Socket konnte nicht gebunden werden (%s:%s): %s",
-                      LoxberryIP, UDP_Port, fehler)
+                      UDP_BINDUNG, UDP_Port, fehler)
         print('Bind failed. Error : %s' % fehler)
         return
-    _LOGGER.info("Socket bind complete, listen at {}:{}".format(LoxberryIP, UDP_Port))
-    print('Socket bind complete, listen at', LoxberryIP, ":", UDP_Port)
+    _LOGGER.info("Socket bind complete, listen at {}:{}".format(UDP_BINDUNG, UDP_Port))
+    print('Socket bind complete, listen at', UDP_BINDUNG, ":", UDP_Port)
     _LOGGER.info("UDP-Befehle werden nur angenommen von: %s",
                  ', '.join(sorted(ERLAUBTE_ABSENDER)))
+
+    # Gruppe 15: die MQTT-Befehle reihen sich in DIESELBE Warteschlange ein (mqtt_befehl).
+    _EINREIHEN['schleife'] = schleife
+    _EINREIHEN['warteschlange'] = warteschlange
+    # M18 (4.5.18): SIGTERM bricht die Hauptaufgabe ab, __main__ schreibt die Abschlusszeile.
+    # KEIN client.disconnect(): ein sauberes DISCONNECT unterdrueckte den Letzten Willen.
+    try:
+        schleife.add_signal_handler(signal.SIGTERM, _beim_sigterm, asyncio.current_task())
+    except (NotImplementedError, RuntimeError, AttributeError, ValueError):
+        pass
+    if BEFEHLE_EIN:
+        _LOGGER.info("Befehle ueber MQTT: eingeschaltet (%s), eingreifende Befehle %s.",
+                     BEFEHL_THEMA, "zugelassen" if BEFEHLE_EINGREIFEND else "nicht zugelassen")
+    else:
+        _LOGGER.info("Befehle ueber MQTT: ausgeschaltet (ab Werk).")
 
     aufgaben = [
         asyncio.ensure_future(arbeiter(warteschlange)),
@@ -417,6 +447,13 @@ async def start_server():
         if MQTT != 1:
             _LOGGER.warning("Fenster offen -> Geraet aus: ohne MQTT hoert der Dienst keine "
                             "Fenster - die Kopplung ruht, es wird nichts ausgeschaltet.")
+    if ANWESENHEIT_EIN or _ANW_HALT:
+        aufgaben.append(asyncio.ensure_future(anwesenheit_schleife()))
+        if ANWESENHEIT_EIN:
+            _LOGGER.info("Anwesenheit: eingeschaltet (%s nach %d s, %s).", ANWESENHEIT_VERHALTEN,
+                         ANWESENHEIT_FRIST, ANWESENHEIT_THEMA)
+        else:
+            _LOGGER.info("Anwesenheit: ausgeschaltet, aber ein gemerkter Halt wird zurueckgestellt.")
     if Abfragetakt > 0:
         aufgaben.append(asyncio.ensure_future(abfragetakt_schleife()))
         _LOGGER.info("Abfragetakt eingeschaltet: alle %d s", Abfragetakt)
@@ -431,9 +468,12 @@ async def start_server():
 
 
 async def arbeiter(warteschlange):
-    """Nimmt Pakete aus der Warteschlange und verarbeitet sie der Reihe nach."""
+    """Nimmt Pakete aus der Warteschlange und verarbeitet sie der Reihe nach.
+
+    Seit 4.5.18 auch die MQTT-Befehle (Absender ('mqtt', 0), drittes Feld = das
+    Befehlsthema fuer die Quittung, bei UDP None)."""
     while True:
-        rohdaten, absender = await warteschlange.get()
+        rohdaten, absender, quittung = await warteschlange.get()
         try:
             # decode() steht INNERHALB der Absicherung.
             #
@@ -459,8 +499,11 @@ async def arbeiter(warteschlange):
             daten = text.strip().split(' ')
             if not daten or daten[0] in ('0', ''):
                 continue
-            print("Incomming Message from Loxone: ", daten)
-            _LOGGER.info("Incomming Message from Loxone: {}".format(daten))
+            if quittung:
+                _LOGGER.info("Befehl ueber MQTT: {}".format(daten))
+            else:
+                print("Incomming Message from Loxone: ", daten)
+                _LOGGER.info("Incomming Message from Loxone: {}".format(daten))
             # Ein Befehl von aussen sperrt die Automatik zeitweise.
             #
             # Die Sperre steht HIER und nicht in send_to_midea(): die
@@ -470,14 +513,25 @@ async def arbeiter(warteschlange):
             # X-7 (B-Nachzug 01.10.2026): derselbe Sollwert innerhalb von
             # 60 s geht nicht erneut hinaus und sperrt auch die Automatik
             # nicht neu - es aendert sich ja nichts.
-            if gleichwert_unterdruecken(daten, absender[0] if absender else ''):
+            # Gruppe 15: gleichwert_unterdruecken() nennt das Alter (fuer die Quittung).
+            gleich = gleichwert_unterdruecken(daten, absender[0] if absender else '')
+            if gleich is not None:
+                if quittung:
+                    quittung_senden(quittung, befehl_quittung(gleich))
                 continue
             if AUTO_EIN and len(daten) > 1 and 'status' not in daten:
                 hand_sperren()
+            # V1 (4.5.18): ein Befehl von aussen beendet den Abwesenheitsbetrieb dieses Geraets.
+            anwesenheit_hand(daten)
             async with GERAETE_SCHLOSS:
                 await send_to_midea(daten, hand=True)
+                # F-E3: die Quittung NACH dem Geraetegespraech, noch unter dem Schloss.
+                if quittung:
+                    quittung_senden(quittung, befehl_quittung(None))
         except Exception as fehler:
             _LOGGER.error("Fehler bei der Verarbeitung: %s", fehler, exc_info=True)
+            if quittung:
+                quittung_senden(quittung, 'abgelehnt: interner Fehler')
         finally:
             warteschlange.task_done()
 
@@ -535,10 +589,13 @@ async def herzschlag():
             _zaehler = (_zaehler + 1) % 1000
             jetzt = int(time.time())
             lebenszeichen_schreiben(jetzt, _zaehler, _letzter_erfolg)
+            # Gruppe 15: status/befehle (1/0/-1) und anwesenheit/aktiv (1/0/-1), nie retained.
             await veroeffentlichen([
                 ('status/ts', str(jetzt)),
                 ('status/zaehler', str(_zaehler)),
                 ('status/ok', str(_letzter_erfolg)),
+                ('status/befehle', str(befehle_lage())),
+                ('anwesenheit/aktiv', str(anwesenheit_aktiv())),
             ])
             # Ein gescheitertes Abraeumen der Altwerte wird von hier aus
             # wiederholt (hoechstens alle zehn Minuten, siehe unten).
@@ -564,7 +621,10 @@ def lebenszeichen_schreiben(zeit, zaehler, ok):
         tmp = ziel + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump({'ts': zeit, 'zaehler': zaehler, 'ok': ok,
-                       'geraete': len(device_id_list)}, f)
+                       'geraete': len(device_id_list),
+                       # Gruppe 15: Lage der MQTT-Befehle und die letzte Quittung (Reiter Test).
+                       'befehle': befehle_lage(), 'befehl_zuletzt': dict(_BEFEHL_ZULETZT),
+                       'anwesenheit': anwesenheit_aktiv()}, f)
         os.replace(tmp, ziel)
     except OSError as fehler:
         _LOGGER.debug("Lebenszeichen nicht schreibbar: %s", fehler)
@@ -871,6 +931,11 @@ async def automatik_schleife():
                 if traegt and not aktiv:
                     # c1: waehrend einer Fensteroeffnung weder zugreifen noch
                     # einschalten - sonst liefe das Geraet bei offenem Fenster.
+                    # V1 (4.5.18): haelt die Anwesenheit das Geraet, greift die Automatik nicht.
+                    if anwesenheit_sperrt(gid):
+                        _LOGGER.debug("Automatik: %s wird wegen Abwesenheit gehalten - es wird "
+                                      "nicht zugegriffen.", gid)
+                        continue
                     if fenster_sperrt(gid):
                         _LOGGER.debug("Automatik: bei %s ist ein Fenster offen - es wird "
                                       "nicht zugegriffen.", gid)
@@ -1085,6 +1150,506 @@ async def fenster_schleife():
         await asyncio.sleep(FENSTER_TAKT)
 
 
+# ===========================================================================
+# Befehle ueber MQTT (ab 4.5.18, Gruppe 15 - Entwurf 3.3-3.6, F-E1-F-E4)
+# ===========================================================================
+#
+# AB WERK AUS (befehle_mqtt_ein=0, befehle_eingreifend_ein=0). Jeder im
+# Heimnetz kann ueber den UDP-Eingang des MQTT-Gateways "publish" senden - den
+# Absenderfilter des UDP-Wegs gibt es dort nicht. Deshalb zwei Haken; der
+# zweite gilt fuer ein, betriebsart, frostschutz und selbstreinigung.
+#
+# Kein zweiter Dienst, keine gemeinsame PHP-Bruecke: die Dauerverbindung des
+# Dienstes abonniert <praefix>/befehl/+/+ und reiht jeden gueltigen Befehl als
+# "<Geraetenummer> <UDP-Wort>" in DIESELBE Warteschlange ein wie ein Datagramm
+# vom Miniserver. Gleichwert-Sperre, Handvorrang und Positivliste wirken damit
+# unveraendert (Muster: Python-Weg der Sprachsteuerung, Gruppe 11).
+#
+# on_message laeuft im Netzwerkfaden von paho: hier wird nur formal geprueft
+# und eingereiht - ueber call_soon_threadsafe, denn asyncio.Queue ist nicht
+# fadensicher. Geschaltet wird im Arbeiter.
+#
+# Retained: unter MQTT 3.1.1 (paho 1.6.1) traegt nur die Nachricht aus dem
+# Speicher des Brokers das Retain-Merkmal (Anmelden, Wiederverbinden). Ein live
+# mit "retain" gesendeter Befehl wirkt EINMAL wie ein publish; jede spaetere
+# Zustellung aus dem Speicher - die eigentliche Gefahr: ein alter Befehl nach
+# einem Neustart - wird verworfen, ohne Quittung, mit gebremster Warnung.
+_BEFEHLE = {'abo': 0, 'mid': None, 'abo_gemeldet': False}
+_BEFEHL_ZULETZT = {}            # {'ts', 'thema', 'quittung'} - fuer lebenszeichen.json
+_BEFEHL_GEMELDET = {}           # Schluessel -> Zeitpunkt der letzten Warnung (gebremst)
+_BEFEHL_UNBEKANNT = []          # Zeitpunkte der Quittungen "unbekannter Befehl" (hoechstens 10 je Minute)
+_EINREIHEN = {'schleife': None, 'warteschlange': None}
+# Ergebnis des laufenden Befehls fuer die Quittung - nur im Arbeiter gelesen
+# und geschrieben (ein Arbeiter, GERAETE_SCHLOSS), also ohne Schloss.
+_BEANSTANDET = []
+_BEFEHL_ERGEBNIS = {'online': None}
+
+
+def befehl_gebremst(schluessel, stufe, text, abstand=3600):
+    """Eine Meldung hoechstens einmal je 'abstand' Sekunden."""
+    jetzt = time.time()
+    if jetzt - _BEFEHL_GEMELDET.get(schluessel, 0) >= abstand:
+        _BEFEHL_GEMELDET[schluessel] = jetzt
+        stufe(text)
+
+
+def quittung_senden(thema, text):
+    """<thema>/quittung, nie retained, qos 1, ohne Warten (publish kehrt sofort zurueck)."""
+    _BEFEHL_ZULETZT.clear()
+    _BEFEHL_ZULETZT.update({'ts': int(time.time()), 'thema': thema, 'quittung': text})
+    if client is None or MQTT != 1 or mqtt_error != 0:
+        _LOGGER.info("Quittung %s = %s nicht gesendet (keine MQTT-Verbindung)", thema, text)
+        return
+    try:
+        client.publish(thema + '/quittung', text, qos=1, retain=False)
+    except Exception as fehler:
+        _LOGGER.warning("Quittung fuer %s nicht gesendet: %s", thema, fehler)
+    _LOGGER.info("Befehl ueber MQTT %s: %s", thema, text)
+
+
+def einreihen(eintrag, thema):
+    """Laeuft IN der Ereignisschleife (call_soon_threadsafe)."""
+    ws = _EINREIHEN['warteschlange']
+    try:
+        ws.put_nowait(eintrag)
+    except asyncio.QueueFull:
+        _LOGGER.error("Warteschlange voll (%d) - Befehl %s verworfen.", ws.maxsize, thema)
+        quittung_senden(thema, 'abgelehnt: WARTESCHLANGE_VOLL')
+
+
+def mqtt_befehl(thema, roh, zurueckbehalten):
+    """Ein Befehlsthema ist eingetroffen (Netzwerkfaden von paho)."""
+    if zurueckbehalten:
+        befehl_gebremst('retain:' + thema, _LOGGER.warning,
+                        "zurueckbehaltener Befehl auf %s verworfen, nicht ausgefuehrt "
+                        "(in Loxone 'retain' durch 'publish' ersetzen)." % thema[:160])
+        return
+    if roh == b'' or roh is None:
+        return                      # Loeschen eines zurueckbehaltenen Befehls
+    ebenen = thema[len(MQTT_PRAEFIX) + len('/befehl/'):].split('/')
+    if len(ebenen) != 2:
+        return                      # mit dem Abo +/+ nicht erreichbar (eigene Quittung: 3 Ebenen)
+    gid, name = ebenen
+    if not BEFEHLE_EIN:
+        return                      # Haken aus: kein Abo, also auch nichts zu tun
+    try:
+        text = roh.decode('utf-8')
+    except UnicodeDecodeError:
+        quittung_senden(thema, 'abgelehnt: Wert ungueltig (Text in UTF-8)')
+        return
+    if gid not in geraete_ids_aus_datei():
+        quittung_senden(thema, 'abgelehnt: GERAET_UNBEKANNT')
+        return
+    wort, grund = mi_mqtt.befehl_deuten(name, text, BEFEHLE_EINGREIFEND)
+    if wort is None:
+        if grund == 'unbekannter Befehl':
+            jetzt = time.time()
+            _BEFEHL_UNBEKANNT[:] = [t for t in _BEFEHL_UNBEKANNT if jetzt - t < 60]
+            befehl_gebremst('unbekannt', _LOGGER.warning,
+                            "unbekannter Befehl %s (weitere hoechstens stuendlich gemeldet)." % thema[:160])
+            if len(_BEFEHL_UNBEKANNT) >= 10:
+                return
+            _BEFEHL_UNBEKANNT.append(jetzt)
+        quittung_senden(thema, 'abgelehnt: ' + grund)
+        return
+    schleife, ws = _EINREIHEN['schleife'], _EINREIHEN['warteschlange']
+    if schleife is None or ws is None:
+        quittung_senden(thema, 'abgelehnt: DIENST_STARTET')
+        return
+    eintrag = (('%s %s' % (gid, wort)).encode('utf-8'), ('mqtt', 0), thema)
+    try:
+        schleife.call_soon_threadsafe(einreihen, eintrag, thema)
+    except RuntimeError:
+        quittung_senden(thema, 'abgelehnt: DIENST_STARTET')
+
+
+def nicht_faehig(wort, zusatz=''):
+    """Das Geraet kann einen Befehl nicht - gleiche Protokollzeile wie bis 4.5.17,
+    dazu der Grund fuer die Quittung."""
+    _LOGGER.warning("device is not capable of property {}{}".format(wort, zusatz))
+    _BEANSTANDET.append('KANN_DAS_GERAET_NICHT')
+
+
+def befehl_quittung(gleich_alter):
+    """Die Quittung nach dem Geraetegespraech (F-E3)."""
+    if gleich_alter is not None:
+        return 'abgelehnt: wiederholt (vor %d s)' % int(gleich_alter)
+    if _BEFEHL_ERGEBNIS['online'] is not True:
+        return 'abgelehnt: GERAET_ANTWORTET_NICHT'
+    if _BEANSTANDET:
+        return 'abgelehnt: ' + mi_mqtt.grund_ascii(_BEANSTANDET[0])
+    return 'angenommen'
+
+
+def bei_abo(client_, userdata, mid, codes, *rest):
+    """SUBACK - paho 1.x liefert Zahlen, 2.x ReasonCode-Objekte."""
+    if mid != _BEFEHLE['mid']:
+        return
+    werte = []
+    try:
+        for c in (codes or ()):
+            werte.append(int(getattr(c, 'value', c)))
+    except (TypeError, ValueError):
+        werte = [0x80]
+    if not werte or any(w >= 0x80 for w in werte):
+        _BEFEHLE['abo'] = -1
+        if not _BEFEHLE['abo_gemeldet']:
+            _BEFEHLE['abo_gemeldet'] = True
+            _LOGGER.error("MQTT: der Broker verweigert das Abo %s - MQTT-Befehle wirken nicht "
+                          "(Rechte des Brokerbenutzers?)", BEFEHL_THEMA)
+    else:
+        _BEFEHLE['abo'] = 1
+        _LOGGER.info("MQTT: Befehle werden angenommen (%s).", BEFEHL_THEMA)
+
+
+def befehle_lage():
+    """status/befehle: 1 angenommen (Abo bestaetigt), 0 Haken aus, -1 Haken an, aber kein Abo."""
+    if not BEFEHLE_EIN:
+        return 0
+    return 1 if (_BEFEHLE['abo'] == 1 and MQTT == 1 and mqtt_error == 0) else -1
+
+
+# ===========================================================================
+# Anwesenheit (ab 4.5.18, Gruppe 15 - V1, Entwurf Abschnitt 7, F-E9/F-E10)
+# ===========================================================================
+#
+# AB WERK AUS (anwesenheit_ein=0): eine Kopplung an ein anderes Plugin wird
+# nicht durch ein Update eingeschaltet. Gebaut wie die Fensterkopplung.
+#
+# Quelle: haus/anwesenheit/jemand (1 = jemand da, 0 = alle mit Aussage weg,
+# "-" = keine Aussage; retained) und haus/anwesenheit/zaehler (0-999 alle
+# 30 s, nie retained - das Lebenszeichen des Anbieters; Regeln/07 Nr. 15,
+# Anbieter BLE-Scanner NG ab 1.3.28). Gelesen werden NUR diese beiden Themen;
+# unter haus/ schreibt dieses Plugin nichts.
+#
+#   * Abwesenheit beginnt nur mit einem LIVE gesendeten jemand = 0 bei lebender
+#     Quelle (Zaehler binnen 120 s veraendert). Ein zurueckbehaltenes 0 nach
+#     Start oder Wiederverbinden hat kein bekanntes Alter und beginnt nichts.
+#   * Dauert sie anwesenheit_frist Sekunden, wirkt sie EINMAL je Geraet und
+#     Abwesenheit, und nur an eingeschalteten Geraeten (frischer Abruf):
+#     verschieben (Werk) - Sollwert um anwesenheit_verschiebung in die
+#     sparsame Richtung (Kuehlen/Entfeuchten hoeher, Heizen tiefer); spar -
+#     Sparbetrieb ein; aus - ausschalten.
+#   * Ankunft (jemand = 1, live oder zurueckbehalten) stellt NUR zurueck, was
+#     die Kopplung selbst verstellt hat - den Sollwert nur, wenn das Geraet
+#     noch den gesetzten Wert traegt; ein ausgeschaltetes Geraet wird NIE
+#     wieder eingeschaltet (wie die Fensterkopplung).
+#   * Schweigt die Quelle (Zaehler 120 s unveraendert oder nie empfangen),
+#     kommt "-", fehlt MQTT oder ist der Haken beim Start aus: zurueckstellen
+#     wie bei Ankunft, dann nichts weiter ("im Zweifel loslassen").
+#   * Ein Befehl von aussen (UDP oder MQTT, ausser der Zustandsabfrage) an ein
+#     gehaltenes Geraet beendet den Halt OHNE Zurueckstellen; waehrend der
+#     Frist entfaellt die Aktion fuer dieses Geraet in dieser Abwesenheit.
+#   * Solange die Kopplung ein Geraet haelt, greift die Automatik dort nicht;
+#     eine laufende Verschiebung der Automatik laesst sie vorher los.
+#   * Der Halt steht NEBEN dem Datenordner (<ordner>.anwesenheit_halt): er
+#     uebersteht Dienstneustart und Update; uninstall/preinstall raeumen ihn ab.
+ANWESENHEIT_THEMA = 'haus/anwesenheit/jemand'
+ANWESENHEIT_ZAEHLER = 'haus/anwesenheit/zaehler'
+ANWESENHEIT_TAKT = 5
+ANWESENHEIT_STILLE = 120
+_ANW_SCHLOSS = threading.Lock()
+_ANW = {'wert': None, 'live': False, 'empfangen': None, 'null_seit': None,
+        'zaehler': None, 'zaehler_seit': None}
+_ANW_HALT = {}          # Geraetenummer -> {'verhalten', 'soll_vorher', 'soll_gesetzt', 'seit'}
+_ANW_ERLEDIGT = set()   # Geraete, fuer die diese Abwesenheit schon gewirkt hat (oder von Hand beendet)
+
+
+def anwesenheit_halt_datei():
+    return data_path.rstrip('/') + '.anwesenheit_halt'
+
+
+def anwesenheit_halt_lesen():
+    """Den gemerkten Halt (nach Neustart oder Update) - ein unlesbarer gilt als leer."""
+    try:
+        with open(anwesenheit_halt_datei(), encoding='utf-8') as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    aus = {}
+    if isinstance(d, dict):
+        for gid, h in d.items():
+            if (isinstance(h, dict) and str(gid).isdigit()
+                    and h.get('verhalten') in ('verschieben', 'spar', 'aus')):
+                aus[str(gid)] = h
+    return aus
+
+
+def anwesenheit_halt_schreiben():
+    """Unteilbar ueber eine Nebendatei; ein leerer Halt entfernt die Datei."""
+    ziel = anwesenheit_halt_datei()
+    try:
+        if not _ANW_HALT:
+            if os.path.exists(ziel):
+                os.remove(ziel)
+            return
+        tmp = ziel + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_ANW_HALT, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.warning("Anwesenheit: der Merker %s liess sich nicht schreiben (%s) - nach einem "
+                        "Neustart weiss der Dienst nicht mehr, was er verstellt hat.", ziel, fehler)
+
+
+def anwesenheit_merken(thema, text, zurueckbehalten):
+    """Ein Wert der Anwesenheit ist eingetroffen (Netzwerkfaden) - nur merken."""
+    if thema not in (ANWESENHEIT_THEMA, ANWESENHEIT_ZAEHLER):
+        return
+    jetzt = time.time()
+    with _ANW_SCHLOSS:
+        if thema == ANWESENHEIT_ZAEHLER:
+            # Nur ein LIVE veraenderter Zaehler ist ein Lebenszeichen.
+            if not zurueckbehalten and text != _ANW['zaehler']:
+                _ANW['zaehler'] = text
+                _ANW['zaehler_seit'] = jetzt
+            return
+        _ANW['wert'] = text
+        _ANW['empfangen'] = jetzt
+        _ANW['live'] = not zurueckbehalten
+        if text != '0':
+            _ANW['null_seit'] = None
+        elif not zurueckbehalten and _ANW['null_seit'] is None:
+            _ANW['null_seit'] = jetzt
+
+
+def anwesenheit_quelle():
+    """(lebt, wert, null_seit, zaehler_alter) unter dem Schloss gelesen."""
+    jetzt = time.time()
+    with _ANW_SCHLOSS:
+        seit = _ANW['zaehler_seit']
+        alter = None if seit is None else jetzt - seit
+        lebt = alter is not None and -60 <= alter <= ANWESENHEIT_STILLE
+        return lebt, _ANW['wert'], _ANW['null_seit'], alter
+
+
+def anwesenheit_sperrt(gid):
+    """Haelt die Kopplung dieses Geraet? Dann greift die Automatik nicht."""
+    return gid in _ANW_HALT
+
+
+def anwesenheit_hand(daten):
+    """Ein Befehl von aussen: Halt beenden ohne Zurueckstellen; waehrend der Frist
+    entfaellt die Aktion fuer dieses Geraet in dieser Abwesenheit."""
+    if 'status' in daten:
+        return
+    for wort in daten:
+        if len(wort) in range(10, 20) and wort.isdigit():
+            if _ANW_HALT.pop(wort, None) is not None:
+                anwesenheit_halt_schreiben()
+                _LOGGER.info("Anwesenheit: Befehl von aussen an %s - der Abwesenheitsbetrieb "
+                             "endet dort, es wird nichts zurueckgestellt.", wort)
+            with _ANW_SCHLOSS:
+                laeuft = _ANW['null_seit'] is not None
+            if laeuft:
+                _ANW_ERLEDIGT.add(wort)
+
+
+async def anwesenheit_anlegen(gid):
+    """Einmal je Abwesenheit und Geraet: sparsam stellen und merken (unter GERAETE_SCHLOSS)."""
+    try:
+        await send_to_midea([gid, 'status'])
+    except Exception as fehler:
+        _LOGGER.warning("Anwesenheit: %s liess sich nicht abfragen (%s) - nichts verstellt.", gid, fehler)
+        return
+    device = auto_device(gid)
+    if device is None or not bool(getattr(device, 'online', False)):
+        _LOGGER.info("Anwesenheit: %s antwortet nicht - nichts verstellt.", gid)
+        return
+    if not bool(getattr(device, 'power_state', False)):
+        _LOGGER.info("Anwesenheit: %s ist aus - es wird nichts angefasst.", gid)
+        return
+    stand = _AUTO_STAND.get(gid)
+    if stand and stand.get('aktiv'):
+        await auto_loesen(gid, wegen_hand=True)
+    jetzt = int(time.time())
+    if ANWESENHEIT_VERHALTEN == 'aus':
+        _ANW_HALT[gid] = {'verhalten': 'aus', 'seit': jetzt}
+        anwesenheit_halt_schreiben()
+        _LOGGER.info("Anwesenheit: niemand zu Hause seit %d s - %s wird ausgeschaltet "
+                     "(bei der Rueckkehr nicht wieder eingeschaltet).", ANWESENHEIT_FRIST, gid)
+        await send_to_midea([gid, 'power.False'])
+        return
+    if ANWESENHEIT_VERHALTEN == 'spar':
+        if not getattr(device, 'supports_eco', False):
+            _LOGGER.info("Anwesenheit: %s kann keinen Sparbetrieb - nichts verstellt.", gid)
+            return
+        if bool(getattr(device, 'eco', False)):
+            _LOGGER.info("Anwesenheit: %s laeuft schon im Sparbetrieb - nichts verstellt.", gid)
+            return
+        _ANW_HALT[gid] = {'verhalten': 'spar', 'seit': jetzt}
+        anwesenheit_halt_schreiben()
+        _LOGGER.info("Anwesenheit: niemand zu Hause - %s in den Sparbetrieb.", gid)
+        await send_to_midea([gid, 'eco.True'])
+        return
+    # verschieben: Gegenvorzeichen der Automatik - sparsam statt vorkuehlen/vorwaermen.
+    richtung = -auto_richtung(device)
+    if richtung == 0:
+        _LOGGER.info("Anwesenheit: %s ist in einer Betriebsart ohne Sollwert - nichts verstellt.", gid)
+        return
+    try:
+        vorher = float(device.target_temperature)
+    except (TypeError, ValueError):
+        _LOGGER.info("Anwesenheit: %s nennt keinen Sollwert - nichts verstellt.", gid)
+        return
+    neu = vorher + richtung * ANWESENHEIT_VERSCHIEBUNG
+    neu = min(max(neu, float(AUTO_SOLL_MIN)), float(AUTO_SOLL_MAX))
+    try:
+        neu = min(max(neu, float(device.min_target_temperature)), float(device.max_target_temperature))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if abs(neu - vorher) < 0.05:
+        _LOGGER.info("Anwesenheit: %s liegt schon an der Grenze - nichts verstellt.", gid)
+        return
+    _ANW_HALT[gid] = {'verhalten': 'verschieben', 'soll_vorher': vorher, 'soll_gesetzt': neu, 'seit': jetzt}
+    anwesenheit_halt_schreiben()
+    _LOGGER.info("Anwesenheit: niemand zu Hause - Sollwert von %s %.1f -> %.1f.", gid, vorher, neu)
+    await send_to_midea([gid, 'temp.%.1f' % neu])
+
+
+async def anwesenheit_zurueck(gid, grund):
+    """Zurueckstellen, was die Kopplung verstellt hat - nie einschalten (unter GERAETE_SCHLOSS)."""
+    h = _ANW_HALT.pop(gid, None)
+    anwesenheit_halt_schreiben()
+    if not h:
+        return
+    if h['verhalten'] == 'aus':
+        _LOGGER.info("Anwesenheit (%s): %s bleibt aus - die Kopplung schaltet nie ein.", grund, gid)
+        return
+    try:
+        await send_to_midea([gid, 'status'])
+    except Exception as fehler:
+        _LOGGER.warning("Anwesenheit (%s): %s liess sich nicht abfragen (%s) - nicht zurueckgestellt.",
+                        grund, gid, fehler)
+        return
+    device = auto_device(gid)
+    if device is None or not bool(getattr(device, 'online', False)):
+        _LOGGER.warning("Anwesenheit (%s): %s antwortet nicht - nicht zurueckgestellt.", grund, gid)
+        return
+    if h['verhalten'] == 'spar':
+        if bool(getattr(device, 'eco', False)):
+            _LOGGER.info("Anwesenheit (%s): Sparbetrieb von %s wieder aus.", grund, gid)
+            await send_to_midea([gid, 'eco.False'])
+        return
+    try:
+        ist = float(device.target_temperature)
+    except (TypeError, ValueError):
+        ist = None
+    if ist is None or abs(ist - float(h['soll_gesetzt'])) > 0.05:
+        _LOGGER.info("Anwesenheit (%s): %s traegt nicht mehr den gesetzten Sollwert (%s statt %.1f) - "
+                     "jemand hat ihn verstellt, es wird nichts zurueckgestellt.", grund, gid, ist,
+                     float(h['soll_gesetzt']))
+        return
+    _LOGGER.info("Anwesenheit (%s): Sollwert von %s zurueck auf %.1f.", grund, gid, float(h['soll_vorher']))
+    await send_to_midea([gid, 'temp.%.1f' % float(h['soll_vorher'])])
+
+
+def anwesenheit_geraete():
+    ids = geraete_ids_aus_datei()
+    if ANWESENHEIT_GERAETE:
+        ids = [x for x in ids if x in ANWESENHEIT_GERAETE]
+    return ids
+
+
+def anwesenheit_aktiv():
+    """anwesenheit/aktiv: 1 haelt Geraete, 0 nicht (auch bei Haken aus), -1 Quelle schweigt/'-'/kein MQTT."""
+    if not ANWESENHEIT_EIN:
+        return 0
+    lebt, wert, _n, _a = anwesenheit_quelle()
+    if not lebt or wert not in ('0', '1') or MQTT != 1 or mqtt_error != 0:
+        return -1
+    return 1 if _ANW_HALT else 0
+
+
+def anwesenheit_stand():
+    lebt, wert, null_seit, alter = anwesenheit_quelle()
+    with _ANW_SCHLOSS:
+        empfangen = _ANW['empfangen']
+        live = _ANW['live']
+    return {'ein': 1 if ANWESENHEIT_EIN else 0,
+            'mqtt': 1 if (MQTT == 1 and mqtt_error == 0) else 0,
+            'verhalten': ANWESENHEIT_VERHALTEN, 'frist': ANWESENHEIT_FRIST,
+            'wert': wert, 'live': 1 if live else 0,
+            'empfangen': int(empfangen) if empfangen else None,
+            'zaehler_alter': int(alter) if alter is not None else None,
+            'lebt': 1 if lebt else 0,
+            'null_seit': int(null_seit) if null_seit else None,
+            'halt': {g: h.get('verhalten') for g, h in _ANW_HALT.items()},
+            'aktiv': anwesenheit_aktiv()}
+
+
+def anwesenheit_stand_schreiben(stand):
+    """data/.../anwesenheit.json fuer den Reiter Test - unteilbar wie lebenszeichen.json."""
+    try:
+        os.makedirs(data_path, exist_ok=True)
+        ziel = os.path.join(data_path, 'anwesenheit.json')
+        tmp = ziel + '.tmp'
+        d = dict(stand)
+        d['ts'] = int(time.time())
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(d, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.debug("Anwesenheitsstand nicht schreibbar: %s", fehler)
+
+
+async def anwesenheit_schleife():
+    """Der Takt der Kopplung (5 s). Ohne Haken laeuft sie nur, um einen gemerkten Halt
+    zurueckzustellen, und endet dann."""
+    letzter = None
+    geschrieben = 0.0
+    gemeldet = ''
+    while True:
+        try:
+            jetzt = time.time()
+            lebt, wert, null_seit, _alter = anwesenheit_quelle()
+            mqtt_ok = MQTT == 1 and mqtt_error == 0
+            if not ANWESENHEIT_EIN:
+                lage, grund = 'aus', 'Kopplung beim Start aus'
+            elif not mqtt_ok:
+                lage, grund = 'schweigt', 'ohne MQTT'
+            elif not lebt:
+                lage, grund = 'schweigt', 'Quelle schweigt'
+            elif wert not in ('0', '1'):
+                lage, grund = 'schweigt', 'keine Aussage'
+            elif wert == '1':
+                lage, grund = 'da', 'Ankunft'
+            elif null_seit is not None and jetzt - null_seit >= ANWESENHEIT_FRIST:
+                lage, grund = 'weg', 'niemand zu Hause'
+            else:
+                lage, grund = 'warten', ''
+            if grund and grund != gemeldet:
+                _LOGGER.info("Anwesenheit: %s", grund)
+            gemeldet = grund
+            if lage in ('aus', 'schweigt', 'da'):
+                if lage != 'da':
+                    # Eine neue Abwesenheit beginnt erst wieder mit einem live gesendeten 0.
+                    with _ANW_SCHLOSS:
+                        _ANW['null_seit'] = None
+                _ANW_ERLEDIGT.clear()
+                for gid in list(_ANW_HALT):
+                    async with GERAETE_SCHLOSS:
+                        await anwesenheit_zurueck(gid, grund)
+                if lage == 'aus':
+                    anwesenheit_stand_schreiben(anwesenheit_stand())
+                    return
+            elif lage == 'weg':
+                for gid in anwesenheit_geraete():
+                    if gid in _ANW_ERLEDIGT:
+                        continue
+                    # ERST merken, DANN handeln: einmal je Geraet und Abwesenheit.
+                    _ANW_ERLEDIGT.add(gid)
+                    async with GERAETE_SCHLOSS:
+                        await anwesenheit_anlegen(gid)
+            stand = anwesenheit_stand()
+            if stand != letzter or jetzt - geschrieben >= 60:
+                anwesenheit_stand_schreiben(stand)
+                letzter, geschrieben = stand, jetzt
+        except Exception as fehler:
+            _LOGGER.error("Anwesenheit gescheitert: %s", fehler, exc_info=True)
+        await asyncio.sleep(ANWESENHEIT_TAKT)
+
+
 def geraete_ids_aus_datei():
     """Die Geraetenummern aus devices.cfg - bei jedem Durchgang neu gelesen.
 
@@ -1143,9 +1708,11 @@ def soll_pruefen(device, wert, wort):
         zahl = float(wert)
     except (TypeError, ValueError):
         _LOGGER.error("ungueltige Solltemperatur '%s' - Befehl verworfen", wort)
+        _BEANSTANDET.append('SOLLWERT_UNGUELTIG')
         return None
     if not math.isfinite(zahl):
         _LOGGER.error("Solltemperatur '%s' ist keine endliche Zahl - Befehl verworfen", wort)
+        _BEANSTANDET.append('SOLLWERT_UNGUELTIG')
         return None
     try:
         unten = float(device.min_target_temperature)
@@ -1156,6 +1723,7 @@ def soll_pruefen(device, wert, wort):
         _LOGGER.error("Solltemperatur '%s' liegt ausserhalb des Bereichs %s-%s dieses "
                       "Geraets - Befehl verworfen, der Sollwert bleibt.", wort,
                       device.min_target_temperature, device.max_target_temperature)
+        _BEANSTANDET.append('AUSSERHALB_GERAETEBEREICH')
         return None
     return zahl
 
@@ -1327,27 +1895,28 @@ def _gw_wirksam(device, art, attr, soll):
 
 
 def gleichwert_unterdruecken(daten, absender):
-    """True: dieses Paket ist eine Wiederholung innerhalb von 60 s - nicht senden."""
+    """Das Alter in Sekunden, wenn dieses Paket eine Wiederholung innerhalb von 60 s ist (nicht
+    senden) - sonst None. Seit 4.5.18 das Alter statt True: die MQTT-Quittung nennt es."""
     if absender in ('127.0.0.1', LoxberryIP):
-        return False            # Reiter Test ("Senden") wirkt immer
+        return None             # Reiter Test ("Senden") wirkt immer
     gid, arten, nur_soll = gleichwert_zerlegen(daten)
     if gid is None or not nur_soll or not arten:
-        return False
+        return None
     jetzt = time.time()
     aelteste = None
     for art, (wert, _attr, _soll) in arten.items():
         eintrag = _GLEICHWERT.get((gid, art))
         if eintrag is None or eintrag[0] != wert:
-            return False
+            return None
         alter = jetzt - eintrag[3]
         if alter < 0 or alter >= GLEICHWERT_S:
-            return False
+            return None
         aelteste = alter if aelteste is None else max(aelteste, alter)
     _LOGGER.info("Midea.%s: UNVERAENDERT=1 - %s wie vor %d s gesendet; nichts an das "
                  "Geraet geschickt (gleicher Sollwert innerhalb von %d s).", gid,
                  ', '.join('%s=%s' % (a, arten[a][0]) for a in sorted(arten)),
                  int(aelteste), GLEICHWERT_S)
-    return True
+    return int(aelteste)
 
 
 def gleichwert_vergessen(daten):
@@ -1402,6 +1971,9 @@ async def send_to_midea(data, hand=False):
     # X-7: Automatik und Fenster stellen das Geraet - der Merker gilt nicht mehr.
     if not hand:
         gleichwert_vergessen(data)
+    # Gruppe 15: Beanstandungen und Antwort DIESES Befehls - der Arbeiter quittiert daraus.
+    _BEANSTANDET.clear()
+    _BEFEHL_ERGEBNIS['online'] = None
     runtime = time.time()
     try:
         oldLox = 0
@@ -1685,13 +2257,13 @@ async def send_to_midea(data, hand=False):
                             device.eco = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug("Device Eco Mode '{}'".format(device.eco))
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in turbo:
                         if device.supports_turbo:
                             device.turbo = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug("Device Turbo Mode '{}'".format(device.turbo))
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in operation:
                         wert = mi_enum(ac.OperationalMode, mi_tabellen()['operational_mode'].get(eachArg))
                         if wert is None:
@@ -1709,7 +2281,7 @@ async def send_to_midea(data, hand=False):
                             if device.supports_custom_fan_speed:
                                 device.fan_speed = int(rest)
                             else:
-                                _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                                nicht_faehig(eachArg)
                         else:
                             wert = mi_enum(ac.FanSpeed, mi_tabellen()['fan_speed'].get(eachArg))
                             if wert is None:
@@ -1746,7 +2318,7 @@ async def send_to_midea(data, hand=False):
                             device.toggle_display()
                             _LOGGER.debug('toggle_Display')
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg.split(".")[0] == "humidity":
                         if device.supports_humidity:
                             # Eine Prozentzahl, nichts sonst. Bis 4.0.0 ging
@@ -1758,7 +2330,7 @@ async def send_to_midea(data, hand=False):
                             else:
                                 _LOGGER.error("ungueltige Sollfeuchte '{}' - Befehl verworfen".format(eachArg))
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg.split(".")[0] == "h_swing_angle":
                         if device.supports_horizontal_swing_angle:
                             wert = mi_enum(ac.SwingAngle, eachArg.split(".")[1] if "." in eachArg else '')
@@ -1768,7 +2340,7 @@ async def send_to_midea(data, hand=False):
                                 device.horizontal_swing_angle = wert
                                 _LOGGER.debug(device.horizontal_swing_angle)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg.split(".")[0] == "v_swing_angle":
                         if device.supports_vertical_swing_angle:
                             wert = mi_enum(ac.SwingAngle, eachArg.split(".")[1] if "." in eachArg else '')
@@ -1778,13 +2350,13 @@ async def send_to_midea(data, hand=False):
                                 device.vertical_swing_angle = wert
                                 _LOGGER.debug(device.vertical_swing_angle)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in freeze:
                         if device.supports_freeze_protection:
                             device.freeze_protection = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.freeze_protection)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in sleep:
                         device.sleep = mi_bool(eachArg.split(".")[1])
                         _LOGGER.debug(device.sleep)
@@ -1796,13 +2368,13 @@ async def send_to_midea(data, hand=False):
                             device.purifier = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.purifier)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in self_clean:
                         if device.supports_self_clean:
                             device.start_self_clean()
                             _LOGGER.debug("start self_clean")
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in rate_select:
                         # Verglichen wird der NAME gegen die Namen der
                         # unterstuetzten Werte.
@@ -1825,31 +2397,31 @@ async def send_to_midea(data, hand=False):
                             device.rate_select = wert if wert is not None else name
                             _LOGGER.debug(device.rate_select)
                         else:
-                            _LOGGER.warning("device is not capable of property {} (moeglich: {})".format(eachArg, moeglich))
+                            nicht_faehig(eachArg, ' (moeglich: {})'.format(moeglich))
                     elif eachArg in breeze_away:
                         if device.supports_breeze_away:
                             device.breeze_away = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breeze_away)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in breeze_mild:
                         if device.supports_breeze_mild:
                             device.breeze_mild = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breeze_mild)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in breezeless:
                         if device.supports_breezeless:
                             device.breezeless = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.breezeless)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     elif eachArg in ieco:
                         if device.supports_ieco:
                             device.ieco = mi_bool(eachArg.split(".")[1])
                             _LOGGER.debug(device.ieco)
                         else:
-                            _LOGGER.warning("device is not capable of property {}".format(eachArg))
+                            nicht_faehig(eachArg)
                     else: #unknown key´s
                         if len(eachArg) != 64 and len(eachArg) != 128 and eachArg != device_id and eachArg != device_ip:
                             _LOGGER.error("Given command '{}' is unknown".format(eachArg))
@@ -1894,12 +2466,14 @@ async def send_to_midea(data, hand=False):
 
         if device.online == True:
             _letzter_erfolg = 1
+            _BEFEHL_ERGEBNIS['online'] = True
             if statusupdate == 1:
                 _LOGGER.info("Statusupdate for Midea.{} @ {} successful. Runtime: {}s".format(device.id, device.ip,round(time.time()-runtime,2)))
             else:
                 _LOGGER.info("Set new state for Midea.{} @ {} successful. Runtime: {}s".format(device.id, device.ip,round(time.time()-runtime,2)))
         else:
             _letzter_erfolg = 0
+            _BEFEHL_ERGEBNIS['online'] = False
             _LOGGER.error("Device is offline")
 
         # X-7: Merker nachziehen - nach einer Statusabfrage (anderer Wert
@@ -1954,6 +2528,29 @@ def faehigkeiten_protokollieren(device):
 # Werte an Loxone
 # ===========================================================================
 
+def rate_wert(device):
+    """rate_select - nur, wenn das Geraet mehr als OFF kann (E2), sonst None."""
+    moeglich = [getattr(r, 'name', str(r)) for r in (getattr(device, 'supported_rate_selects', None) or [])]
+    if not [m for m in moeglich if m != 'OFF']:
+        return None
+    r = device.rate_select
+    return getattr(r, 'name', r)
+
+
+def breeze_wert(device):
+    """breeze_mode aus den oeffentlichen Merkmalen (M20) - nur mit Faehigkeit (E2), sonst None."""
+    if not any(bool(getattr(device, a, False)) for a in
+               ('supports_breeze_away', 'supports_breeze_mild', 'supports_breezeless')):
+        return None
+    if device.breeze_away:
+        return 'BREEZE_AWAY'
+    if device.breeze_mild:
+        return 'BREEZE_MILD'
+    if device.breezeless:
+        return 'BREEZELESS'
+    return 'OFF'
+
+
 async def send_to_loxone(device, support_mode):
     """Den Zustand eines Geraets veroeffentlichen.
 
@@ -2003,11 +2600,15 @@ async def send_to_loxone(device, support_mode):
             # wurde er uebersprungen, und im Broker blieb der alte Wert (in
             # WSL gemessen, Bericht mqtt M3: target_humidity 55 blieb stehen).
             # Messwerte (nicht retained) werden weiter nicht gesendet.
+            # Gruppe 15 (4.5.18, F-E5): statt "-" der Fehlwert aus mi_mqtt.FEHLWERT - Zahlen -1,
+            # Temperaturen -999, Texte weiter "-". Retained Zustaende EINMAL (wie bisher),
+            # Messwerte jedes Mal (sie sind fluechtig; sonst saehe ein alter Wert frisch aus).
             thema = '%s/%s' % (geraet_id, name)
-            if support_mode == 0 and retain_fuer(name) and _ZULETZT.get(thema) != '-':
-                paare.append((thema, '-'))
-            else:
+            fw = mi_mqtt.fehlwert_fuer(name)
+            if support_mode != 0:
                 _LOGGER.debug("Wert '%s' nicht verfuegbar: kein Wert", name)
+            elif not retain_fuer(name) or _ZULETZT.get(thema) != fw:
+                paare.append((thema, fw))
             return
         try:
             paare.append(('%s/%s' % (geraet_id, name), wandeln(w)))
@@ -2049,8 +2650,10 @@ async def send_to_loxone(device, support_mode):
     nimm('current_energy_usage',   lambda: device.current_energy_usage)
     nimm('real_time_power_usage',  lambda: device.real_time_power_usage)
     nimm('self_clean_active',      lambda: device.self_clean_active, ganz)
-    nimm('rate_select',            lambda: getattr(device.rate_select, 'name', device.rate_select))
-    nimm('breeze_mode',            lambda: getattr(device._breeze_mode, 'name', device._breeze_mode))
+    # M20/E2 (4.5.18): nur mit Faehigkeit und aus den oeffentlichen Merkmalen - ohne Faehigkeit
+    # einmal "-" statt eines dauernden OFF, das wie eine Einstellung aussah.
+    nimm('rate_select',            lambda: rate_wert(device))
+    nimm('breeze_mode',            lambda: breeze_wert(device))
     nimm('ieco',                   lambda: device.ieco, ganz)
 
     if not paare:
@@ -2131,26 +2734,31 @@ async def veroeffentlichen(paare, support_mode=0):
         for thema, wert in paare:
             _ZULETZT[thema] = wert
     if MQTT == 1 and support_mode == 0 and mqtt_error == 0:
+        # M19 (4.5.18): qos 1 statt 2, und gewartet wird nur auf den LETZTEN Wert. Bis 4.5.17
+        # wartete jeder Wert bis lox_timeout - bei haengendem Broker 28 x 5 s je Geraet, und
+        # unter GERAETE_SCHLOSS stand der naechste Befehl so lange.
+        letzte = None
         for thema, wert in paare:
             try:
                 publish = client.publish(MQTT_PRAEFIX + '/' + thema, wert,
-                                         qos=2, retain=retain_fuer(thema))
-                # MIT Zeitgrenze. Bis 4.2.12 stand hier wait_for_publish()
-                # ohne Argument: QoS 2 verlangt den vollen Vier-Wege-
-                # Handschlag, und brach der Broker waehrend des Sendens weg,
-                # wartete paho unbegrenzt. Weil der Empfang im selben Ablauf
-                # lag, nahm der Dienst dann keine Pakete mehr an - und der
-                # Waechter griff nicht, weil der Prozess lebte.
-                try:
-                    await _im_faden(
-                        lambda: publish.wait_for_publish(timeout=LOX_TIMEOUT))
-                except TypeError:
-                    # paho vor 1.6 kennt das Argument nicht.
-                    await _im_faden(publish.wait_for_publish)
+                                         qos=1, retain=retain_fuer(thema))
+                if getattr(publish, 'rc', 0) != 0:
+                    _LOGGER.error("MQTT: %s nicht gesendet (rc %s)", thema, publish.rc)
+                else:
+                    letzte = publish
                 _LOGGER.debug("Publishing: MsgNum:%s: %s = %s",
                               publish.mid, thema, wert)
             except Exception as fehler:
                 _LOGGER.error("MQTT: %s konnte nicht gesendet werden: %s", thema, fehler)
+        if letzte is not None:
+            try:
+                try:
+                    await _im_faden(lambda: letzte.wait_for_publish(timeout=LOX_TIMEOUT))
+                except TypeError:
+                    # paho vor 1.6 kennt das Argument nicht.
+                    await _im_faden(letzte.wait_for_publish)
+            except Exception as fehler:
+                _LOGGER.warning("MQTT: Bestaetigung des Brokers fehlt: %s", fehler)
         return
 
     # HTTP-Weg
@@ -2214,7 +2822,7 @@ def on_connect(client, userdata, flags, rc, properties=None):
         _LOGGER.info("MQTT: Verbindung akzeptiert")
         mqtt_error = 0
         publish = client.publish(MQTT_PRAEFIX + '/connection/status', 'connected',
-                                 qos=2, retain=True)
+                                 qos=1, retain=True)
         _LOGGER.debug("Publishing: MsgNum:%s: connection/status = connected", publish.mid)
         # M6 (Durchgang 30.09.2026): nach JEDEM Verbinden die zuletzt
         # gesendeten Zustaende einmal vollstaendig retained senden (Regeln/07
@@ -2228,7 +2836,7 @@ def on_connect(client, userdata, flags, rc, properties=None):
         except RuntimeError:
             erneut = []
         for _t, _w in erneut:
-            client.publish(MQTT_PRAEFIX + '/' + _t, _w, qos=2, retain=True)
+            client.publish(MQTT_PRAEFIX + '/' + _t, _w, qos=1, retain=True)
         if erneut:
             _LOGGER.info("MQTT: nach dem Verbinden %d Zustaende erneut gesendet (retained).",
                          len(erneut))
@@ -2241,7 +2849,9 @@ def on_connect(client, userdata, flags, rc, properties=None):
         # er auch neu abonnieren, sonst laeuft die Automatik ab dem ersten
         # Netzhaenger blind weiter.
         # c1: dazu die Fensterthemen (leer, solange die Kopplung aus ist).
-        for _thema in (AUTO_THEMA_REGEL, AUTO_THEMA_PV) + tuple(sorted(FENSTER_THEMEN)):
+        # Gruppe 15: dazu die Anwesenheit (leer, solange die Kopplung aus ist).
+        for _thema in ((AUTO_THEMA_REGEL, AUTO_THEMA_PV) + tuple(sorted(FENSTER_THEMEN))
+                       + ANWESENHEIT_THEMEN):
             if _thema:
                 try:
                     client.subscribe(_thema, qos=0)
@@ -2249,6 +2859,21 @@ def on_connect(client, userdata, flags, rc, properties=None):
                 except Exception as fehler:
                     _LOGGER.error("MQTT: %s liess sich nicht abonnieren: %s",
                                   _thema, fehler)
+        # Gruppe 15 (4.5.18): die MQTT-Befehle - nur mit dem Haken, nach JEDEM Verbinden neu
+        # (clean session); bestaetigt wird es im SUBACK (bei_abo).
+        if BEFEHLE_EIN:
+            _BEFEHLE['abo'] = 0
+            try:
+                erg = client.subscribe(BEFEHL_THEMA, qos=0)
+                _BEFEHLE['mid'] = erg[1]
+                if int(erg[0]) != 0:
+                    _BEFEHLE['abo'] = -1
+                    _LOGGER.error("MQTT: %s liess sich nicht abonnieren (rc %s)", BEFEHL_THEMA, erg[0])
+                else:
+                    _LOGGER.info("MQTT: abonniert %s", BEFEHL_THEMA)
+            except Exception as fehler:
+                _BEFEHLE['abo'] = -1
+                _LOGGER.error("MQTT: %s liess sich nicht abonnieren: %s", BEFEHL_THEMA, fehler)
         # Altwerte frueherer Fassungen - in einem eigenen Faden, auf einer
         # eigenen Verbindung; dieser Rueckruf laeuft im Netzwerkfaden von paho.
         altlast_anstossen()
@@ -2296,9 +2921,15 @@ def on_message(client, userdata, nachricht):
         return
     # C2: das Retain-Merkmal auswerten - siehe abo_merken().
     zurueck = bool(getattr(nachricht, 'retain', False))
+    # Gruppe 15: ein Befehl ist kein Abo-Wert - er geht an mqtt_befehl() (nur formal pruefen, einreihen).
+    if nachricht.topic.startswith(MQTT_PRAEFIX + '/befehl/'):
+        mqtt_befehl(nachricht.topic, nachricht.payload, zurueck)
+        return
     abo_merken(nachricht.topic, text, zurueck)
     # c1: Fensterthemen zusaetzlich fuer die Kopplung merken.
     fenster_merken(nachricht.topic, text, zurueck)
+    # V1: die Anwesenheit ebenso.
+    anwesenheit_merken(nachricht.topic, text, zurueck)
     _LOGGER.debug("MQTT empfangen: %s = %s%s", nachricht.topic, text[:40],
                   " (zurueckbehalten, Alter unbekannt - zaehlt nicht)" if zurueck else "")
 
@@ -2319,6 +2950,7 @@ def on_disconnect(client, userdata, *rest):
     """
     global mqtt_error
     mqtt_error = 1
+    _BEFEHLE['abo'] = 0
     rc = rest[1] if len(rest) >= 3 else (rest[0] if rest else 0)
     _LOGGER.info("MQTT Disconnected (rc=%s)", rc)
 
@@ -2774,6 +3406,27 @@ for _fg, _fn in FENSTER_ZUORDNUNG.items():
     for _f in _fn:
         FENSTER_THEMEN[FENSTER_THEMA % _f] = _f
 
+# --- Befehle ueber MQTT (4.5.18, Gruppe 15) ----------------------------------
+# AB WERK AUS. Ein Stand ohne die Schluessel heisst "aus" (Bauart _fenster_zahl). Ein Wechsel
+# der Haken kommt mit dem Neustart, den das Speichern im Reiter MQTT ohnehin ausloest.
+BEFEHLE_EIN = _fenster_zahl('befehle_mqtt_ein', 0, 0, 1) == 1
+BEFEHLE_EINGREIFEND = _fenster_zahl('befehle_eingreifend_ein', 0, 0, 1) == 1
+
+# --- Anwesenheit (4.5.18, Gruppe 15, V1) ------------------------------------
+ANWESENHEIT_EIN = _fenster_zahl('anwesenheit_ein', 0, 0, 1) == 1
+ANWESENHEIT_VERHALTEN = _cfg_text('anwesenheit_verhalten', 'verschieben') or 'verschieben'
+if ANWESENHEIT_VERHALTEN not in ('verschieben', 'spar', 'aus'):
+    _LOGGER.warning("anwesenheit_verhalten '%s' ist unbekannt - es gilt verschieben.",
+                    ANWESENHEIT_VERHALTEN[:20])
+    ANWESENHEIT_VERHALTEN = 'verschieben'
+ANWESENHEIT_VERSCHIEBUNG = _fenster_zahl('anwesenheit_verschiebung', 30, 0, 100) / 10.0
+ANWESENHEIT_FRIST = _fenster_zahl('anwesenheit_frist', 300, 0, 3600)
+ANWESENHEIT_GERAETE = [x.strip() for x in _cfg_text('anwesenheit_geraete').split(',') if x.strip()]
+ANWESENHEIT_THEMEN = (ANWESENHEIT_THEMA, ANWESENHEIT_ZAEHLER) if ANWESENHEIT_EIN else ()
+# Der Halt eines frueheren Laufs (Neustart, Update): er wird bei der Ankunft bzw. wenn die
+# Quelle schweigt zurueckgestellt - auch wenn der Haken inzwischen aus ist.
+_ANW_HALT.update(anwesenheit_halt_lesen())
+
 UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
 # Groesste zulaessige Laenge eines Datagramms (siehe datagram_received).
 # Der laengste zulaessige Befehl - Nummer, Schluessel, Token, IP und acht
@@ -2781,10 +3434,12 @@ UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
 UDP_MAX = 512
 LoxberryIP = cfg.get('default', 'LoxberryIP').strip()
 if not LoxberryIP:
-    # Auf allen Adressen horchen ist das, was bis 4.2.12 mit leerem Wert
-    # ohnehin geschah - jetzt steht es da, statt sich zu ergeben.
     LoxberryIP = '0.0.0.0'
-    _LOGGER.info("LoxberryIP ist leer - es wird auf allen Adressen gehorcht.")
+# E5 (4.5.18, Gruppe 15): der UDP-Eingang horcht IMMER auf allen Adressen. Bis 4.5.17 band er
+# an LoxberryIP - nach einem DHCP-Wechsel endete der Dienst mit "Bind failed", bis jemand im
+# Reiter Einstellungen speicherte. Der Schutz ist seit 4.5.10 der Absenderfilter
+# (absender_erlaubt); LoxberryIP bleibt dort als zulaessiger Absender.
+UDP_BINDUNG = '0.0.0.0'
 Miniserver = cfg.get('default', 'MINISERVER')
 Abfragetakt = _cfg_zahl('abfragetakt', 0, 0, 86400)
 if 0 < Abfragetakt < 30:
@@ -2799,6 +3454,9 @@ except (configparser.NoOptionError, configparser.NoSectionError):
 if not MQTT_PRAEFIX:
     MQTT_PRAEFIX = 'Midea2Lox'
     _LOGGER.info("Kein MQTT-Praefix eingetragen - es gilt Midea2Lox.")
+# Gruppe 15: genau drei Ebenen hinter dem Praefix (befehl/<Geraetenummer>/<name>); die eigene
+# Quittung (vier) kommt nie zurueck.
+BEFEHL_THEMA = MQTT_PRAEFIX + '/befehl/+/+'
 
 # Credentials to set Loxone Inputs over HTTP
 try:
@@ -2867,11 +3525,11 @@ except Exception as err:
 UDP_SOCKET = None
 try:
     UDP_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    UDP_SOCKET.bind((LoxberryIP, UDP_Port))
+    UDP_SOCKET.bind((UDP_BINDUNG, UDP_Port))
 except OSError as fehler:
     _LOGGER.error("Socket konnte nicht gebunden werden (%s:%s): %s - laeuft schon ein "
                   "Midea2Lox? Dieser Prozess endet, BEVOR er sich beim Broker anmeldet.",
-                  LoxberryIP, UDP_Port, fehler)
+                  UDP_BINDUNG, UDP_Port, fehler)
     print('Bind failed. Error : %s' % fehler)
     sys.exit(1)
 
@@ -2908,7 +3566,8 @@ try: # check if MQTTgateway is installed or not and set MQTT Client settings
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
-    client.will_set(MQTT_PRAEFIX + '/connection/status', 'disconnected', qos=2, retain=True)
+    client.on_subscribe = bei_abo
+    client.will_set(MQTT_PRAEFIX + '/connection/status', 'disconnected', qos=1, retain=True)
     if LoxberryVersion <= 2:
         _LOGGER.info('found MQTT Gateway Plugin - publish over MQTT except on Midea2Lox support_mode')
     else:
@@ -2955,6 +3614,14 @@ if __name__ == '__main__':
         asyncio.run(start_server())
     except KeyboardInterrupt:
         _LOGGER.info("Midea2Lox beendet.")
+    except asyncio.CancelledError:
+        # M18 (4.5.18): SIGTERM (daemon stop, Update). Kein disconnect() - der Broker meldet den
+        # Letzten Willen "disconnected", weil die Verbindung ohne DISCONNECT endet.
+        if _BEENDET['sigterm']:
+            _LOGGER.info("Midea2Lox beendet (SIGTERM).")
+        else:
+            _LOGGER.error("Midea2Lox abgebrochen (Aufgabe beendet).")
+            sys.exit(1)
     except Exception as fehler:
         _LOGGER.error("Midea2Lox abgebrochen: %s", fehler, exc_info=True)
         sys.exit(1)

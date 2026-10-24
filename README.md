@@ -10,6 +10,37 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.18
+
+Midea2Lox über das MQTT-Gateway und Befehle über MQTT (Gruppe 15):
+
+* **Befehle über MQTT** (Reiter MQTT, beide Haken **ab Werk aus**): der Dienst abonniert selbst
+  `<Präfix>/befehl/<Gerätenummer>/<Name>` – kein zweiter Dienst, keine Brücke – und reiht jeden Befehl in dieselbe
+  Warteschlange ein wie einen UDP-Befehl (Gleichwert-Sperre 60 s, Handvorrang der Automatik, Positivliste). 17 Namen
+  (`ein`, `betriebsart`, `luefter`, `schwenken`, `soll`, `feuchte`, `spar`, `schnell`, `nacht`, `fernbedienung`,
+  `frostschutz`, `luftreinigung`, `ton`, `anzeige`, `selbstreinigung`, `abfragen`, `leistungsstufe`); für Ein/Aus,
+  Betriebsart, Frostschutz und Selbstreinigung zusätzlich der zweite Haken. Quittung unter `…/quittung` nach dem
+  Gespräch mit dem Gerät; zurückbehaltene Befehle werden verworfen; `status/befehle` (1/0/-1) zeigt, ob angenommen wird.
+* **Werte über das Gateway in einfache Virtuelle Eingänge:** die Vorlage mit Virtuellen HTTP-Eingängen
+  (`http://localhost`) ist entfallen. Neu die **Namenstabelle** im Reiter „Einbindung in Loxone“ (Name, Art, Fehlwert,
+  Haken für Gateway V2, Kopierknopf) und die **Vorlage MQTT-Befehle**. Der UDP-Weg (Port 7013) bleibt für bestehende
+  Anlagen, zugeklappt, jetzt mit den acht `rate_select`-Befehlen.
+* **Fehlwerte:** was ein erfolgreicher Abruf nicht liefert, kommt als `-1` (Temperaturen `-999`, Texte weiter `-`) statt
+  `-` – auch über HTTP. **Prüfungen in Loxone auf „= 0“ sehen künftig -1/-999.** Ein Offline-Gerät meldet weiter nur
+  `online = 0`. `rate_select`/`breeze_mode` nur noch mit Fähigkeit (sonst einmal `-`).
+* **Anwesenheit** (Reiter Automatik, ab Werk aus): `haus/anwesenheit/jemand` (z. B. BLE-Scanner NG ab 1.3.28) – einmal je
+  Abwesenheit sparsam verschieben (wahlweise Sparbetrieb oder aus), bei Rückkehr nur zurückstellen, nie einschalten;
+  schweigt die Quelle, wird zurückgestellt. Neues Thema `anwesenheit/aktiv`.
+* **Korrekturen:** Python-Umgebung übersteht ein Update ohne Internet (sie wird neben den Ordner gelegt und
+  zurückgeholt); NUL-Bytes machen eine Konfiguration nicht mehr „eigen“; Paket-cfg vollständig samt Prüfsummen;
+  postinstall prüft die Wurzel wie postupgrade; Zurückstellen ohne gekappte Datei; UDP horcht auf allen Adressen
+  (Absenderfilter bleibt), Testknopf an 127.0.0.1; eine Gerätesuche zugleich, devices.cfg von Anfang an 0600;
+  qos 1, gewartet wird nur auf den letzten Wert; Abschlusszeile bei SIGTERM; ein Zeitformat im Protokoll; der
+  Wächter zählt während einer Aktualisierung nicht; Präfixschutz im uninstall; Reiter bleiben nach F5 und nach einer
+  abgewiesenen Eingabe.
+* **Musterprojekt:** drei Seiten auf Virtuelle Eingänge und Befehle an „LoxBerry MQTT-Gateway“ umgestellt, neu
+  „Midea2Lox_anwesenheit_aktiv“, Formel vor der Filtermeldung, Leistungsbegrenzung (aus/50/75 Prozent).
+
 ## Neu in 4.5.17
 
 Namen in Loxone bei einem Themen-Präfix mit Schrägstrich:

@@ -37,7 +37,8 @@ import time
 logging.basicConfig(
     level=logging.INFO, filename=log_path + '/midea2lox.log',
     format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
-    datefmt='%d.%m %H:%M')
+    # M22 (4.5.18): dasselbe Zeitformat wie der Dienst (mit Jahr und Sekunden).
+    datefmt='%d.%m.%Y %H:%M:%S')
 _LOGGER = logging.getLogger("lebenszeichen.py")
 
 

@@ -52,7 +52,7 @@ melde() {
     # Nur schreiben, wenn das Verzeichnis da ist - sonst schweigt der Cron,
     # statt jede Minute einen Fehler in den Systemlogger zu schicken.
     [ -d "$(dirname "$LOG")" ] && \
-        echo "$(date '+%d.%m %H:%M') Waechter        $1  :0 $2" >> "$LOG" 2>/dev/null
+        echo "$(date '+%d.%m.%Y %H:%M:%S') Waechter        $1  :0 $2" >> "$LOG" 2>/dev/null
 }
 
 lebenszeichen() {
@@ -67,6 +67,25 @@ if [ ! -f "$PDATA/soll_laufen" ]; then
     rm -f "$ZAEHLER"
     lebenszeichen 0 "bewusst angehalten"
     exit 0
+fi
+
+# M17-Haertung (4.5.18, Gruppe 15): waehrend einer Aktualisierung weder zaehlen noch
+# starten. Dieselbe Regel wie marke_gilt in daemon/daemon: hoechstens 3600 s alt, bis
+# 300 s in der Zukunft; ohne lesbare Uhr gilt sie. Bauart Chromecast4lox cron.05min.
+MARKE="$HOME_DIR/data/plugins/$PDIR.upgrade_laeuft"
+if [ -f "$MARKE" ]; then
+    M_SEIT=$(cat "$MARKE" 2>/dev/null)
+    case "$M_SEIT" in
+        ''|*[!0-9]*) M_SEIT=0 ;;
+    esac
+    M_JETZT=$(date +%s 2>/dev/null)
+    case "$M_JETZT" in
+        ''|*[!0-9]*) exit 0 ;;
+    esac
+    M_ALTER=$((M_JETZT - M_SEIT))
+    if [ "$M_ALTER" -ge -300 ] && [ "$M_ALTER" -lt 3600 ]; then
+        exit 0
+    fi
 fi
 
 if "$DAEMON" status >/dev/null 2>&1; then

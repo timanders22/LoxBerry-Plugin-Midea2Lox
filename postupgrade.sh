@@ -69,7 +69,9 @@ trap 'if [ -f "$MI_MARKE" ]; then rm -f "$MI_MARKE" 2>/dev/null; fi' EXIT
 # Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
 # erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
 MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+# M23 (4.5.18): dazu die Vorgabe 4.5.17 + Ergaenzung fenster_* (so schrieb sie die Oberflaeche) und
+# die vollstaendige Paket-cfg 4.5.18 - jeder neue Schluessel zieht diese Liste in ALLEN DREI Skripten mit.
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5 5ddb66e57556eca9130ddb52f8583ff2d1f0a7fbf45149512754c2008d70a398 e5dbd96130fb2a27472df1604fb6382e043d6b05103452b2448e53fbcc17cba4"
 MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
     local ist soll liste
@@ -95,7 +97,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         midea2lox.cfg)
             # Endet mit Zeilenumbruch, Abschnitt [default], und die Schluessel,
             # die schon die Vorgabe von 4.3.x trug.
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[default\][[:space:]]*$' "$2" || return 1
             for k in MINISERVER UDP_PORT DEBUG LoxberryIP maxConnectionLifetime region \
                      MideaUser MideaPassword mqtt_praefix abfragetakt lox_timeout; do
@@ -104,7 +110,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         devices.cfg)
             # Endet mit Zeilenumbruch, mindestens ein Abschnitt, jede Zeile ist
             # leer, Kommentar, Abschnitt oder "schluessel = wert".
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[[^]]*\][[:space:]]*$' "$2" || return 1
             if grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' \
                     -e '^[[:space:]]*\[[^]]*\][[:space:]]*$' -e '=' "$2" | grep -q .; then
@@ -172,7 +182,13 @@ if [ -d "$SICHER/config" ] && [ -n "$(ls -A "$SICHER/config" 2>/dev/null)" ]; th
 			MI_BEHIELT="$MI_BEHIELT $mi_n"
 			continue
 		fi
-		cp -a "$mi_q" "$MI_ZIEL/" 2>/dev/null || MI_RC=$?
+		# M3 (4.5.18): ueber eine Nebendatei, verglichen, dann umbenannt (Bauart netz_zurueck) -
+		# bei voller Platte kappte cp -a die Zieldatei, die postinstall.sh eben heil zurueckgeholt hatte.
+		if ! { cp -a "$mi_q" "$MI_ZIEL/$mi_n.neu" 2>/dev/null && cmp -s "$mi_q" "$MI_ZIEL/$mi_n.neu" \
+		       && mv -f "$MI_ZIEL/$mi_n.neu" "$MI_ZIEL/$mi_n" 2>/dev/null; }; then
+			rm -f "$MI_ZIEL/$mi_n.neu" 2>/dev/null
+			MI_RC=1
+		fi
 	done
 	MI_ABW=$(mi_abweichend "$SICHER/config" "$MI_ZIEL" "$MI_BEHIELT")
 	if [ "$MI_RC" -eq 0 ] && [ -z "$MI_ABW" ]; then
@@ -188,9 +204,9 @@ if [ -d "$SICHER/config" ] && [ -n "$(ls -A "$SICHER/config" 2>/dev/null)" ]; th
 		echo "<WARNING> Die Sicherung bleibt liegen: $SICHER"
 	fi
 else
-	# Kein blinder Alarm: der Installer loescht beim Update AUCH
-	# data/plugins/<ordner> und damit die Sicherung, die preupgrade.sh
-	# dorthin geschrieben hat - diese Kette kann hier gar nichts finden.
+	# Kein blinder Alarm. E1 (4.5.18): die Sicherung liegt NEBEN dem Datenordner
+	# (<ordner>.upgrade_sicherung) und uebersteht purge_installation; fehlt sie
+	# hier, hat preupgrade.sh keine angelegt (nichts Eigenes, kein Konfigordner).
 	# Gerettet wird aus der Zweitschrift neben dem Ordner, und das tut
 	# postinstall.sh, das VOR postupgrade laeuft. Also erst nachsehen,
 	# wie es wirklich steht; eine Warnung bei heiler Konfiguration
@@ -248,7 +264,15 @@ fi
 # angehaltener Dienst bleibt angehalten (Regeln/06 Z. 353). Bis 4.5.9 lief er
 # nach jedem Update wieder (Bericht installer Befund 2, Fall A).
 MI_LIEF="$LBHOME/data/plugins/$PDIR.lief_vorher"
-if [ -f "$MI_LIEF" ]; then
+# E9 (4.5.18): ohne ladbare Python-Umgebung kein Startversuch - der Grund steht weiter oben
+# (postinstall), nicht in midea2lox.log. soll_laufen bleibt bzw. wird gelegt; der Waechter
+# (cron.01min) startet den Dienst in der ersten Minute, in der sich die Umgebung laden laesst.
+MI_VPY="$LBHOME/bin/plugins/$PDIR/venv/bin/python3"
+if [ -f "$MI_LIEF" ] && ! "$MI_VPY" -c "import msmart.device, paho.mqtt.client" >/dev/null 2>&1; then
+	mkdir -p "$LBHOME/data/plugins/$PDIR" 2>/dev/null && : > "$LBHOME/data/plugins/$PDIR/soll_laufen" 2>/dev/null
+	echo "<INFO> Die Python-Umgebung fehlt noch - wie sie nachzuholen ist, steht weiter oben (postinstall)."
+	echo "<INFO> Der Waechter startet den Dienst, sobald sie vollstaendig ist."
+elif [ -f "$MI_LIEF" ]; then
 	echo "<INFO> Starte Midea2Lox"
 	STARTAUS=$(MI_START_TROTZ_WILLE=1 MI_START_TROTZ_MARKE=1 \
 		"$LBHOME/system/daemons/plugins/$PDIR" restart 2>&1)

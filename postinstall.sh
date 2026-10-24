@@ -16,22 +16,40 @@
 PDIR=$3
 PVERSION=$4
 
-# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
-# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
-# preupgrade.sh und postupgrade.sh haben diese Absicherung seit jeher;
-# hier fehlte sie als einziger der fuenf Schalen. Ohne sie wird aus
-# "$LBPBIN/$PDIR" der Pfad "/Midea2Lox", und das rm -rf weiter unten
-# laeuft darauf los.
-LBHOMEDIR="${LBHOMEDIR:-$5}"
-LBPDATA="${LBPDATA:-$LBHOMEDIR/data/plugins}"
-LBPBIN="${LBPBIN:-$LBHOMEDIR/bin/plugins}"
-LBPCONFIG="${LBPCONFIG:-$LBHOMEDIR/config/plugins}"
-
-if [ -z "$PDIR" ] || [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR" ]; then
-	echo "<FAIL> Weder die Umgebungsvariablen noch die Argumente nennen ein"
-	echo "<FAIL> brauchbares LoxBerry-Verzeichnis. Es wird nichts angefasst."
+# M2 (4.5.18, Gruppe 15): DIE WURZEL WIE IN postupgrade.sh. Bis 4.5.17 galt hier die Umgebung
+# zuerst (LBHOMEDIR vor $5) und weiter unten $5 zuerst (NETZ_BASE) - zwei Wurzeln auf einem
+# Pruefstand mit abweichender Umgebung -, und ein Ordnername ".." wurde nicht abgewiesen (Ziel
+# des rm -rf waere bin/venv* gewesen). Jetzt: $5, sonst LBHOMEDIR, sonst Suche mit general.json;
+# config/plugins und data/plugins muessen darunter liegen. Alle Pfade aus DIESER Wurzel.
+mi_wurzel_suchen() {
+    mi_v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd) || return 1
+    mi_i=0
+    while [ -n "$mi_v" ] && [ "$mi_v" != "/" ] && [ "$mi_i" -lt 8 ]; do
+        if [ -d "$mi_v/config/plugins" ] && [ -d "$mi_v/data/plugins" ] \
+           && [ -f "$mi_v/config/system/general.json" ]; then
+            echo "$mi_v"
+            return 0
+        fi
+        mi_v=$(dirname "$mi_v")
+        mi_i=$((mi_i + 1))
+    done
+    return 1
+}
+LBHOMEDIR="${5:-$LBHOMEDIR}"
+if [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR/config/plugins" ] || [ ! -d "$LBHOMEDIR/data/plugins" ]; then
+    LBHOMEDIR=$(mi_wurzel_suchen) || LBHOMEDIR=""
+fi
+case "$PDIR" in
+    ''|.|..|*/*) PDIR="" ;;
+esac
+if [ -z "$PDIR" ] || [ -z "$LBHOMEDIR" ]; then
+	echo "<FAIL> Weder die Argumente noch die Umgebung nennen ein brauchbares LoxBerry-Verzeichnis"
+	echo "<FAIL> und einen Plugin-Ordner (Ordner: '$3', Wurzel: '${5:-}'). Es wird nichts angefasst."
 	exit 2
 fi
+LBPDATA="$LBHOMEDIR/data/plugins"
+LBPBIN="$LBHOMEDIR/bin/plugins"
+LBPCONFIG="$LBHOMEDIR/config/plugins"
 
 PDATA=$LBPDATA/$PDIR
 PBIN=$LBPBIN/$PDIR
@@ -83,8 +101,9 @@ trap 'mi_rc=$?; if [ "$mi_rc" != 0 ] && [ -f "$MI_MARKE" ]; then rm -f "$MI_MARK
 #
 # Eine gueltige Konfiguration wird NIE ueberschrieben. Eine Sicherung, die
 # echte Einstellungen ersetzt, waere schlimmer als gar keine.
-NETZ_BASE="${5:-$LBHOMEDIR}"
-NETZ_PDIR="${3:-Midea2Lox}"
+# M2 (4.5.18): dieselbe Wurzel und derselbe Ordner wie oben.
+NETZ_BASE="$LBHOMEDIR"
+NETZ_PDIR="$PDIR"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 # ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
 # Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
@@ -103,7 +122,9 @@ NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 # Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
 # erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
 MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+# M23 (4.5.18): dazu die Vorgabe 4.5.17 + Ergaenzung fenster_* (so schrieb sie die Oberflaeche) und
+# die vollstaendige Paket-cfg 4.5.18 - jeder neue Schluessel zieht diese Liste in ALLEN DREI Skripten mit.
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5 5ddb66e57556eca9130ddb52f8583ff2d1f0a7fbf45149512754c2008d70a398 e5dbd96130fb2a27472df1604fb6382e043d6b05103452b2448e53fbcc17cba4"
 MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
     local ist soll liste
@@ -129,7 +150,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         midea2lox.cfg)
             # Endet mit Zeilenumbruch, Abschnitt [default], und die Schluessel,
             # die schon die Vorgabe von 4.3.x trug.
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[default\][[:space:]]*$' "$2" || return 1
             for k in MINISERVER UDP_PORT DEBUG LoxberryIP maxConnectionLifetime region \
                      MideaUser MideaPassword mqtt_praefix abfragetakt lox_timeout; do
@@ -138,7 +163,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         devices.cfg)
             # Endet mit Zeilenumbruch, mindestens ein Abschnitt, jede Zeile ist
             # leer, Kommentar, Abschnitt oder "schluessel = wert".
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[[^]]*\][[:space:]]*$' "$2" || return 1
             if grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' \
                     -e '^[[:space:]]*\[[^]]*\][[:space:]]*$' -e '=' "$2" | grep -q .; then
@@ -203,8 +232,10 @@ fi
 # ===================================================================
 #
 # Bis 4.5.9 brach postinstall.sh beim Update mit 2 ab, sobald pip scheiterte
-# (kein Internet). Das "Zurueckrollen" darunter konnte nie greifen:
-# purge_installation hatte bin/plugins/<ordner>/ samt venv schon geloescht.
+# (kein Internet). Das "Zurueckrollen" darunter konnte bis 4.5.17 nie greifen:
+# purge_installation hatte bin/plugins/<ordner>/ samt venv schon geloescht. Seit
+# 4.5.18 (M1) legt preupgrade.sh sie vorher NEBEN den Ordner, und unten wird sie
+# zurueckgeholt - mi_nachholen() findet dann eine ladbare Umgebung.
 # Danach war das Plugin tot - Vorgabekonfiguration, halbe venv, Marke noch
 # eine Stunde gueltig, kein soll_laufen (in WSL gemessen, Bericht installer
 # Befund 3, Fall V). Jetzt, NUR bei einer Aktualisierung: die Konfiguration
@@ -219,11 +250,16 @@ mi_nachholen() {  # $1 Grund
 	zurueckrollen
 	if ! "$VENV/bin/python3" -c "import msmart.device, paho.mqtt.client" >/dev/null 2>&1; then
 		rm -rf "${VENV:?}" 2>/dev/null
+		echo "<WARNING> Die Aktualisierung ist unvollstaendig: $1"
+		echo "<WARNING> Die Einstellungen sind zurueckgespielt. Der Dienst startet von selbst, sobald die"
+		echo "<WARNING> Python-Umgebung vollstaendig ist. Nachholen, sobald der LoxBerry Internet hat"
+		echo "<WARNING> (als Benutzer loxberry, in einer Zeile):"
+	else
+		# M1 (4.5.18): die zurueckgeholte Umgebung laedt - der Dienst arbeitet mit ihr weiter.
+		echo "<WARNING> pip scheiterte (kein Internet?): $1"
+		echo "<WARNING> Die bisherige Python-Umgebung ist wiederhergestellt; der Dienst arbeitet mit ihr"
+		echo "<WARNING> weiter. Nachholen bei Gelegenheit (als Benutzer loxberry, in einer Zeile):"
 	fi
-	echo "<WARNING> Die Aktualisierung ist unvollstaendig: $1"
-	echo "<WARNING> Die Einstellungen sind zurueckgespielt. Der Dienst startet von selbst, sobald die"
-	echo "<WARNING> Python-Umgebung vollstaendig ist. Nachholen, sobald der LoxBerry Internet hat"
-	echo "<WARNING> (als Benutzer loxberry, in einer Zeile):"
 	echo "<WARNING>   python3 -m venv '$VENV' && '$PIP' install --extra-index-url https://www.piwheels.org/simple --prefer-binary requests 'paho-mqtt${PAHO_VERSION}' ifaddr 'msmart-ng==${MSMART_VERSION}'"
 	if [ -f "$MI_LIEF" ]; then
 		mkdir -p "$PDATA" 2>/dev/null && : > "$PDATA/soll_laufen" 2>/dev/null
@@ -240,6 +276,11 @@ echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
 
 # Die bisherige Umgebung wird BEISEITEGELEGT, nicht weggeworfen.
 #
+# E8 (4.5.18): beim Update gilt das erst seit M1 - purge_installation loescht
+# bin/plugins/<ordner>/ (plugininstall.pl :1649) VOR diesem Skript; preupgrade.sh
+# legt die Umgebung deshalb neben den Ordner (<ordner>.venv_vorher), und hier wird
+# sie zuerst zurueckgeholt. Danach arbeitet der Block wie beschrieben.
+#
 # Bis 4.3.2 stand hier "rm -rf $VENV" vor jeder Pruefung. Ein
 # Aktualisierungsversuch ohne Internet - pip_install bricht dann mit
 # Rueckgabewert 2 ab - liess damit eine leere Umgebung zurueck und machte
@@ -250,6 +291,16 @@ echo "<INFO> Lege die virtuelle Python-Umgebung an: $VENV"
 # venv stehen absolute Pfade (pyvenv.cfg und jede Shebang-Zeile unter bin/).
 # Eine an einem anderen Namen gebaute Umgebung waere nach dem Umbenennen
 # kaputt - deshalb entsteht die neue immer unter dem endgueltigen Namen.
+# M1 (4.5.18): die Umgebung von preupgrade.sh zurueckholen - an DENSELBEN Pfad, an dem sie
+# gebaut wurde (absolute Pfade in pyvenv.cfg und den Shebangs).
+if [ ! -d "$VENV" ] && [ -d "$PBIN.venv_vorher" ]; then
+	mkdir -p "$PBIN" 2>/dev/null
+	if mv -T "$PBIN.venv_vorher" "$VENV" 2>/dev/null; then
+		echo "<INFO> Bisherige Python-Umgebung zurueckgeholt."
+	else
+		echo "<WARNING> Die beiseitegelegte Python-Umgebung liess sich nicht zurueckholen: $PBIN.venv_vorher"
+	fi
+fi
 VENV_VORHER="$PBIN/venv.vorher"
 rm -rf "$VENV_VORHER"
 if [ -d "$VENV" ]; then
@@ -333,6 +384,8 @@ echo "<OK> Umgebung einsatzbereit - msmart-ng $INSTALLED"
 
 # Erst JETZT ist die alte Umgebung entbehrlich.
 rm -rf "$VENV_VORHER"
+# M1: und ein Rest neben dem Ordner (genauer Name, kein Muster).
+rm -rf "${PBIN:?}.venv_vorher"
 
 # ---------------------------------------------------------------------------
 # Die Erstanleitung steht seit 4.5.9 am Ende: erst nach dem Zurueckspielen

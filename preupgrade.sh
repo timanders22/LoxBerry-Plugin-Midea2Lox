@@ -122,7 +122,9 @@ fi
 # Grenze: eine Datei, die genau an einem Zeilenende abgeschnitten wurde,
 # erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
 MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
-MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5"
+# M23 (4.5.18): dazu die Vorgabe 4.5.17 + Ergaenzung fenster_* (so schrieb sie die Oberflaeche) und
+# die vollstaendige Paket-cfg 4.5.18 - jeder neue Schluessel zieht diese Liste in ALLEN DREI Skripten mit.
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5 5ddb66e57556eca9130ddb52f8583ff2d1f0a7fbf45149512754c2008d70a398 e5dbd96130fb2a27472df1604fb6382e043d6b05103452b2448e53fbcc17cba4"
 MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
     local ist soll liste
@@ -148,7 +150,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         midea2lox.cfg)
             # Endet mit Zeilenumbruch, Abschnitt [default], und die Schluessel,
             # die schon die Vorgabe von 4.3.x trug.
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[default\][[:space:]]*$' "$2" || return 1
             for k in MINISERVER UDP_PORT DEBUG LoxberryIP maxConnectionLifetime region \
                      MideaUser MideaPassword mqtt_praefix abfragetakt lox_timeout; do
@@ -157,7 +163,11 @@ mi_inhalt() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei Eigenes des Anwender
         devices.cfg)
             # Endet mit Zeilenumbruch, mindestens ein Abschnitt, jede Zeile ist
             # leer, Kommentar, Abschnitt oder "schluessel = wert".
-            [ -z "$(tail -c 1 "$2")" ] || return 1
+            # M6 (4.5.18): endet wirklich mit einem Zeilenumbruch (ein NUL am Ende zaehlte bis
+            # 4.5.17 als leer) und traegt kein NUL - eine nach Stromausfall genullte Haelfte
+            # verdraengte sonst die heile Zweitschrift.
+            [ "$(tail -c 1 "$2" | wc -l)" -eq 1 ] || return 1
+            [ "$(tr -d '\000' < "$2" | wc -c)" -eq "$(wc -c < "$2")" ] || return 1
             grep -q '^[[:space:]]*\[[^]]*\][[:space:]]*$' "$2" || return 1
             if grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*[#;]' \
                     -e '^[[:space:]]*\[[^]]*\][[:space:]]*$' -e '=' "$2" | grep -q .; then
@@ -395,6 +405,33 @@ else
             fi
         fi
         rm -f "$PIDDATEI"
+    fi
+fi
+
+# ===================================================================
+# M1 (4.5.18, Gruppe 15): DIE PYTHON-UMGEBUNG NEBEN DEN ORDNER
+# ===================================================================
+#
+# purge_installation loescht bin/plugins/<ordner>/ samt venv (plugininstall.pl
+# :1649, als loxberry) - BEVOR postinstall.sh laeuft. Scheiterte dort pip (kein
+# Internet), stand der Dienst bis 4.5.17, bis jemand per SSH nachholte. Jetzt
+# wandert die Umgebung nach bin/plugins/<ordner>.venv_vorher (der Punkt im Namen
+# rettet sie wie .upgrade_sicherung), postinstall.sh holt sie zurueck. Dieselben
+# Rechte wie das Loeschen durch den Installer (Schreiben am Elternordner); am
+# Geraet zu messen (geraet_messung.sh venv). Scheitert das mv, bleibt das bisherige
+# Verhalten. Lag die Marke schon (abgebrochenes Update) und ist .venv_vorher da,
+# bleibt sie unangetastet - sie ist dann die einzige Umgebung.
+MI_VV="$ARGV5/bin/plugins/$ARGV3.venv_vorher"
+MI_VJETZT="$ARGV5/bin/plugins/$ARGV3/venv"
+if [ "$MI_MARKE_VORHER" = 1 ] && [ -d "$MI_VV" ]; then
+    echo "<INFO> Die Python-Umgebung eines abgebrochenen Updates bleibt beiseite: $MI_VV"
+elif [ -d "$MI_VJETZT" ]; then
+    rm -rf "${MI_VV:?}" 2>/dev/null
+    if mv -T "$MI_VJETZT" "$MI_VV" 2>/dev/null; then
+        echo "<OK> Python-Umgebung beiseitegelegt (fuer ein Update ohne Internet)."
+    else
+        echo "<WARNING> Die Python-Umgebung liess sich nicht beiseitelegen - ohne Internet steht"
+        echo "<WARNING> der Dienst nach dem Update bis zum Nachholen (bisheriges Verhalten)."
     fi
 fi
 

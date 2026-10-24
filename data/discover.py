@@ -73,6 +73,7 @@ except Exception as _fehler:                       # noqa: BLE001
 cfg_path = 'REPLACELBPCONFIGDIR' #### REPLACE LBPCONFIGDIR ####
 log_path = 'REPLACELBPLOGDIR' #### REPLACE LBPLOGDIR ####
 home_path = 'REPLACELBHOMEDIR' #### REPLACE LBHOMEDIR ####
+data_path = 'REPLACELBPDATADIR' #### REPLACE LBPDATADIR ####
 
 # Die Zuordnung Land -> Serverbereich von msmart-ng. Sie steht auch in
 # mi_lib.php (mi_regionen); beide Seiten muessen dieselben Werte kennen.
@@ -134,7 +135,8 @@ logging.basicConfig(
     level=logging.DEBUG if DEBUG == '1' else logging.INFO,
     filename=log_path + '/midea2lox.log',
     format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
-    datefmt='%d.%m %H:%M')
+    # M22 (4.5.18): dasselbe Zeitformat wie der Dienst (mit Jahr und Sekunden).
+    datefmt='%d.%m.%Y %H:%M:%S')
 
 if sys.version_info < (3, 10):
     # msmart-ng verlangt ab 2026.4.0 mindestens Python 3.10; preroot.sh
@@ -351,15 +353,22 @@ async def discovery():
                          "die Wolke hat nichts geliefert.", device.id)
 
     ziel = cfg_path + '/devices.cfg'
-    tmp = ziel + '.tmp'
+    # M7 (4.5.18): eine Nebendatei je Prozess, und 0600 SCHON BEIM ANLEGEN - bis 4.5.17 bestand
+    # sie einen Augenblick mit den Rechten der umask (0644), und zwei Suchen schrieben in
+    # dieselbe .tmp. rechte_setzen() bleibt als zweite Wache.
+    tmp = ziel + '.%d.tmp' % os.getpid()
     try:
-        # Rechte VOR dem Inhalt: in der Datei stehen Token und Schluessel.
-        with open(tmp, 'w', encoding='utf-8') as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
             rechte_setzen(tmp)
             cfg_devices.write(f)
         os.replace(tmp, ziel)
         rechte_setzen(ziel)
     except OSError as fehler:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         text = "devices.cfg konnte nicht geschrieben werden: %s" % fehler
         print(text)
         _LOGGER.error(text)
@@ -384,7 +393,42 @@ async def discovery():
     return 0
 
 
+SUCHE_BESETZT = 3
+
+
+def suche_sperre_nehmen():
+    """M7 (4.5.18): nur EINE Geraetesuche zugleich - flock auf data/plugins/<ordner>/suche.sperre.
+
+    Rueckgabe (frei, Dateiobjekt). Ohne fcntl oder ohne beschreibbaren Datenordner wird ohne
+    Sperre gesucht (bisheriges Verhalten) - eine Suche abzuweisen, weil die Sperre fehlt, waere
+    der groessere Schaden. discover.py startet keine Kinder, die Sperre vererbt sich nicht.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return True, None
+    if not os.path.isabs(data_path):
+        return True, None
+    try:
+        os.makedirs(data_path, exist_ok=True)
+        f = open(os.path.join(data_path, 'suche.sperre'), 'a')
+    except OSError as fehler:
+        _LOGGER.warning('Sperrdatei der Geraetesuche nicht anlegbar (%s) - es wird ohne Sperre gesucht.', fehler)
+        return True, None
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False, None
+    return True, f
+
+
 if __name__ == '__main__':
+    _frei, _sperre = suche_sperre_nehmen()
+    if not _frei:
+        print('Es laeuft schon eine Geraetesuche - bitte warten und danach erneut suchen.')
+        _LOGGER.warning('Zweite Geraetesuche abgewiesen: es laeuft schon eine.')
+        sys.exit(SUCHE_BESETZT)
     try:
         sys.exit(asyncio.run(discovery()) or 0)
     except KeyboardInterrupt:

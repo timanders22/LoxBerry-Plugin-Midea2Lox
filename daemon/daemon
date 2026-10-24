@@ -107,7 +107,7 @@ uebereignen "$logdir" "$datadir"
 #
 # Das Format ist das des Python-Loggers (data/midea2lox.py: Formatter
 # '%(asctime)s %(name)-12s %(levelname)-8s :%(lineno)d %(message)s',
-# datefmt '%d.%m %H:%M'); der minuetliche Waechter schreibt schon so. Die
+# datefmt '%d.%m.%Y %H:%M:%S' - seit 4.5.18 (M22) auch hier und im Waechter). Die
 # Zeilennummer ist 0, weil sie aus der Schale kommt.
 #
 # Warum zusaetzlich logger: die Ausgabe dieses Skripts verwirft der Cron
@@ -116,7 +116,7 @@ uebereignen "$logdir" "$datadir"
 # Minute einen Fehler zu erzeugen.
 melde_log() {  # $1 Stufe, $2 Text
     if [ -d "$logdir" ]; then
-        printf '%s %-12s %-8s :0 %s\n' "$(date '+%d.%m %H:%M')" \
+        printf '%s %-12s %-8s :0 %s\n' "$(date '+%d.%m.%Y %H:%M:%S')" \
             "Startskript" "$1" "$2" >> "$protokoll" 2>/dev/null
         uebereignen "$protokoll"
     fi
@@ -487,8 +487,9 @@ stop_dienst() {
     if p=$(laufende_pid); then
         echo "Beende Midea2Lox (PID $p)..."
         kill "$p" 2>/dev/null
-        # Zeit zum Aufraeumen lassen: der Dienst meldet beim Beenden noch
-        # 'disconnected' per MQTT, damit Loxone den Ausfall mitbekommt.
+        # Zeit zum Aufraeumen lassen. M18 (4.5.18): der Dienst schreibt seine
+        # Abschlusszeile; 'disconnected' meldet der BROKER fuer ihn (Letzter Wille),
+        # weil die Verbindung ohne DISCONNECT endet - damit Loxone den Ausfall mitbekommt.
         i=0
         while [ $i -lt 20 ] && kill -0 "$p" 2>/dev/null; do
             sleep 0.25
@@ -523,10 +524,12 @@ stop_dienst() {
 # Rueckgabewert 0. Die Oberflaeche (mi_dienst in mi_lib.php) fragt genau
 # diesen Wert ab und meldete deshalb "Der Dienst wurde neu gestartet".
 rueck=0
-# C6: start, stop, restart und waechter laufen unter der Startsperre;
-# status bleibt rein lesend und ungesperrt.
+# C6: start, stop und restart laufen unter der Startsperre; status bleibt
+# rein lesend und ungesperrt. E6 (4.5.18): der Zweig 'waechter' ist entfallen -
+# der Waechter (cron/cron.01min) ruft 'start', das den Merker selbst achtet; der
+# Zweig war toter Code mit dem falschen Kommentar "Vom Cron benutzt".
 case "$1" in
-    'start'|''|'stop'|'restart'|'waechter')
+    'start'|''|'stop'|'restart')
         startsperre_nehmen || exit 1 ;;
 esac
 case "$1" in
@@ -544,11 +547,6 @@ case "$1" in
         # soll der Aufrufer erfahren.
         stop_dienst || rueck=1
         starten_wenn_erlaubt "$wille" || rueck=1 ;;
-    'waechter')
-        # Vom Cron benutzt: startet nur, wenn der Dienst laufen soll.
-        if [ -f "$sollmarke" ] && ! laufende_pid >/dev/null; then
-            starten_wenn_erlaubt 1 || rueck=1
-        fi ;;
     'status')
         if p=$(laufende_pid); then
             echo "Midea2Lox laeuft. PID: $p"

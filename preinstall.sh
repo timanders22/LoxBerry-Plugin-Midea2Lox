@@ -61,6 +61,13 @@ for ZIEL in "$BASE/config/plugins/$PFOLDER".backup.* \
         FEST="$FEST $ZIEL"
     fi
 done
+# Gruppe 15 (4.5.18): die beiseitegelegte Python-Umgebung (M1) und der Halt der Anwesenheit
+# (V1) einer frueheren Installation - genaue Namen, kein Muster.
+for REST in "$BASE/bin/plugins/$PFOLDER.venv_vorher" "$BASE/data/plugins/$PFOLDER.anwesenheit_halt"; do
+    if [ -e "$REST" ] || [ -L "$REST" ]; then
+        rm -rf "${REST:?}" && BEISEITE="$BEISEITE (Rest $REST entfernt)"
+    fi
+done
 MERKER="$BASE/data/plugins/$PFOLDER.lief_vorher"
 if [ -e "$MERKER" ]; then
     rm -f "$MERKER" && BEISEITE="$BEISEITE (Startmerker $MERKER entfernt)"
