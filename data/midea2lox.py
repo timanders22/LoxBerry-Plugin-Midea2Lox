@@ -35,6 +35,7 @@ import logging
 import sys
 import os
 import signal
+import subprocess
 import threading
 import time
 
@@ -76,6 +77,30 @@ data_path = 'REPLACELBPDATADIR' #### REPLACE LBPDATADIR ####
 #
 # Ersetzt durch feste Zuordnungstabellen und Typumwandlung. Was nicht in der
 # Tabelle steht, wird protokolliert und verworfen - nicht ausgefuehrt.
+
+_ANSAGE_STAND = {}
+
+
+def ansage_lage(anlass, gestoert, name="", frist=0):
+    """Seit 4.5.19: den Zustand eines Anlasses an mi_ansage.php geben. Ausgabeart, Nachtruhe, Sperre und Schalter prueft die gemeinsame Sprachausgabe.
+    Die Flanke und den ersten Lauf merkt die Bruecke. name: nur fuer die Unterscheidung, nie eine Geraetekennung im Satz. Ein Fehler stoert den Dienst nicht."""
+    schluessel = anlass + "|" + name
+    alt = _ANSAGE_STAND.get(schluessel)
+    jetzt = time.monotonic()
+    if alt is not None and alt[0] == bool(gestoert) and (not gestoert or jetzt - alt[1] < 60):
+        return
+    _ANSAGE_STAND[schluessel] = (bool(gestoert), jetzt)
+    pfad = os.path.dirname(os.path.abspath(__file__))
+    aufruf = ["php", os.path.join(pfad, "mi_ansage.php"), anlass, "1" if gestoert else "0", os.path.basename(pfad), name, str(int(frist))]
+
+    def laufen():
+        try:
+            subprocess.run(aufruf, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    threading.Thread(target=laufen, name="ansage", daemon=True).start()
+
 
 def mi_bool(wort):
     """'True'/'False' aus dem Paket in einen echten Wahrheitswert.
@@ -2141,6 +2166,9 @@ async def send_to_midea(data, hand=False):
                 device._online = False
                 _LOGGER.error(error)
 
+            # Seit 4.5.19: Ausfall und Geraetefehler als Ansage, die Kennung nur zur Unterscheidung, nie im Satz.
+            ansage_lage("ausfall", not bool(device.online), str(device_id), 1800)
+            ansage_lage("fehler", bool(getattr(device, "error_code", 0)), str(device_id), 0)
         else: ### apply() AC changes
             if support_mode == 1:
                 _LOGGER.info("apply() on support Mode for Loxone Configs createt with Midea2Lox V2.x --> MQTT disabled. If you want to use MQTT you need to update your Loxoneconfig")

@@ -150,6 +150,19 @@ if ($mi_fehlten && $mi_wache === '' && !mi_upgrade_laeuft()) {
  * ---------------------------------------------------------------- */
 
 // ---------- Einstellungen speichern ----------
+/* Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+if ((isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') && isset($_POST['ansage_test'])) {
+    list($mi_at, $mi_ag) = mi_ansage_test();
+    if ($mi_at) { $mi_hinweise[] = mi_e(mi_t('ANSAGEPLUGIN.M_TEST_OK')); } else { $mi_fehler[] = mi_e(mi_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $mi_ag); }
+    $mi_tab = 'tab-settings';
+}
+if ((isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') && isset($_POST['ansage_speichern'])) {
+    list($mi_ao, $mi_af, $mi_ah) = mi_ansage_post($_POST);
+    if ($mi_af) { foreach ($mi_af as $mi_ax) { $mi_fehler[] = mi_e($mi_ax); } }
+    elseif ($mi_ao) { $mi_hinweise[] = mi_e(trim(mi_t('ANSAGEPLUGIN.M_OK') . ' ' . implode(' ', $mi_ah))); }
+    else { $mi_fehler[] = mi_e(mi_t('ANSAGEPLUGIN.M_FEHL')); }
+    $mi_tab = 'tab-settings';
+}
 if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     $neu = $mi_cfg;
     $mi_x2_falsch = array();
@@ -784,6 +797,9 @@ LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
 .sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
 .sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 .sm-small { font-size: 0.88em; color: #555; }
+.sm-wrap .sm-breit { width: 100%; max-width: 640px; }
+.sm-feld { margin: 10px 0; }
+.sm-feld > label:first-child { display: block; font-weight: 600; margin-bottom: 4px; }
 .sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-warnung { border: 1px solid #f0c9a0; background: #fdf4ec; border-radius: 6px;
@@ -1132,6 +1148,7 @@ if (!$mi_liste) {
 <span class="sm-mono"><?php echo mi_e($mi_p['devices']); ?></span> <?php echo mi_t('UI.GERAETE_UEBERLEBT'); ?></p>
 <?php } ?>
 
+<?php echo mi_ansage_form_html(mi_fmt() . '<input data-role="none" type="hidden" name="activetab" value="tab-settings">'); ?>
 <h2><?php echo mi_te('UI.H_SICHERUNG'); ?></h2>
 <div class="sm-hinweis"><?php echo mi_t('UI.SICH_ERKLAERUNG'); ?></div>
 <div class="sm-warnung"><?php echo mi_t('UI.SICH_WARNUNG'); ?></div>
