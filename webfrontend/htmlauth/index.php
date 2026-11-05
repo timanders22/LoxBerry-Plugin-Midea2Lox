@@ -560,6 +560,7 @@ if (isset($_SERVER['REQUEST_METHOD'])
     } else {
         list($mi_vname, $mi_vinhalt) = mi_vorlage_mqtt_out($mi_cfg);
     }
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="' . $mi_vname . '"');
     echo $mi_vinhalt;
@@ -600,6 +601,7 @@ if (isset($_SERVER['REQUEST_METHOD'])
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
         | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($mi_js !== false) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="midea2lox_einstellungen_'
                . date('Ymd_His') . '.json"');
