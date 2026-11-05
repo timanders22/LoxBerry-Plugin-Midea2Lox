@@ -10,6 +10,12 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.21
+
+- **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.
+- **Sprechtoken:** Ein von Hand eingetragenes Alexa- oder Google-Token wird nicht mehr vom Token des Nachbar-Plugins überschrieben.
+- **Formular:** Ein beanstandeter Tafel- oder HomePod-Name bleibt zur Korrektur im Feld stehen.
+
 ## Neu in 4.5.20
 
 - Vor einem Download wird jeder offene Ausgabepuffer geleert: PHP-Warnungen oder Reste landen nicht mehr in der heruntergeladenen Datei.

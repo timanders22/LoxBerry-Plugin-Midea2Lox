@@ -48,7 +48,7 @@ if [ -z "$MI_BASE" ] || [ -z "$ARGV3" ]; then
     echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis oder kein Plugin-Ordner"
     echo "<WARNING> gefunden (Ordner: '$ARGV3', Wurzel: '$MI_BASE'). Es wurde nichts"
     echo "<WARNING> angelegt, nichts gesichert und kein Dienst angehalten."
-    exit 1
+    exit 2
 fi
 ARGV5=$MI_BASE
 LBHOMEDIR=$MI_BASE
@@ -99,11 +99,37 @@ if [ -n "$MARKE_ZEIT" ] && printf '%s\n' "$MARKE_ZEIT" > "$MARKE" 2>/dev/null; t
     chmod 0644 "$MARKE" 2>/dev/null
     echo "<INFO> Marke fuer die laufende Aktualisierung gesetzt ($MARKE)."
 else
-    rm -f "$MARKE" 2>/dev/null
-    echo "<WARNING> Die Marke $MARKE liess sich nicht setzen."
-    echo "<WARNING> Startet der Rechner waehrend der Aktualisierung neu, kann"
-    echo "<WARNING> der Dienst mit den Vorgabewerten anlaufen."
+    [ "$MI_MARKE_VORHER" = 1 ] || rm -f "$MARKE" 2>/dev/null
+    # 05.11.2026: ohne Marke haelt die Installation das Update fuer eine Neuinstallation und legt die Einstellungen beiseite; bis hierher nur eine Warnung.
+    echo "<FAIL> Die Marke $MARKE liess sich nicht anlegen - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt unveraendert installiert."
+    exit 2
 fi
+# ---------- Update-Schutz (05.11.2026, Bauart Govee 0.9.34) ----------
+# plugininstall.pl bricht nur bei Rueckgabewert >1 vor purge_installation ab. Die Kopie entsteht als <Ziel>.neu.<pid>, traegt 0600,
+# BEVOR Inhalt hineinkommt, wird mit cmp verglichen und erst dann per mv an ihren Platz gestellt: eine heile Sicherung bleibt heil.
+ZS_FEHL=""
+zs_hinlegen() {   # $1 Quelle, $2 Ziel
+    [ -d "$2" ] && return 1
+    zs_neu="$2.neu.$$"
+    rm -f "$zs_neu" 2>/dev/null
+    if { : > "$zs_neu"; } 2>/dev/null && chmod 600 "$zs_neu" 2>/dev/null \
+       && cp "$1" "$zs_neu" 2>/dev/null && cmp -s "$1" "$zs_neu" \
+       && mv -f "$zs_neu" "$2" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$zs_neu" 2>/dev/null
+    return 1
+}
+zs_schluss() {   # Fehlschlag gesammelt: Marke weg, Abbruch vor purge_installation
+    [ -n "$ZS_FEHL" ] || return 0
+    echo "<FAIL> Nicht gesichert:$ZS_FEHL - die Aktualisierung wird abgebrochen, damit der Purge die Originale nicht loescht."
+    echo "<FAIL> Die bisherige Fassung bleibt installiert. Bitte Platz und Rechte unter config/plugins und data/plugins pruefen."
+    [ "$MI_MARKE_VORHER" = 1 ] || rm -f "$MARKE" 2>/dev/null
+    # Die Python-Umgebung liegt beiseite (weiter unten); die bisherige Fassung braucht sie.
+    [ -d "$MI_VV" ] && [ ! -e "$MI_VJETZT" ] && mv -T "$MI_VV" "$MI_VJETZT" 2>/dev/null
+    exit 2
+}
 
 # ---- MI-INHALTSBLOCK ANFANG (wortgleich in preupgrade.sh, postinstall.sh, postupgrade.sh) ----
 # Traegt eine Konfigurationsdatei etwas EIGENES des Anwenders? Entschieden
@@ -265,13 +291,13 @@ echo "<INFO> Backing up existing config files"
 # (purge_installation hat den Ordner schon entfernt, Fall D1).
 if [ -d "$MI_QCFG" ]; then
     cp -a "$MI_QCFG/." "$MI_NEU/config/" 2>/dev/null \
-        || { MI_RC=$?; MI_OK=0; MI_GRUND="$MI_GRUND cp Rueckgabewert $MI_RC;"; }
+        || { MI_RC=$?; MI_OK=0; MI_GRUND="$MI_GRUND cp Rueckgabewert $MI_RC;"; ZS_FEHL="$ZS_FEHL Konfiguration"; }
 else
     MI_OK=0
     MI_GRUND="$MI_GRUND keine Konfiguration unter $MI_QCFG;"
 fi
 MI_ABW=$(mi_abweichend "$MI_QCFG" "$MI_NEU/config")
-[ -z "$MI_ABW" ] || { MI_OK=0; MI_GRUND="$MI_GRUND nicht in der Sicherung: $MI_ABW;"; }
+[ -z "$MI_ABW" ] || { MI_OK=0; MI_GRUND="$MI_GRUND nicht in der Sicherung: $MI_ABW;"; ZS_FEHL="$ZS_FEHL Konfiguration"; }
 
 # Eine Sicherung mit eigenen Einstellungen wird nie durch eine ohne ersetzt.
 # Nach purge_installation kopiert der Installer die mitgelieferte Vorgabe
@@ -291,6 +317,7 @@ if [ "$MI_OK" = 1 ]; then
         rm -rf "$MI_NEU" 2>/dev/null
         echo "<WARNING> Die bisherige Sicherung liess sich nicht beiseitelegen; sie bleibt"
         echo "<WARNING> unangetastet: $SICHER"
+        ZS_FEHL="$ZS_FEHL Update-Sicherung"
     elif mv -T "$MI_NEU" "$SICHER" 2>/dev/null; then
         rm -rf "$SICHER.vorig" 2>/dev/null
         echo "<OK> Konfiguration gesichert (Rechte 0700)."
@@ -299,6 +326,7 @@ if [ "$MI_OK" = 1 ]; then
         rm -rf "$MI_NEU" 2>/dev/null
         echo "<WARNING> Die neue Sicherung liess sich nicht an ihren Platz bringen."
         echo "<WARNING> Platz und Rechte in $ARGV5/data/plugins pruefen."
+        ZS_FEHL="$ZS_FEHL Update-Sicherung"
     fi
 else
     rm -rf "$MI_NEU" 2>/dev/null
@@ -459,15 +487,13 @@ NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 mi_zweitschrift() {  # $1 Dateiname im Konfigordner
     local q="$NETZ_CFG/$1" z="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$1"
     if mi_inhalt "$1" "$q"; then
-        if cp -p "$q" "$z.neu" 2>/dev/null \
-           && chmod 0600 "$z.neu" 2>/dev/null \
-           && cmp -s "$q" "$z.neu" \
-           && mv -f "$z.neu" "$z" 2>/dev/null; then
+        if zs_hinlegen "$q" "$z"; then
             echo "<INFO> Zweitschrift $1 angelegt."
         else
             rm -f "$z.neu" 2>/dev/null
             echo "<WARNING> Die Zweitschrift von $1 liess sich nicht anlegen;"
             echo "<WARNING> eine vorhandene bleibt unveraendert: $z"
+            ZS_FEHL="$ZS_FEHL $1"
         fi
     elif [ -f "$z" ] && [ "$MI_MARKE_VORHER" = 1 ]; then
         echo "<WARNING> $1 fehlt, ist unvollstaendig oder die mitgelieferte Vorgabe -"
@@ -492,4 +518,5 @@ if [ -n "$MI_BEISEITE" ] || [ -n "$MI_FEST" ]; then
     echo "$MI_T"
 fi
 
+zs_schluss
 exit 0
