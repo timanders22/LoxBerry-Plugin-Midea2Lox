@@ -1710,6 +1710,12 @@ async def anwesenheit_schleife():
 #       fluechtig, jede Minute). Verwendet nur, solange zaehler sich binnen 120 s LIVE
 #       geaendert hat, das zuletzt live empfangene ok 1 ist und die Werte selbst live
 #       und juenger als 120 s sind. Sonst: nichts einschalten.
+#   haus/energie/frei_w|frei_quelle  (ab 4.5.23; Anbieter Smartmeter ab 2.8.19): Sonnenstrom
+#       uebrig (+) bzw. Haus deckt sich aus Netz ODER Hausakku (-). Gilt nur, wenn es zum
+#       LETZTEN Satz gehoert (live, hoechstens VK_FREI_SATZ s vor dem zuletzt live
+#       empfangenen ok) - der Anbieter laesst frei_w mit Absicht weg, wenn der Akku
+#       schweigt; ein frei_w aus der Vorminute darf dann nicht weitergelten. Ohne gueltiges
+#       frei_w: Rueckfall auf ueberschuss_w/bezug_w (mi_vorkuehlen.massstab).
 #   haus/wetter/jetzt/grad|zeit|ok|zaehler/weatherdata  (Anbieter Weatherdata). Nur bei
 #       lebendem Zaehler, ok = 1, zeit juenger als 1 h und grad != -999 - sonst entfaellt
 #       die Bedingung "nur ab Aussentemperatur".
@@ -1734,7 +1740,10 @@ async def anwesenheit_schleife():
 # laeuft_seit, soll, aus_seit, hand_tag je Geraet - uebersteht Neustart und Update;
 # uninstall/preinstall raeumen ihn ab.
 VK_ENERGIE = ('haus/energie/netz_w', 'haus/energie/bezug_w', 'haus/energie/ueberschuss_w',
+              'haus/energie/frei_w', 'haus/energie/frei_quelle',
               'haus/energie/ok', 'haus/energie/zaehler')
+VK_FREI_SATZ = 10       # s: frei_w gilt nur, wenn es so knapp vor dem letzten live-ok kam (derselbe Satz)
+VK_FREI_QUELLEN = ('netz', 'netz+speicher')
 VK_WETTER = ('haus/wetter/jetzt/grad', 'haus/wetter/zeit', 'haus/wetter/ok',
              'haus/wetter/zaehler/weatherdata')
 VK_PV = ('haus/pv/naechste_stunde_w', 'haus/pv/ok', 'haus/pv/zaehler/weatherdata')
@@ -1851,8 +1860,20 @@ def vk_energie(jetzt):
         z = _VK_ZAEHLER.get('haus/energie/zaehler')
         empf = [e['empfangen'] for t, e in _VK_QUELLE.items()
                 if t.startswith('haus/energie/') and e['live']]
-    gut = bool(lebt and ok == '1' and ueber is not None and MQTT == 1 and mqtt_error == 0)
-    return {'energie_ok': gut, 'ueberschuss': ueber, 'bezug': bezug, 'lebt': 1 if lebt else 0,
+        e_ok = _VK_QUELLE.get('haus/energie/ok')
+        e_frei = _VK_QUELLE.get('haus/energie/frei_w')
+    # 4.5.23: frei_w nur aus dem letzten Satz (siehe Kopf) - und nur bei lebendem Anbieter mit ok = 1.
+    frei = _vk_zahl(_vk_wert('haus/energie/frei_w', jetzt))
+    if (frei is None or not lebt or ok != '1' or not e_ok or not e_frei
+            or e_frei['empfangen'] < e_ok['empfangen'] - VK_FREI_SATZ):
+        frei = None
+    quelle = _vk_wert('haus/energie/frei_quelle', jetzt) if frei is not None else None
+    if quelle not in VK_FREI_QUELLEN:
+        quelle = None if frei is None else '?'
+    gut = bool(lebt and ok == '1' and (ueber is not None or frei is not None)
+               and MQTT == 1 and mqtt_error == 0)
+    return {'energie_ok': gut, 'ueberschuss': ueber, 'bezug': bezug, 'frei': frei,
+            'frei_quelle': quelle, 'lebt': 1 if lebt else 0,
             'ok': ok, 'zaehler_alter': int(jetzt - z['seit']) if z else None,
             'empfangen': int(max(empf)) if empf else None}
 
@@ -2046,12 +2067,16 @@ def vk_stand(en, aussen, pv):
     geraete = {}
     for gid in vk_geraete():
         z = _VK_Z.get(gid) or {}
+        # 4.5.23: welche Groesse fuer dieses Geraet gerade gilt (Reiter Test).
+        m = mi_vorkuehlen.massstab(vk_einstellung(gid), {'frei': en.get('frei'), 'ueberschuss': en.get('ueberschuss'),
+                                                       'bezug': en.get('bezug')})
         geraete[gid] = {'ein': 1 if vk_einstellung(gid).get('ein') else 0,
                         'laeuft_seit': int(z['laeuft_seit']) if z.get('laeuft_seit') else None,
-                        'hand_tag': z.get('hand_tag'), 'grund': z.get('grund', '')}
+                        'hand_tag': z.get('hand_tag'), 'grund': z.get('grund', ''),
+                        'start_nach': m['start_name'], 'stopp_nach': m['stopp_name']}
     return {'mqtt': 1 if (MQTT == 1 and mqtt_error == 0) else 0,
-            'energie': {k: en[k] for k in ('energie_ok', 'ueberschuss', 'bezug', 'lebt', 'ok',
-                                            'zaehler_alter', 'empfangen')},
+            'energie': {k: en[k] for k in ('energie_ok', 'ueberschuss', 'bezug', 'frei', 'frei_quelle',
+                                            'lebt', 'ok', 'zaehler_alter', 'empfangen')},
             'aussen': aussen, 'pv_naechste': pv, 'geraete': geraete,
             'meldung': _VK_MELDUNG['text']}
 
@@ -2099,7 +2124,7 @@ async def vorkuehlen_schleife():
                         z['aus_seit'] = None
                     vk_merker_schreiben()
                 lage = {'energie_ok': en['energie_ok'], 'ueberschuss': en['ueberschuss'],
-                        'bezug': en['bezug'], 'sperre': vk_sperre(gid), 'anw': anw,
+                        'bezug': en['bezug'], 'frei': en['frei'], 'sperre': vk_sperre(gid), 'anw': anw,
                         'aussen': aussen, 'pv_naechste': pv}
                 mi_vorkuehlen.zaehlen(k, z, lage, jetzt)
                 if z.get('laeuft_seit') is not None:

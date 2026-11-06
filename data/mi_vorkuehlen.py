@@ -40,6 +40,22 @@ haus/energie faellt laenger als AUSFALL Sekunden aus. Die Hysterese ergibt
 sich aus zwei Groessen: eingeschaltet wird bei UEBERSCHUSS, ausgeschaltet
 erst bei BEZUG - das Geraet darf seinen eigenen Ueberschuss also aufbrauchen.
 
+WELCHE GROESSE GILT (ab 4.5.23, massstab())
+
+Mit einem Hausakku taeuscht der Netzzaehler: laedt der Akku, ist die
+Einspeisung 0, obwohl Sonnenstrom uebrig ist (Vorkuehlen startete nie); und
+entlaedt er, um das laufende Geraet zu decken, ist der Netzbezug 0 (das Geraet
+lief abends auf Akkukosten weiter). Deshalb gilt, wenn haus/energie/frei_w
+GUELTIG ankommt (lage['frei'] nicht None; + = Sonnenstrom uebrig,
+- = das Haus deckt sich aus Netz oder Akku):
+    Start: frei_w >= Einschaltschwelle fuer die Mindestdauer
+           - mit akku = 0 stattdessen nur die echte Einspeisung (ueberschuss_w)
+    Stopp: frei_w <= -Abschaltschwelle fuer die Mindestdauer
+           (deckt Netzbezug UND Akku-Entladung ab - auch mit akku = 0)
+Kommt kein gueltiges frei_w, gilt das Verhalten von 4.5.22 (ueberschuss_w /
+bezug_w). Die Dauern laufen weiter, wenn die Quelle wechselt: gemessen wird
+dieselbe Sache ("Sonnenstrom uebrig" bzw. "das Haus kauft zu").
+
 Hat jemand das laufende Geraet bedient (ausgeschaltet, Betriebsart oder
 Sollwert geaendert, oder ein Befehl aus Loxone/MQTT), laesst die Automatik
 los, ohne zu schalten, und das Geraet bis zum naechsten Tag in Ruhe.
@@ -61,6 +77,7 @@ VK_FELDER = (
     ('pause', 15, 0, 240),       # min Mindestpause nach dem eigenen Ausschalten
     ('anw', 'egal', None, None),  # egal | da (nur wenn jemand zu Hause) | weg (nur wenn niemand)
     ('prognose', 1, 0, 1),       # PV-Prognose der naechsten Stunde beachten (nur mit haus/pv/ok = 1)
+    ('akku', 1, 0, 1),           # 4.5.23: Sonnenstrom, der in den Hausakku geht, darf zum Start zaehlen (frei_w)
 )
 VK_LEER_ERLAUBT = ('aussen', 'raum')
 VK_ANW = ('egal', 'da', 'weg')
@@ -142,24 +159,52 @@ def neuer_zustand():
             'pruefen_bis': 0.0, 'pruefen_grund': ''}
 
 
+def massstab(k, lage):
+    """Welche Groesse gerade gilt (ab 4.5.23). Rueckgabe dict:
+    start (W oder None), start_name ('frei_w' oder 'ueberschuss_w'),
+    stopp (True/False/None = keine Aussage), stopp_name ('frei_w' oder 'bezug_w'),
+    stopp_w (W, die das Haus gerade aus Netz bzw. Netz+Akku holt, oder None).
+
+    frei_w gilt nur, wenn es gueltig ankam (lage['frei'] nicht None)."""
+    fr = lage.get('frei')
+    if fr is not None:
+        if k.get('akku', 1):
+            start, sname = fr, 'frei_w'
+        else:
+            start, sname = lage.get('ueberschuss'), 'ueberschuss_w'
+        return {'start': start, 'start_name': sname, 'stopp': fr <= -k['bezug'],
+                'stopp_name': 'frei_w', 'stopp_w': -fr}
+    be = lage.get('bezug')
+    return {'start': lage.get('ueberschuss'), 'start_name': 'ueberschuss_w',
+            'stopp': None if be is None else be > k['bezug'], 'stopp_name': 'bezug_w', 'stopp_w': be}
+
+
+# Fuer Meldungen und den Reiter Test: was die Groesse fuer Laien heisst.
+NAMEN = {'frei_w': 'Sonnenstrom uebrig (frei_w)', 'ueberschuss_w': 'Einspeisung (ueberschuss_w)',
+         'bezug_w': 'Bezug (bezug_w)'}
+
+
 def zaehlen(k, z, lage, jetzt):
     """Ueberschuss- und Bezugsdauer nachfuehren (vor entscheiden()).
 
     lage['energie_ok'] False (Stille, ok = 0, kein Wert) setzt beide Dauern
-    zurueck: eine Luecke ist kein ununterbrochener Ueberschuss."""
+    zurueck: eine Luecke ist kein ununterbrochener Ueberschuss. Welche Groesse
+    zaehlt, sagt massstab() (frei_w, sonst ueberschuss_w/bezug_w)."""
     if not lage.get('energie_ok'):
         z['ueber_seit'] = None
         z['bezug_seit'] = None
         return
     z['gueltig_zuletzt'] = jetzt
-    ue = lage.get('ueberschuss')
+    m = massstab(k, lage)
+    z['start_name'] = m['start_name']
+    z['stopp_name'] = m['stopp_name']
+    ue = m['start']
     if ue is not None and ue >= k['ab']:
         if z['ueber_seit'] is None:
             z['ueber_seit'] = jetzt
     else:
         z['ueber_seit'] = None
-    be = lage.get('bezug')
-    if be is not None and be > k['bezug']:
+    if m['stopp']:
         if z['bezug_seit'] is None:
             z['bezug_seit'] = jetzt
     else:
@@ -174,7 +219,8 @@ def entscheiden(k, z, lage, jetzt, tag, minute_des_tages):
     """(aktion, grund) - aktion: 'nichts', 'pruefen' (Geraet frisch abfragen,
     dann start_pruefen()) oder 'aus' (eigene Kuehlung regulaer beenden).
 
-    lage: energie_ok, ueberschuss, bezug (W oder None), sperre (Text oder ''),
+    lage: energie_ok, ueberschuss, bezug, frei (W oder None; frei nur gueltig, ab 4.5.23),
+    sperre (Text oder ''),
     anw ('1', '0' oder None = keine gueltige Aussage), aussen (degC oder None =
     keine gueltige Aussage), pv_naechste (W oder None = keine gueltige Prognose)."""
     if z.get('laeuft_seit') is None:
@@ -200,18 +246,20 @@ def entscheiden(k, z, lage, jetzt, tag, minute_des_tages):
                 return 'nichts', 'wartet, bis niemand zu Hause ist'
         if k['aussen'] is not None and lage.get('aussen') is not None and lage['aussen'] < k['aussen']:
             return 'nichts', 'aussen %.1f degC unter %d degC' % (lage['aussen'], k['aussen'])
-        ue = lage.get('ueberschuss')
+        m = massstab(k, lage)
+        ue = m['start']
         if z.get('ueber_seit') is None:
-            return 'nichts', 'wartet auf Ueberschuss ab %d W (jetzt %s W)' % (
-                k['ab'], '-' if ue is None else int(ue))
+            return 'nichts', 'wartet auf %s ab %d W (jetzt %s W)' % (
+                NAMEN[m['start_name']], k['ab'], '-' if ue is None else int(ue))
         if jetzt - z['ueber_seit'] < k['dauer'] * 60:
-            return 'nichts', 'Ueberschuss seit %d von %d min' % (int((jetzt - z['ueber_seit']) / 60), k['dauer'])
+            return 'nichts', '%s seit %d von %d min' % (
+                NAMEN[m['start_name']], int((jetzt - z['ueber_seit']) / 60), k['dauer'])
         if k['prognose'] and lage.get('pv_naechste') is not None and lage['pv_naechste'] < k['ab']:
             return 'nichts', 'Prognose naechste Stunde %d W unter %d W' % (int(lage['pv_naechste']), k['ab'])
         if z.get('pruefen_bis', 0) > jetzt:
             return 'nichts', z.get('pruefen_grund') or 'wartet'
-        return 'pruefen', 'Ueberschuss %s W seit %d min' % (
-            '-' if ue is None else int(ue), int((jetzt - z['ueber_seit']) / 60))
+        return 'pruefen', '%s %s W seit %d min' % (
+            NAMEN[m['start_name']], '-' if ue is None else int(ue), int((jetzt - z['ueber_seit']) / 60))
 
     # Eine eigene Kuehlung laeuft.
     gelaufen = jetzt - z['laeuft_seit']
@@ -223,7 +271,11 @@ def entscheiden(k, z, lage, jetzt, tag, minute_des_tages):
     elif z.get('gueltig_zuletzt') is None and gelaufen > AUSFALL:
         grund = 'haus/energie seit dem Start des Dienstes stumm'
     elif z.get('bezug_seit') is not None and jetzt - z['bezug_seit'] >= k['bezugdauer'] * 60:
-        grund = 'Bezug ueber %d W seit %d min' % (k['bezug'], int((jetzt - z['bezug_seit']) / 60))
+        if z.get('stopp_name') == 'frei_w':
+            grund = 'Haus deckt sich aus Netz oder Akku (frei_w hoechstens -%d W) seit %d min' % (
+                k['bezug'], int((jetzt - z['bezug_seit']) / 60))
+        else:
+            grund = 'Bezug ueber %d W seit %d min' % (k['bezug'], int((jetzt - z['bezug_seit']) / 60))
     elif not im_fenster(k, minute_des_tages):
         grund = 'Zeitfenster %d-%d Uhr zu Ende' % (k['von'], k['bis'])
     if not grund:

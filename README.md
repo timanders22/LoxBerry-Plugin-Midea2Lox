@@ -10,6 +10,27 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.23
+
+**Vorkühlen versteht jetzt einen Hausakku.** Bisher schaute das Plugin nur auf den Netzzähler – mit Hausakku ging das
+in beide Richtungen schief: Lud der Akku, floss nichts ins Netz, und das Vorkühlen startete nie, obwohl Sonnenstrom
+übrig war. Und entlud der Akku, um das laufende Klimagerät zu versorgen, holte das Haus nichts aus dem Netz – das Gerät
+lief abends auf Akkukosten weiter.
+
+* **Neue Quelle `haus/energie/frei_w`** (vom Plugin Smartmeter ab 2.8.19; + = Sonnenstrom übrig, − = das Haus deckt
+  sich aus Netz oder Akku). Kommt sie gültig an, gilt: **ein** bei frei_w ab der Einschaltschwelle für die
+  Mindestdauer, **aus** bei frei_w höchstens minus Abschaltschwelle für die Mindestdauer – das deckt Netzbezug **und**
+  Akku-Entladung ab. Beispiel: Akku lädt 3.000 W, Einspeisung 0 → frei_w 3.000 W → das Vorkühlen startet; Akku gibt
+  1.500 W ab, Bezug 0 → frei_w −1.500 W → aus (nach der Mindestlaufzeit).
+* **Neue Einstellung je Gerät** „Hausakku: Sonnenstrom, der gerade in den Akku geht, darf zum Vorkühlen genutzt
+  werden“ (**ab Werk Ja**). Nein = zum Einschalten zählt nur echte Einspeisung (der Akku lädt zuerst voll); das
+  Ausschalten bei Akku-Entladung gilt trotzdem.
+* **Rückfall:** Kommt kein gültiges frei_w (Smartmeter älter als 2.8.19, oder er hält frei_w zurück, weil der Akku
+  schweigt), gilt wie in 4.5.22 Einspeisung (`ueberschuss_w`) und Bezug (`bezug_w`). Ein frei_w aus einer früheren
+  Minute gilt nicht weiter.
+* **Reiter Test:** zeigt frei_w mit Quelle (`netz` oder `netz+speicher`) und je Gerät, nach welcher Größe gerade
+  gestartet und gestoppt wird.
+
 ## Neu in 4.5.22
 
 **Mit Sonnenstrom vorkühlen** (Reiter *Automatik*, je Gerät ein Schalter, **ab Werk aus**): Speist Ihre Solaranlage

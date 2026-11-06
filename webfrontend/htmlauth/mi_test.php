@@ -433,10 +433,16 @@ function mi_pruefungen($cfg)
         $vzu = isset($ve['empfangen']) && $ve['empfangen'] !== null ? max(0, time() - (int) $ve['empfangen']) : null;
         if (empty($vd['mqtt'])) {
             $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, mi_t('UI.VK_OHNE_MQTT'));
+        } elseif (!empty($ve['energie_ok']) && isset($ve['frei']) && $ve['frei'] !== null) {
+            // 4.5.23: frei_w kam gueltig an - es gilt (Start mit akku = 0 weiter ueber die Einspeisung).
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 1, sprintf(mi_t('UI.VK_ENERGIE_OK_FREI'),
+                (int) $ve['frei'], mi_e(isset($ve['frei_quelle']) ? (string) $ve['frei_quelle'] : '?'),
+                $ve['ueberschuss'] === null ? '-' : (string) (int) $ve['ueberschuss'],
+                $ve['bezug'] === null ? '-' : (string) (int) $ve['bezug'], $vzu === null ? 0 : $vzu));
         } elseif (!empty($ve['energie_ok'])) {
             $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 1, sprintf(mi_t('UI.VK_ENERGIE_OK'),
-                (int) $ve['ueberschuss'], $ve['bezug'] === null ? '-' : (string) (int) $ve['bezug'],
-                $vzu === null ? 0 : $vzu));
+                $ve['ueberschuss'] === null ? 0 : (int) $ve['ueberschuss'], $ve['bezug'] === null ? '-' : (string) (int) $ve['bezug'],
+                $vzu === null ? 0 : $vzu) . ' ' . mi_t('UI.VK_ENERGIE_OHNE_FREI'));
         } elseif ($ve['zaehler_alter'] === null) {
             $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, mi_t('UI.VK_ENERGIE_NIE'));
         } elseif (empty($ve['lebt'])) {
@@ -448,20 +454,29 @@ function mi_pruefungen($cfg)
         $vnamen = array();
         foreach (mi_devices() as $vdev) { $vnamen[(string) $vdev['id']] = mi_geraetename($vdev); }
         $vger = (isset($vd['geraete']) && is_array($vd['geraete'])) ? $vd['geraete'] : array();
+        // 4.5.23: welche Groesse je Geraet gilt - frei_w oder ueberschuss_w/bezug_w (aus dem Dienst).
+        $vgilt = array('frei_w' => mi_t('UI.VK_GROESSE_FREI'), 'ueberschuss_w' => mi_t('UI.VK_GROESSE_UEBER'),
+                       'bezug_w' => mi_t('UI.VK_GROESSE_BEZUG'));
         foreach ($vger as $vgid => $vg) {
             if (!is_array($vg)) { continue; }
             $vname = isset($vnamen[(string) $vgid]) ? $vnamen[(string) $vgid] : (string) $vgid;
             $vfrage = mi_e(sprintf(mi_t('PRUEF.VK_GERAET'), $vname));
+            $vmass = '';
+            if (!empty($vg['ein']) && isset($vg['start_nach'], $vg['stopp_nach'])
+                && isset($vgilt[(string) $vg['start_nach']], $vgilt[(string) $vg['stopp_nach']])) {
+                $vmass = ' &ndash; ' . mi_e(sprintf(mi_t('UI.VK_GILT'), $vgilt[(string) $vg['start_nach']],
+                                                     $vgilt[(string) $vg['stopp_nach']]));
+            }
             if (!empty($vg['laeuft_seit'])) {
                 // Der Grund nur, wenn er mehr sagt als die Laufzeit (etwa "Mindestlaufzeit noch 5 min").
                 $vgr = (string) $vg['grund'];
                 $z[] = array($vfrage, 1, sprintf(mi_t('UI.VK_LAEUFT_SEIT'),
                     (int) floor(max(0, time() - (int) $vg['laeuft_seit']) / 60))
-                    . (($vgr !== '' && strpos($vgr, 'laeuft seit') !== 0) ? ' &ndash; ' . mi_e($vgr) : ''));
+                    . (($vgr !== '' && strpos($vgr, 'laeuft seit') !== 0) ? ' &ndash; ' . mi_e($vgr) : '') . $vmass);
             } elseif (empty($vg['ein'])) {
                 $z[] = array($vfrage, 2, mi_t('UI.VK_GERAET_AUS'));
             } else {
-                $z[] = array($vfrage, 2, sprintf(mi_t('UI.VK_WARTET'), mi_e((string) $vg['grund'])));
+                $z[] = array($vfrage, 2, sprintf(mi_t('UI.VK_WARTET'), mi_e((string) $vg['grund'])) . $vmass);
             }
         }
     }

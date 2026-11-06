@@ -558,6 +558,7 @@ function mi_vk_felder()
         'pause'      => array(15, 0, 240),
         'anw'        => array('egal', null, null),
         'prognose'   => array(1, 0, 1),
+        'akku'       => array(1, 0, 1),   // 4.5.23: Sonnenstrom in den Hausakku zaehlt zum Start (frei_w)
     );
 }
 

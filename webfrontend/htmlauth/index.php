@@ -1946,6 +1946,13 @@ foreach ($mi_vk_geraete as $mi_vg) {
       <option value="0"<?php echo (string) $mi_vw['prognose'] === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.NEIN'); ?></option>
     </select>
         <br><span class="sm-small"><?php echo mi_te('UI.VK_F_PROGNOSE_HILFE'); ?></span></td></tr>
+<?php /* 4.5.23: Hausakku - zaehlt Sonnenstrom, der gerade in den Akku geht, zum Start? (frei_w; ab Werk ja) */ ?>
+<tr><td><?php echo mi_te('UI.VK_F_AKKU'); ?></td>
+    <td><select data-role="none" name="<?php echo $mi_vn; ?>[akku]">
+      <option value="1"<?php echo (string) $mi_vw['akku'] !== '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.JA'); ?></option>
+      <option value="0"<?php echo (string) $mi_vw['akku'] === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.NEIN'); ?></option>
+    </select>
+        <br><span class="sm-small"><?php echo mi_t('UI.VK_F_AKKU_HILFE'); ?></span></td></tr>
 </table>
 <?php } ?>
 <p class="sm-small"><?php echo mi_t('UI.VK_S_HINWEIS'); ?></p>
