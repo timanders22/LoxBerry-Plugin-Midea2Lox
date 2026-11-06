@@ -267,6 +267,8 @@ if [ -n "$UN_FOLDER" ] && [ -n "$UN_BASE" ] && [ -d "$UN_BASE/data/plugins" ]; t
     rm -f "$UN_BASE/data/plugins/$UN_FOLDER.lief_vorher" 2>/dev/null
     # V1 (4.5.18): der Halt der Anwesenheit (welches Geraet wie verstellt ist).
     rm -f "$UN_BASE/data/plugins/$UN_FOLDER.anwesenheit_halt" 2>/dev/null
+    # 4.5.22: der Merker von "Mit Sonnenstrom vorkuehlen" (welches Geraet die Automatik eingeschaltet hat).
+    rm -f "$UN_BASE/data/plugins/$UN_FOLDER.vorkuehlen" 2>/dev/null
     # Dasselbe gilt fuer die Marke aus preupgrade.sh (seit 4.5.7). Sie liegt
     # aus demselben Grund neben dem Ordner und bliebe sonst liegen - eine
     # abgebrochene Aktualisierung, gefolgt von einer Deinstallation, liesse

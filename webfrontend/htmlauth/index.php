@@ -373,6 +373,31 @@ if (isset($_POST['mqtt_speichern'])) {
 if (isset($_POST['auto_speichern'])) {
     $mi_neu_auto = $mi_cfg;
     $mi_x2_falsch = array();
+    /* 4.5.22: Mit Sonnenstrom vorkuehlen - die Felder je Geraet (vk[<Nummer>][<Feld>]) werden zur
+     * EINEN Zeile "vorkuehlen" zusammengesetzt und danach wie jeder Schluessel durch
+     * mi_wert_pruefen() geschickt. Die Zeile steht auch in $_POST, damit sie nach einer
+     * Beanstandung mit den Eingaben zurueckreist (X-2). */
+    if (isset($_POST['vk'])) {
+        if (!is_array($_POST['vk'])) {
+            $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'vk');
+        } else {
+            $mi_vk = array();
+            foreach ($_POST['vk'] as $mi_vid => $mi_vf) {
+                $mi_vid = (string) $mi_vid;
+                if (!preg_match('/^[0-9]{10,19}\z/', $mi_vid) || !is_array($mi_vf)) {
+                    $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), 'vk');
+                    continue;
+                }
+                $mi_vk[$mi_vid] = array();
+                foreach (mi_vk_vorgaben() as $mi_vn => $mi_vv) {
+                    $mi_vk[$mi_vid][$mi_vn] = (isset($mi_vf[$mi_vn]) && is_string($mi_vf[$mi_vn])
+                                               && mi_wert_taugt($mi_vf[$mi_vn]))
+                        ? trim($mi_vf[$mi_vn]) : $mi_vv;
+                }
+            }
+            $_POST['vorkuehlen'] = mi_vk_bauen($mi_vk);
+        }
+    }
     /* Jedes Feld durch mi_wert_pruefen(), und Beanstandungen werden
      * GESAMMELT, nicht ueberschrieben - sonst berichtigt der Anwender einen
      * Fehler nach dem anderen statt alle auf einmal. */
@@ -382,7 +407,7 @@ if (isset($_POST['auto_speichern'])) {
                    'auto_max_alter', 'auto_takt', 'auto_geraete',
                    'fenster_ein', 'fenster_frist', 'fenster_zuordnung',
                    'anwesenheit_ein', 'anwesenheit_verhalten', 'anwesenheit_verschiebung',
-                   'anwesenheit_frist', 'anwesenheit_geraete') as $mi_k) {
+                   'anwesenheit_frist', 'anwesenheit_geraete', 'vorkuehlen') as $mi_k) {
         if (!isset($_POST[$mi_k])) { continue; }
         if (!is_string($_POST[$mi_k])) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($mi_k));
@@ -1859,6 +1884,71 @@ echo mi_x2_markierung($mi_x2, 'automatik', 'tab-automatik');
         placeholder="<?php echo mi_e(mi_t('UI.AUTO_F_GERAETE_LEER')); ?>"></td></tr>
 </table>
 <p class="sm-small"><?php echo mi_t('UI.ANW_S_HINWEIS'); ?></p>
+</div>
+
+<?php /* 4.5.22: Mit Sonnenstrom vorkuehlen - je Geraet ein Schalter, AB WERK AUS. Die Felder
+         reisen als vk[<Nummer>][<Feld>] und werden beim Speichern zur Zeile "vorkuehlen". */
+$mi_vk_cfg = mi_vk_lesen(mi_cfg($mi_cfg, 'vorkuehlen', ''), false);
+$mi_vk_geraete = mi_devices();
+?>
+<div class="sm-step">
+<h3><?php echo mi_te('UI.VK_S'); ?></h3>
+<p class="sm-small"><?php echo mi_t('UI.VK_S_TEXT'); ?></p>
+<div class="sm-alert sm-info"><?php echo mi_t('UI.VK_S_BEISPIEL'); ?></div>
+<?php if (!$mi_vk_geraete) { ?>
+<p class="sm-small"><?php echo mi_te('UI.VK_OHNE_GERAETE'); ?></p>
+<?php }
+foreach ($mi_vk_geraete as $mi_vg) {
+    $mi_vid = (string) $mi_vg['id'];
+    $mi_vw = isset($mi_vk_cfg[$mi_vid]) ? $mi_vk_cfg[$mi_vid] : mi_vk_vorgaben();
+    $mi_vn = 'vk[' . mi_e($mi_vid) . ']';
+    $mi_vfeld = function ($feld, $groesse) use ($mi_vn, $mi_vw) {
+        return '<input data-role="none" type="text" name="' . $mi_vn . '[' . $feld . ']" size="' . (int) $groesse
+             . '" value="' . mi_e(isset($mi_vw[$feld]) ? $mi_vw[$feld] : '') . '">';
+    };
+?>
+<table class="sm-tbl">
+<tr><th colspan="2"><?php echo mi_e(mi_geraetename($mi_vg)); ?></th></tr>
+<tr><td><?php echo mi_te('UI.VK_F_EIN'); ?></td>
+    <td><select data-role="none" name="<?php echo $mi_vn; ?>[ein]">
+      <option value="0"<?php echo (string) $mi_vw['ein'] !== '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.AUS'); ?></option>
+      <option value="1"<?php echo (string) $mi_vw['ein'] === '1' ? ' selected' : ''; ?>><?php echo mi_te('UI.EIN'); ?></option>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_AB'); ?></td>
+    <td><?php echo $mi_vfeld('ab', 6); ?> W, <?php echo mi_te('UI.VK_F_MINDESTENS'); ?> <?php echo $mi_vfeld('dauer', 4); ?> <?php echo mi_te('UI.AUTO_MINUTEN'); ?>
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_AB_HILFE'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_BEZUG'); ?></td>
+    <td><?php echo $mi_vfeld('bezug', 6); ?> W, <?php echo mi_te('UI.VK_F_MINDESTENS'); ?> <?php echo $mi_vfeld('bezugdauer', 4); ?> <?php echo mi_te('UI.AUTO_MINUTEN'); ?>
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_BEZUG_HILFE'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_FENSTER'); ?></td>
+    <td><?php echo $mi_vfeld('von', 3); ?> &ndash; <?php echo $mi_vfeld('bis', 3); ?> <?php echo mi_te('UI.VK_UHR'); ?></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_AUSSEN'); ?></td>
+    <td><?php echo $mi_vfeld('aussen', 4); ?> &deg;C
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_AUSSEN_HILFE'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_RAUM'); ?></td>
+    <td><?php echo $mi_vfeld('raum', 4); ?> &deg;C
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_RAUM_HILFE'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_SOLL'); ?></td>
+    <td><?php echo $mi_vfeld('soll', 4); ?> &deg;C</td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_SCHUTZ'); ?></td>
+    <td><?php echo mi_te('UI.VK_F_LAUF'); ?> <?php echo $mi_vfeld('lauf', 4); ?> <?php echo mi_te('UI.AUTO_MINUTEN'); ?>,
+        <?php echo mi_te('UI.VK_F_PAUSE'); ?> <?php echo $mi_vfeld('pause', 4); ?> <?php echo mi_te('UI.AUTO_MINUTEN'); ?>
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_SCHUTZ_HILFE'); ?></span></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_ANW'); ?></td>
+    <td><select data-role="none" name="<?php echo $mi_vn; ?>[anw]">
+<?php foreach (array('egal' => 'UI.VK_ANW_EGAL', 'da' => 'UI.VK_ANW_DA', 'weg' => 'UI.VK_ANW_WEG') as $mi_va => $mi_vt) { ?>
+      <option value="<?php echo $mi_va; ?>"<?php echo (string) $mi_vw['anw'] === $mi_va ? ' selected' : ''; ?>><?php echo mi_te($mi_vt); ?></option>
+<?php } ?>
+    </select></td></tr>
+<tr><td><?php echo mi_te('UI.VK_F_PROGNOSE'); ?></td>
+    <td><select data-role="none" name="<?php echo $mi_vn; ?>[prognose]">
+      <option value="1"<?php echo (string) $mi_vw['prognose'] !== '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.JA'); ?></option>
+      <option value="0"<?php echo (string) $mi_vw['prognose'] === '0' ? ' selected' : ''; ?>><?php echo mi_te('UI.NEIN'); ?></option>
+    </select>
+        <br><span class="sm-small"><?php echo mi_te('UI.VK_F_PROGNOSE_HILFE'); ?></span></td></tr>
+</table>
+<?php } ?>
+<p class="sm-small"><?php echo mi_t('UI.VK_S_HINWEIS'); ?></p>
 </div>
 
 <div class="sm-legende">

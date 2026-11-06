@@ -10,6 +10,42 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.22
+
+**Mit Sonnenstrom vorkühlen** (Reiter *Automatik*, je Gerät ein Schalter, **ab Werk aus**): Speist Ihre Solaranlage
+genug Strom ins Netz ein, kühlt das Klimagerät damit vor, statt den Strom für wenige Cent zu verkaufen.
+
+* **Beispiel (Vorgaben):** zwischen 11 und 18 Uhr speist die Anlage seit 10 Minuten mehr als 800 W ein → das Plugin
+  schaltet das Gerät ein, stellt *Kühlen* und 23 °C ein. Bezieht das Haus danach 5 Minuten lang mehr als 200 W aus dem
+  Netz, schaltet es wieder aus – frühestens nach 20 Minuten Laufzeit, und wieder ein frühestens nach 15 Minuten Pause
+  (Schutz des Kompressors). Je Gerät einstellbar: Einspeiseschwelle und Dauer, Bezugsschwelle und Dauer, Zeitfenster,
+  „nur ab Außentemperatur“ (leer = egal), „nur ab Raumtemperatur“ (leer = egal), Solltemperatur, Mindestlaufzeit,
+  Mindestpause, Anwesenheit (egal / nur wenn jemand / nur wenn niemand zu Hause), PV-Prognose beachten.
+* **Quellen (nur lesen, unter `haus/` schreibt das Plugin nichts):** `haus/energie/netz_w|bezug_w|ueberschuss_w|ok|zaehler`
+  vom Plugin Smartmeter; `haus/wetter/jetzt/grad|zeit|ok|zaehler/weatherdata` und
+  `haus/pv/naechste_stunde_w|ok|zaehler/weatherdata` von Weatherdata; `haus/anwesenheit/jemand|zaehler` nur, wenn ein
+  Gerät eine Anwesenheitsbedingung hat. Verwendet wird `haus/energie` nur, solange sich der Zähler binnen 120 s live
+  ändert, `ok` = 1 ist und die Werte live und frisch sind – **sonst wird nichts eingeschaltet**. Fällt die Quelle während
+  einer Vorkühlung länger als 5 Minuten aus (gerechnet ab dem Ende der 120-s-Frist), wird regulär ausgeschaltet. Ohne
+  gültige Wetterdaten entfällt die Außentemperatur-Bedingung, ohne `haus/pv/ok` = 1 die Prognose.
+* **Nur Eigenes wird ausgeschaltet:** ein Gerät, das schon läuft, fasst das Plugin nicht an. Was es eingeschaltet hat,
+  merkt es sich neben dem Datenordner (`Midea2Lox.vorkuehlen`, übersteht Neustart und Update; Deinstallation und
+  Neuinstallation räumen ihn ab).
+* **Die Hand hat Vorrang:** wird das laufende Gerät von Hand bedient (aus, andere Betriebsart oder Solltemperatur – erkannt
+  am Gerätestand, alle 5 Minuten frisch abgefragt –, oder ein Befehl aus Loxone/MQTT), lässt das Plugin los, ohne zu
+  schalten, und das Gerät bis zum nächsten Tag in Ruhe. Bei offenem Fenster, solange die Anwesenheitskopplung oder die
+  Automatik das Gerät hält, wird nicht eingeschaltet; die Automatik greift nicht in eine laufende Vorkühlung.
+* **Geschaltet wird mit den vorhandenen Befehlen** `ein`, `betriebsart`, `soll` (dieselbe Tabelle und dieselben
+  UDP-Wörter wie die MQTT-Befehle, ein einziger Befehl an das Gerät). Der **zweite Haken** der MQTT-Befehle („eingreifende
+  Befehle“) gilt dafür nicht: er schützt den MQTT-Eingang vor fremden Absendern im Heimnetz; hier ist kein fremder
+  Absender beteiligt, und der Schalter je Gerät ist die bewusste Zustimmung.
+* **Melden:** jede Aktion im Protokoll und kurz unter `<Präfix>/vorkuehlen/meldung` (Text), dazu `<Präfix>/vorkuehlen/aktiv`
+  (Zahl der laufenden Geräte), beide jede Minute und nie retained; beide stehen in der V2-Hakenliste der Namenstabelle
+  (jetzt 32 Haken, davon 2 Noncached). Reiter *Test*: „haus/energie für Mit Sonnenstrom
+  vorkühlen – empfangen … zuletzt vor … s“ und je Gerät „Vorkühlen: wartet: … / läuft seit … min“.
+* **Einstellung:** ein neuer Schlüssel `vorkuehlen` in `midea2lox.cfg` (leer = für kein Gerät); er reist mit der Sicherung,
+  ältere Sicherungen ohne ihn werden weiter angenommen und lassen ihn unverändert.
+
 ## Neu in 4.5.21
 
 - **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.

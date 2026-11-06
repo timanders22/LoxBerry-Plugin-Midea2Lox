@@ -127,6 +127,8 @@ function mi_paths()
             'automatik' => $basis . '/data/automatik.json',
             'fenster'   => $basis . '/data/fenster.json',
             'anwesenheit' => $basis . '/data/anwesenheit.json',
+            'vorkuehlen' => $basis . '/data/vorkuehlen.json',
+            'vk_py'     => $basis . '/data/mi_vorkuehlen.py',
             'bin'       => $basis . '/bin',
             'venv'      => '',
             'daemon'    => '',
@@ -180,6 +182,9 @@ function mi_paths()
         'fenster'   => $home . '/data/plugins/' . $ordner . '/fenster.json',
         // Gruppe 15 (4.5.18, V1): der Stand der Anwesenheit, geschrieben vom Dienst.
         'anwesenheit' => $home . '/data/plugins/' . $ordner . '/anwesenheit.json',
+        // 4.5.22: der Stand von "Mit Sonnenstrom vorkuehlen" und die Feldtabelle des Dienstes.
+        'vorkuehlen' => $home . '/data/plugins/' . $ordner . '/vorkuehlen.json',
+        'vk_py'      => $home . '/data/plugins/' . $ordner . '/mi_vorkuehlen.py',
         'bin'     => $home . '/bin/plugins/' . $ordner,
         'venv'    => $home . '/bin/plugins/' . $ordner . '/venv/bin/python3',
         'daemon'  => $home . '/system/daemons/plugins/' . $ordner,
@@ -483,6 +488,9 @@ function mi_vorgaben()
         'anwesenheit_verschiebung' => '30',
         'anwesenheit_frist'       => '300',
         'anwesenheit_geraete'     => '',
+        /* 4.5.22: Mit Sonnenstrom vorkuehlen - je Geraet, leer = fuer kein Geraet (AB WERK AUS).
+         * Form bei mi_vk_lesen(); neuer Schluessel HINTEN, auch in config/midea2lox.cfg (M23). */
+        'vorkuehlen'              => '',
     );
 }
 
@@ -520,6 +528,190 @@ function mi_fenster_zuordnung($roh)
         $aus[$gid] = $namen;
     }
     return $aus;
+}
+
+/* ==================================================================
+ * 4.5.22: Mit Sonnenstrom vorkuehlen - je Geraet, AB WERK AUS.
+ *
+ * Ein Schluessel "vorkuehlen" in midea2lox.cfg:
+ *     <Geraetenummer>:ein=1/ab=800/dauer=10/...,<Geraetenummer>:...
+ * Feldtabelle und Regel wie VK_FELDER/vk_lesen() in data/mi_vorkuehlen.py
+ * (mi_vk_probe() vergleicht beide). Ein fehlendes Feld traegt seine Vorgabe,
+ * aussen und raum duerfen leer sein (Bedingung entfaellt).
+ * ================================================================== */
+
+/** Name => array(Vorgabe, kleinster, groesster); anw ist eine Auswahl. */
+function mi_vk_felder()
+{
+    return array(
+        'ein'        => array(0, 0, 1),
+        'ab'         => array(800, 100, 20000),
+        'dauer'      => array(10, 1, 120),
+        'bezug'      => array(200, 0, 20000),
+        'bezugdauer' => array(5, 1, 120),
+        'von'        => array(11, 0, 23),
+        'bis'        => array(18, 1, 24),
+        'aussen'     => array(24, -20, 50),
+        'raum'       => array(24, 10, 40),
+        'soll'       => array(23, 16, 30),
+        'lauf'       => array(20, 0, 120),
+        'pause'      => array(15, 0, 240),
+        'anw'        => array('egal', null, null),
+        'prognose'   => array(1, 0, 1),
+    );
+}
+
+/** Die Vorgaben eines Geraets (alle Felder als Zeichenkette, ein = 0). */
+function mi_vk_vorgaben()
+{
+    $aus = array();
+    foreach (mi_vk_felder() as $n => $f) { $aus[$n] = (string) $f[0]; }
+    return $aus;
+}
+
+/** Ein Feld pruefen: '' wenn gut, sonst der Feldname. */
+function mi_vk_feld_pruefen($n, $w)
+{
+    $f = mi_vk_felder();
+    if (!isset($f[$n])) { return $n; }
+    $w = trim((string) $w);
+    if ($n === 'anw') {
+        return in_array($w, array('egal', 'da', 'weg'), true) ? '' : $n;
+    }
+    if ($w === '' && ($n === 'aussen' || $n === 'raum')) { return ''; }
+    if (!preg_match('/^-?[0-9]{1,5}\z/', $w)) { return $n; }
+    return ((int) $w >= $f[$n][1] && (int) $w <= $f[$n][2]) ? '' : $n;
+}
+
+/**
+ * vorkuehlen lesen. $streng = true: array(Geraetenummer => Felder) oder null bei
+ * einem Formfehler ($grund nennt Geraet und Feld). $streng = false (Anzeige nach
+ * einer Beanstandung): nimmt, was sich lesen laesst, und laesst ungueltige Werte als
+ * Text stehen - der Anwender sieht, was er eingetippt hat.
+ */
+function mi_vk_lesen($roh, $streng = true, &$grund = null)
+{
+    $grund = '';
+    $aus = array();
+    $t = trim((string) $roh);
+    if ($t === '') { return $aus; }
+    foreach (explode(',', $t) as $teil) {
+        $p = explode(':', trim($teil), 2);
+        $gid = trim($p[0]);
+        if (count($p) !== 2 || !preg_match('/^[0-9]{10,19}\z/', $gid)) {
+            $grund = 'Geraetenummer';
+            if ($streng) { return null; }
+            continue;
+        }
+        if (isset($aus[$gid])) {
+            $grund = $gid;
+            if ($streng) { return null; }
+            continue;
+        }
+        $k = mi_vk_vorgaben();
+        $gesehen = array();
+        foreach (explode('/', $p[1]) as $paar) {
+            if (trim($paar) === '') { continue; }
+            $q = explode('=', $paar, 2);
+            $n = trim($q[0]);
+            if (count($q) !== 2 || isset($gesehen[$n]) || !array_key_exists($n, $k)) {
+                $grund = $gid . ' ' . $n;
+                if ($streng) { return null; }
+                continue;
+            }
+            $gesehen[$n] = true;
+            $w = trim($q[1]);
+            if (mi_vk_feld_pruefen($n, $w) !== '') {
+                $grund = $gid . ' ' . $n;
+                if ($streng) { return null; }
+            }
+            $k[$n] = $w;
+        }
+        if ($streng && (int) $k['bis'] <= (int) $k['von']) {
+            $grund = $gid . ' von/bis';
+            return null;
+        }
+        $aus[$gid] = $k;
+    }
+    return $aus;
+}
+
+/** Aus array(Geraetenummer => Felder) die Zeile fuer midea2lox.cfg (Geraete ohne Eintrag fallen weg). */
+function mi_vk_bauen(array $geraete)
+{
+    $teile = array();
+    foreach ($geraete as $gid => $k) {
+        $paare = array();
+        foreach (array_keys(mi_vk_felder()) as $n) {
+            $w = isset($k[$n]) ? str_replace(array(',', '/', ':', '='), '', trim((string) $k[$n])) : '';
+            $paare[] = $n . '=' . $w;
+        }
+        $teile[] = $gid . ':' . implode('/', $paare);
+    }
+    return implode(',', $teile);
+}
+
+/**
+ * Pruefzeile: stimmt die Feldtabelle der Oberflaeche mit VK_FELDER im Dienst
+ * (data/mi_vorkuehlen.py) ueberein? array(ok|null, Zahl, Befunde).
+ */
+function mi_vk_probe()
+{
+    $datei = mi_paths()['vk_py'];
+    if (!is_readable($datei)) {
+        return array(null, 0, array());
+    }
+    $q = (string) @file_get_contents($datei);
+    if (!preg_match('/VK_FELDER\s*=\s*\((.*?)\n\)/s', $q, $m)) {
+        return array(null, 0, array());
+    }
+    preg_match_all("/\\('([a-z]+)',\\s*('?[a-z0-9-]+'?),\\s*(None|-?[0-9]+),\\s*(None|-?[0-9]+)\\)/", $m[1], $t, PREG_SET_ORDER);
+    $ab = array();
+    $py = array();
+    foreach ($t as $z) {
+        $py[$z[1]] = array(trim($z[2], "'"), $z[3] === 'None' ? null : (int) $z[3], $z[4] === 'None' ? null : (int) $z[4]);
+    }
+    foreach (mi_vk_felder() as $n => $f) {
+        if (!isset($py[$n])) { $ab[] = $n . ' (fehlt im Dienst)'; continue; }
+        if ((string) $py[$n][0] !== (string) $f[0] || $py[$n][1] !== $f[1] || $py[$n][2] !== $f[2]) {
+            $ab[] = $n;
+        }
+    }
+    foreach (array_keys($py) as $n) {
+        if (!array_key_exists($n, mi_vk_felder())) { $ab[] = $n . ' (nur im Dienst)'; }
+    }
+    return array(count($py) > 0 && !$ab, count($py), $ab);
+}
+
+/**
+ * Der Stand des Vorkuehlens, wie der Dienst ihn in data/vorkuehlen.json ablegt:
+ * array(lage, daten|null, alter|null); lage aus (kein Geraet eingeschaltet), fehlt,
+ * unlesbar, alt (> 180 s), ok.
+ */
+function mi_vorkuehlen_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = mi_config_read(); }
+    $ein = 0;
+    foreach ((array) mi_vk_lesen(mi_cfg($cfg, 'vorkuehlen', '')) as $k) {
+        if ((string) $k['ein'] === '1') { $ein++; }
+    }
+    $datei = mi_paths()['vorkuehlen'];
+    clearstatcache(true, $datei);
+    if ($ein === 0 && !is_readable($datei)) {
+        return array('aus', null, null);
+    }
+    if (!is_readable($datei)) {
+        return array('fehlt', null, null);
+    }
+    $d = json_decode((string) @file_get_contents($datei), true);
+    if (!is_array($d) || !isset($d['ts'])) {
+        return array('unlesbar', null, null);
+    }
+    $alter = time() - (int) $d['ts'];
+    if ($ein === 0 && $alter > 180) {
+        return array('aus', null, null);
+    }
+    return array($alter > 180 ? 'alt' : 'ok', $d, $alter);
 }
 
 /**
@@ -758,6 +950,10 @@ function mi_wert_pruefen($schluessel, $wert)
             return (ctype_digit($w) && (int) $w <= 100) ? '' : mi_t('UI.PRUEF_VERSCHIEBUNG');
         case 'anwesenheit_frist':
             return (ctype_digit($w) && (int) $w <= 3600) ? '' : mi_t('UI.PRUEF_ANW_FRIST');
+        case 'vorkuehlen':
+            $mi_vg = '';
+            if (mi_vk_lesen($w, true, $mi_vg) !== null) { return ''; }
+            return sprintf(mi_t('UI.PRUEF_VK'), mi_e($mi_vg));
         case 'anwesenheit_geraete':
             if ($w === '') { return ''; }
             foreach (explode(',', $w) as $teil) {
@@ -1808,6 +2004,11 @@ function mi_automatik_werte()
         // Gruppe 15 (4.5.18, V1): der Abwesenheitsbetrieb - 1/0/-1, mit dem Herzschlag, nie retained.
         'anwesenheit/aktiv'  => array('&mdash;', 'WERT.ANW_AKTIV',
                                       array('true', '-1', '1', '<v.0>')),
+        // 4.5.22: Mit Sonnenstrom vorkuehlen - Zahl der laufenden Geraete und die letzte Meldung (Text),
+        // jede Minute, solange ein Geraet eingeschaltet ist; nie retained.
+        'vorkuehlen/aktiv'   => array('&mdash;', 'WERT.VK_AKTIV',
+                                      array('false', '0', '99', '<v.0>')),
+        'vorkuehlen/meldung' => array('Text',    'WERT.VK_MELDUNG', null),
     );
 }
 
@@ -2466,7 +2667,9 @@ function mi_themen_probe()
     preg_match_all("/'(automatik\\/[a-z]+)'/", $q, $ma);
     // Gruppe 15 (4.5.18, V1): anwesenheit/aktiv kommt als Paar wie die Automatik.
     preg_match_all("/'(anwesenheit\\/[a-z]+)'/", $q, $mw);
-    $ma[1] = array_merge($ma[1], $mw[1]);
+    // 4.5.22: vorkuehlen/aktiv und vorkuehlen/meldung ebenso.
+    preg_match_all("/'(vorkuehlen\\/[a-z]+)'/", $q, $mv);
+    $ma[1] = array_merge($ma[1], $mw[1], $mv[1]);
     $gesendet = array_merge($gesendet, array_values(array_unique($ma[1])));
 
     /* M4 (ab 4.5.10): das Thema, das der Dienst woertlich an das Praefix
@@ -3509,7 +3712,7 @@ function mi_x2_formulare()
                              'auto_max_alter', 'auto_takt', 'auto_geraete',
                              'fenster_ein', 'fenster_frist', 'fenster_zuordnung',
                              'anwesenheit_ein', 'anwesenheit_verhalten', 'anwesenheit_verschiebung',
-                             'anwesenheit_frist', 'anwesenheit_geraete'),
+                             'anwesenheit_frist', 'anwesenheit_geraete', 'vorkuehlen'),
         // Die Bezeichnungen reisen unter "bezeichnung" (je Geraetenummer).
         'geraete'   => array(),
     );
@@ -3882,8 +4085,9 @@ function mi_vorlage_mqtt_out($cfg = null)
 }
 
 /**
- * Die V2-Hakenliste des Musterprojekts (Entwurf 2.4, F-E7 mit F-E14: 30 Haken). Schluessel ist das Thema
- * mit <id> fuer die Geraetenummer; Wert true = Noncached.
+ * Die V2-Hakenliste des Musterprojekts (Entwurf 2.4, F-E7 mit F-E14: 30 Haken; seit 4.5.22 32 mit
+ * vorkuehlen/aktiv und vorkuehlen/meldung - Entscheidung 06.11.2026, nur hier, nicht im Musterprojekt).
+ * Schluessel ist das Thema mit <id> fuer die Geraetenummer; Wert true = Noncached.
  */
 function mi_v2_haken()
 {
@@ -3893,6 +4097,8 @@ function mi_v2_haken()
         '<id>/target_temperature' => false, '<id>/indoor_humidity' => false, 'automatik/aktiv' => false,
         'automatik/gesperrt' => false, 'automatik/geraete' => false, 'automatik/grund' => false,
         'anwesenheit/aktiv' => false,
+        // 4.5.22: Mit Sonnenstrom vorkuehlen - fluechtig (nicht retained) wie die uebrigen Aussagen des Dienstes.
+        'vorkuehlen/aktiv' => false, 'vorkuehlen/meldung' => false,
         '<id>/target_humidity' => false, '<id>/operational_mode' => false, '<id>/fan_speed' => false,
         '<id>/swing_mode' => false,
         '<id>/eco_mode' => false, '<id>/turbo_mode' => false, '<id>/sleep_mode' => false,
@@ -3940,7 +4146,7 @@ function mi_mqtt_namen($cfg = null)
 
 /**
  * Pruefzeile Namenstabelle: jeder Name folgt der Gateway-Regel aus seinem Thema, keine Doppelten, und die
- * V2-Hakenliste steht vollstaendig darin (30, davon 2 Noncached). Rueckgabe array(ok, Zahl, Haken, Befunde).
+ * V2-Hakenliste steht vollstaendig darin (seit 4.5.22: 32, davon 2 Noncached). Rueckgabe array(ok, Zahl, Haken, Befunde).
  */
 function mi_namen_probe($cfg = null)
 {

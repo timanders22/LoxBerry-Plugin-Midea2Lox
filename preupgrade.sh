@@ -149,8 +149,9 @@ zs_schluss() {   # Fehlschlag gesammelt: Marke weg, Abbruch vor purge_installati
 # erkennt die Pruefung nur, wenn dabei einer der Pflichtschluessel fehlt.
 MI_VORGABE_DEVICES="db6bd81a12e08bbc0182a54b6af10e28ef6ab47b75e79ed968cad04003cf88c7"
 # M23 (4.5.18): dazu die Vorgabe 4.5.17 + Ergaenzung fenster_* (so schrieb sie die Oberflaeche) und
-# die vollstaendige Paket-cfg 4.5.18 - jeder neue Schluessel zieht diese Liste in ALLEN DREI Skripten mit.
-MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5 5ddb66e57556eca9130ddb52f8583ff2d1f0a7fbf45149512754c2008d70a398 e5dbd96130fb2a27472df1604fb6382e043d6b05103452b2448e53fbcc17cba4"
+# die vollstaendige Paket-cfg 4.5.18 - jeder neue Schluessel zieht diese Liste in ALLEN DREI Skripten mit
+# (4.5.22: zuletzt die Paket-cfg mit vorkuehlen=).
+MI_VORGABE_MIDEA="fb75336280d50f2c24f0c86a15ce7b9f8096ac11aa4db9d71a25275287fa93e9 1ebad3fa1da1408accd52c3a680c8d7de799c3da50aefb4993fd4dca11475460 cfcdf81105a935a872636e4400cdcd97f9f907f7d4b460f8ee92009292dbe0f5 5ddb66e57556eca9130ddb52f8583ff2d1f0a7fbf45149512754c2008d70a398 e5dbd96130fb2a27472df1604fb6382e043d6b05103452b2448e53fbcc17cba4 d455e827abce5156127854b02b7b3bb7a0270a8868f2af9422c4e16ed1085b0f"
 MI_VORGABE_ABO="a5cc6d64cc2ad24c25a747efd2105a1be007b8111ef84fea241d2c08d32e30de"
 mi_vorgabe() {  # $1 Dateiname, $2 Pfad -> 0, wenn die Datei eine mitgelieferte Vorgabe ist
     local ist soll liste

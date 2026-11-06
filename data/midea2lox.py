@@ -11,6 +11,11 @@ MQTT an (<praefix>/befehl/<Geraetenummer>/<name>, Haken befehle_mqtt_ein, ab
 Werk aus) - sie laufen durch DIESELBE Warteschlange wie ein UDP-Paket. Dazu
 die Anwesenheit (haus/anwesenheit/jemand, ab Werk aus) neben der Automatik.
 
+Seit 4.5.22 "Mit Sonnenstrom vorkuehlen" (je Geraet, ab Werk aus): liest
+haus/energie, haus/wetter und haus/pv, schaltet mit den vorhandenen Befehlen
+ein/betriebsart/soll und schaltet nur aus, was es selbst eingeschaltet hat
+(Abschnitt weiter unten, Entscheidung in mi_vorkuehlen.py).
+
 WAS SICH IN 4.3.0 AM AUFBAU GEAENDERT HAT
 
 Bis 4.2.12 war die asyncio-Fassade dekorativ: soc.recvfrom() war ein
@@ -479,6 +484,16 @@ async def start_server():
                          ANWESENHEIT_FRIST, ANWESENHEIT_THEMA)
         else:
             _LOGGER.info("Anwesenheit: ausgeschaltet, aber ein gemerkter Halt wird zurueckgestellt.")
+    if VK_EIN or vk_laufende() or _VK_Z:
+        aufgaben.append(asyncio.ensure_future(vorkuehlen_schleife()))
+        _LOGGER.info("Mit Sonnenstrom vorkuehlen: %d Geraet(e) eingeschaltet, %d laufend aus "
+                     "einem frueheren Lauf.", len([g for g, k in VK_EINST.items() if k.get('ein')]),
+                     len(vk_laufende()))
+        if MQTT != 1:
+            _LOGGER.warning("Mit Sonnenstrom vorkuehlen: ohne MQTT hoert der Dienst haus/energie "
+                            "nicht - es wird nichts eingeschaltet.")
+    else:
+        _LOGGER.info("Mit Sonnenstrom vorkuehlen: fuer kein Geraet eingeschaltet (ab Werk).")
     if Abfragetakt > 0:
         aufgaben.append(asyncio.ensure_future(abfragetakt_schleife()))
         _LOGGER.info("Abfragetakt eingeschaltet: alle %d s", Abfragetakt)
@@ -548,6 +563,8 @@ async def arbeiter(warteschlange):
                 hand_sperren()
             # V1 (4.5.18): ein Befehl von aussen beendet den Abwesenheitsbetrieb dieses Geraets.
             anwesenheit_hand(daten)
+            # 4.5.22: ebenso eine laufende Vorkuehlung - die Hand uebernimmt bis morgen.
+            vk_hand(daten)
             async with GERAETE_SCHLOSS:
                 await send_to_midea(daten, hand=True)
                 # F-E3: die Quittung NACH dem Geraetegespraech, noch unter dem Schloss.
@@ -963,6 +980,11 @@ async def automatik_schleife():
                         continue
                     if fenster_sperrt(gid):
                         _LOGGER.debug("Automatik: bei %s ist ein Fenster offen - es wird "
+                                      "nicht zugegriffen.", gid)
+                        continue
+                    # 4.5.22: eine laufende Vorkuehlung hat ihren eigenen Sollwert.
+                    if vk_laeuft(gid):
+                        _LOGGER.debug("Automatik: %s kuehlt gerade mit Sonnenstrom vor - es wird "
                                       "nicht zugegriffen.", gid)
                         continue
                     device = auto_device(gid)
@@ -1673,6 +1695,454 @@ async def anwesenheit_schleife():
         except Exception as fehler:
             _LOGGER.error("Anwesenheit gescheitert: %s", fehler, exc_info=True)
         await asyncio.sleep(ANWESENHEIT_TAKT)
+
+
+# ===========================================================================
+# Mit Sonnenstrom vorkuehlen (ab 4.5.22)
+# ===========================================================================
+#
+# AB WERK AUS - je Geraet ein Schalter im Reiter Automatik (Schluessel
+# vorkuehlen, Feldtabelle und Entscheidung in mi_vorkuehlen.py).
+#
+# Gelesen werden nur Haus-Themen (Regeln/07), geschrieben wird unter haus/
+# nichts:
+#   haus/energie/netz_w|bezug_w|ueberschuss_w|ok|zaehler  (Anbieter Smartmeter, alles
+#       fluechtig, jede Minute). Verwendet nur, solange zaehler sich binnen 120 s LIVE
+#       geaendert hat, das zuletzt live empfangene ok 1 ist und die Werte selbst live
+#       und juenger als 120 s sind. Sonst: nichts einschalten.
+#   haus/wetter/jetzt/grad|zeit|ok|zaehler/weatherdata  (Anbieter Weatherdata). Nur bei
+#       lebendem Zaehler, ok = 1, zeit juenger als 1 h und grad != -999 - sonst entfaellt
+#       die Bedingung "nur ab Aussentemperatur".
+#   haus/pv/naechste_stunde_w|ok|zaehler/weatherdata  (Anbieter Weatherdata, Prognose).
+#       Nur bei lebendem Zaehler und ok = 1 - sonst wird die Prognose nicht beachtet.
+#   haus/anwesenheit/jemand|zaehler - ueber anwesenheit_quelle(), nur wenn ein Geraet
+#       "nur wenn jemand / niemand zu Hause" eingestellt hat.
+#
+# Geschaltet wird mit den vorhandenen Befehlen ein, betriebsart und soll: dieselbe
+# Tabelle wie die MQTT-Befehle (mi_mqtt.befehl_deuten), dieselben UDP-Woerter, derselbe
+# Weg send_to_midea() unter GERAETE_SCHLOSS wie Automatik, Fenster und Anwesenheit. NICHT
+# ueber die Warteschlange: dort zaehlt jeder Befehl als Bedienung von aussen (Handsperre,
+# Anwesenheit, Gleichwert-Sperre) - die Automatik wuerde sich selbst aussperren.
+#
+# Der zweite Haken (befehle_eingreifend_ein) schuetzt den MQTT-EINGANG: jeder im Heimnetz
+# kann ueber das Gateway "publish" senden. Er gilt hier nicht, denn kein fremder Absender
+# ist beteiligt. Die Zustimmung zu ein/betriebsart ist der eigene Schalter je Geraet
+# "Mit Sonnenstrom vorkuehlen", ab Werk aus - wer ihn einschaltet, erlaubt genau diesen
+# Griff. befehl_deuten() wird deshalb mit eingreifend_erlaubt=True gerufen, und nur von hier.
+#
+# Merker <datenordner>.vorkuehlen (neben dem Datenordner wie der Halt der Anwesenheit):
+# laeuft_seit, soll, aus_seit, hand_tag je Geraet - uebersteht Neustart und Update;
+# uninstall/preinstall raeumen ihn ab.
+VK_ENERGIE = ('haus/energie/netz_w', 'haus/energie/bezug_w', 'haus/energie/ueberschuss_w',
+              'haus/energie/ok', 'haus/energie/zaehler')
+VK_WETTER = ('haus/wetter/jetzt/grad', 'haus/wetter/zeit', 'haus/wetter/ok',
+             'haus/wetter/zaehler/weatherdata')
+VK_PV = ('haus/pv/naechste_stunde_w', 'haus/pv/ok', 'haus/pv/zaehler/weatherdata')
+VK_ZAEHLER = ('haus/energie/zaehler', 'haus/wetter/zaehler/weatherdata', 'haus/pv/zaehler/weatherdata')
+VK_TAKT = 10
+VK_ABFRAGE = 300        # s: waehrend eines Laufs das Geraet so oft frisch abfragen (Handerkennung)
+VK_AUS_WIEDER = 60      # s: antwortet das Geraet beim Ausschalten nicht, neuer Versuch danach
+_VK_SCHLOSS = threading.Lock()
+_VK_QUELLE = {}         # Thema -> {'wert', 'empfangen', 'live'}
+_VK_ZAEHLER = {}        # Zaehlerthema -> {'wert', 'seit'} (letzte LIVE-Aenderung)
+_VK_Z = {}              # Geraetenummer -> Zustand (mi_vorkuehlen.neuer_zustand)
+_VK_MELDUNG = {'text': '', 'ts': 0}
+_VK_MERKFELDER = ('laeuft_seit', 'soll', 'aus_seit', 'hand_tag')
+
+
+def vk_merker_datei():
+    return data_path.rstrip('/') + '.vorkuehlen'
+
+
+def vk_merker_lesen():
+    """Der Merker eines frueheren Laufs - ein unlesbarer gilt als leer."""
+    try:
+        with open(vk_merker_datei(), encoding='utf-8') as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    aus = {}
+    if isinstance(d, dict):
+        for gid, m in d.items():
+            if isinstance(m, dict) and str(gid).isdigit():
+                aus[str(gid)] = {k: m.get(k) for k in _VK_MERKFELDER}
+    return aus
+
+
+def vk_merker_schreiben():
+    """Unteilbar ueber eine Nebendatei; nichts zu merken entfernt die Datei."""
+    ziel = vk_merker_datei()
+    daten = {}
+    for gid, z in _VK_Z.items():
+        m = {k: z.get(k) for k in _VK_MERKFELDER}
+        if any(v is not None for v in m.values()):
+            daten[gid] = m
+    try:
+        if not daten:
+            if os.path.exists(ziel):
+                os.remove(ziel)
+            return
+        tmp = ziel + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(daten, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.warning("Vorkuehlen: der Merker %s liess sich nicht schreiben (%s) - nach einem "
+                        "Neustart weiss der Dienst nicht mehr, welches Geraet er eingeschaltet hat.",
+                        ziel, fehler)
+
+
+def vk_merken(thema, text, zurueckbehalten):
+    """Ein Haus-Thema des Vorkuehlens ist eingetroffen (Netzwerkfaden) - nur merken."""
+    if thema not in VK_THEMEN:
+        return
+    jetzt = time.time()
+    with _VK_SCHLOSS:
+        if thema in VK_ZAEHLER:
+            # Nur ein LIVE veraenderter Zaehler ist ein Lebenszeichen.
+            alt = _VK_ZAEHLER.get(thema)
+            if not zurueckbehalten and (alt is None or alt['wert'] != text):
+                _VK_ZAEHLER[thema] = {'wert': text, 'seit': jetzt}
+            return
+        _VK_QUELLE[thema] = {'wert': text, 'empfangen': jetzt, 'live': not zurueckbehalten}
+
+
+def _vk_lebt(zaehler, jetzt):
+    with _VK_SCHLOSS:
+        z = _VK_ZAEHLER.get(zaehler)
+    return z is not None and -60 <= jetzt - z['seit'] <= mi_vorkuehlen.STILLE
+
+
+def _vk_wert(thema, jetzt, live=True):
+    """Der Text eines Themas - None, wenn nie, zu alt (120 s) oder (live=True) nur zurueckbehalten."""
+    with _VK_SCHLOSS:
+        e = _VK_QUELLE.get(thema)
+    if not e:
+        return None
+    if live and (not e['live'] or jetzt - e['empfangen'] > mi_vorkuehlen.STILLE):
+        return None
+    return e['wert']
+
+
+def _vk_zahl(text):
+    z = abo_zahl(text)
+    return None if z is None or z != z else z      # NaN ist keine Zahl
+
+
+def vk_energie(jetzt):
+    """Der Stand von haus/energie: energie_ok, ueberschuss, bezug (W), dazu fuer die Anzeige
+    zaehler_alter, empfangen (letzter live empfangener Wert) und ok (zuletzt live)."""
+    lebt = _vk_lebt('haus/energie/zaehler', jetzt)
+    ok = _vk_wert('haus/energie/ok', jetzt)
+    netz = _vk_zahl(_vk_wert('haus/energie/netz_w', jetzt))
+    bezug = _vk_zahl(_vk_wert('haus/energie/bezug_w', jetzt))
+    ueber = _vk_zahl(_vk_wert('haus/energie/ueberschuss_w', jetzt))
+    if netz is not None:
+        # netz_w = bezug_w - ueberschuss_w (Regeln/07); aus netz_w gerechnet, was fehlt.
+        if bezug is None:
+            bezug = max(netz, 0.0)
+        if ueber is None:
+            ueber = max(-netz, 0.0)
+    elif bezug is None and ueber is not None and ueber > 0:
+        bezug = 0.0         # wer einspeist, bezieht nicht
+    elif ueber is None and bezug is not None and bezug > 0:
+        ueber = 0.0
+    with _VK_SCHLOSS:
+        z = _VK_ZAEHLER.get('haus/energie/zaehler')
+        empf = [e['empfangen'] for t, e in _VK_QUELLE.items()
+                if t.startswith('haus/energie/') and e['live']]
+    gut = bool(lebt and ok == '1' and ueber is not None and MQTT == 1 and mqtt_error == 0)
+    return {'energie_ok': gut, 'ueberschuss': ueber, 'bezug': bezug, 'lebt': 1 if lebt else 0,
+            'ok': ok, 'zaehler_alter': int(jetzt - z['seit']) if z else None,
+            'empfangen': int(max(empf)) if empf else None}
+
+
+def vk_aussen(jetzt):
+    """Aussentemperatur aus haus/wetter - None, wenn keine gueltige Aussage (Bedingung entfaellt)."""
+    if not _vk_lebt('haus/wetter/zaehler/weatherdata', jetzt) or _vk_wert('haus/wetter/ok', jetzt) != '1':
+        return None
+    zeit = _vk_zahl(_vk_wert('haus/wetter/zeit', jetzt, live=False))
+    grad = _vk_zahl(_vk_wert('haus/wetter/jetzt/grad', jetzt, live=False))
+    if zeit is None or not 0 <= jetzt - zeit <= 3600 or grad is None or grad <= -999:
+        return None
+    return grad
+
+
+def vk_pv(jetzt):
+    """PV-Prognose der naechsten Stunde in W - None ohne gueltige Prognose (haus/pv/ok = 1)."""
+    if not _vk_lebt('haus/pv/zaehler/weatherdata', jetzt) or _vk_wert('haus/pv/ok', jetzt) != '1':
+        return None
+    w = _vk_zahl(_vk_wert('haus/pv/naechste_stunde_w', jetzt, live=False))
+    return w if w is not None and w >= 0 else None
+
+
+def vk_laufende():
+    return [g for g, z in _VK_Z.items() if z.get('laeuft_seit') is not None]
+
+
+def vk_laeuft(gid):
+    z = _VK_Z.get(gid)
+    return bool(z and z.get('laeuft_seit') is not None)
+
+
+def vk_geraete():
+    """Eingeschaltete Geraete und solche mit einem Merker (laufend, Pause, Hand)."""
+    ids = [g for g, k in VK_EINST.items() if k.get('ein')]
+    for g in _VK_Z:
+        if g not in ids:
+            ids.append(g)
+    return ids
+
+
+def vk_einstellung(gid):
+    k = VK_EINST.get(gid)
+    if k is None:
+        k = mi_vorkuehlen.vk_vorgaben()
+        k['ein'] = 0
+    return k
+
+
+def vk_name(gid):
+    """Die Bezeichnung aus devices.cfg - sonst die Geraetenummer."""
+    try:
+        c = configparser.RawConfigParser()
+        c.read(cfg_path + '/devices.cfg')
+        b = c.get('Midea_' + gid, 'bezeichnung', fallback='').strip()
+        return b[:40] if b else gid
+    except Exception:
+        return gid
+
+
+def vk_geraet_lage(gid):
+    """Was das zwischengespeicherte Geraeteobjekt sagt - None, wenn der Dienst es nicht kennt."""
+    d = auto_device(gid)
+    if d is None:
+        return None
+    try:
+        modus = str(getattr(d.operational_mode, 'name', d.operational_mode)).lower()
+    except Exception:
+        modus = None
+    try:
+        soll = float(d.target_temperature)
+    except (TypeError, ValueError, AttributeError):
+        soll = None
+    try:
+        raum = float(d.indoor_temperature)
+        if raum != raum or raum <= -100:
+            raum = None
+    except (TypeError, ValueError, AttributeError):
+        raum = None
+    return {'online': bool(getattr(d, 'online', False)), 'an': bool(getattr(d, 'power_state', False)),
+            'modus': modus, 'soll': soll, 'raum': raum}
+
+
+def vk_sperre(gid):
+    if fenster_sperrt(gid):
+        return 'Fenster offen'
+    if anwesenheit_sperrt(gid):
+        return 'die Anwesenheitskopplung haelt das Geraet'
+    s = _AUTO_STAND.get(gid)
+    if s and s.get('aktiv'):
+        return 'die Automatik verschiebt gerade den Sollwert'
+    return ''
+
+
+def vk_melden(gid, text):
+    """Protokoll und die kurze Meldung vorkuehlen/meldung (mit dem naechsten Takt gesendet)."""
+    _LOGGER.info("Vorkuehlen %s: %s", gid, text)
+    _VK_MELDUNG['text'] = '%s %s: %s' % (time.strftime('%H:%M'), vk_name(gid), text)
+    _VK_MELDUNG['ts'] = 0       # sofort senden
+
+
+def vk_loslassen(gid, z, grund, tag):
+    """Die Hand uebernimmt: nicht schalten, bis morgen in Ruhe lassen."""
+    z['laeuft_seit'] = None
+    z['soll'] = None
+    z['hand_tag'] = tag
+    vk_merker_schreiben()
+    vk_melden(gid, 'von Hand uebernommen (%s) - Vorkuehlen ruht bis morgen' % grund)
+
+
+def vk_hand(daten):
+    """Ein Befehl von aussen (UDP oder MQTT, ausser der Abfrage) an ein Geraet, das die
+    Automatik gerade kuehlt: loslassen ohne zu schalten, Ruhe bis morgen."""
+    if 'status' in daten:
+        return
+    for wort in daten:
+        if len(wort) in range(10, 20) and wort.isdigit() and vk_laeuft(wort):
+            vk_loslassen(wort, _VK_Z[wort], 'Befehl aus Loxone oder MQTT', time.strftime('%Y%m%d'))
+
+
+def _vk_zahltext(f):
+    t = ('%.1f' % f).rstrip('0').rstrip('.')
+    return t or '0'
+
+
+async def vk_einschalten(gid, k, z, jetzt):
+    """Frisch abfragen, pruefen, dann ein + kuehlen + Sollwert in EINEM Befehl (unter GERAETE_SCHLOSS)."""
+    try:
+        await send_to_midea([gid, 'status'])
+    except Exception as fehler:
+        z['pruefen_bis'] = jetzt + mi_vorkuehlen.NACHPRUEFEN
+        z['pruefen_grund'] = 'Abfrage gescheitert - neuer Versuch in 10 min'
+        _LOGGER.warning("Vorkuehlen %s: Abfrage gescheitert (%s) - nichts eingeschaltet.", gid, fehler)
+        return
+    g = vk_geraet_lage(gid) or {'online': False}
+    aktion, grund = mi_vorkuehlen.start_pruefen(k, g)
+    if aktion != 'ein':
+        z['pruefen_bis'] = jetzt + mi_vorkuehlen.NACHPRUEFEN
+        z['pruefen_grund'] = grund + ' - neue Pruefung in 10 min'
+        _LOGGER.info("Vorkuehlen %s: %s - nichts eingeschaltet.", gid, grund)
+        return
+    soll = float(k['soll'])
+    d = auto_device(gid)
+    try:
+        soll = min(max(soll, float(d.min_target_temperature)), float(d.max_target_temperature))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    woerter = []
+    for name, wert in (('ein', '1'), ('betriebsart', 'kuehlen'), ('soll', _vk_zahltext(soll))):
+        wort, fehler = mi_mqtt.befehl_deuten(name, wert, True)
+        if wort is None:
+            _LOGGER.error("Vorkuehlen %s: Befehl %s=%s nicht baubar (%s) - nichts eingeschaltet.",
+                          gid, name, wert, fehler)
+            return
+        woerter.append(wort)
+    # ERST merken, DANN senden (wie Fenster und Anwesenheit): auch ein gescheiterter Befehl
+    # gilt als eigener Lauf - laeuft das Geraet danach nicht, sieht die Handerkennung es aus.
+    z.update({'laeuft_seit': jetzt, 'soll': soll, 'abgefragt': jetzt, 'bezug_seit': None,
+              'pruefen_bis': 0.0, 'pruefen_grund': ''})
+    vk_merker_schreiben()
+    vk_melden(gid, 'ein - kuehlen auf %s Grad (Ueberschuss %d min ueber %d W)'
+              % (_vk_zahltext(soll), k['dauer'], k['ab']))
+    await send_to_midea([gid] + woerter)
+
+
+async def vk_ausschalten(gid, k, z, grund, jetzt, tag):
+    """Frisch abfragen; hat niemand eingegriffen, ausschalten (unter GERAETE_SCHLOSS)."""
+    try:
+        await send_to_midea([gid, 'status'])
+    except Exception as fehler:
+        _LOGGER.warning("Vorkuehlen %s: Abfrage vor dem Ausschalten gescheitert (%s).", gid, fehler)
+    g = vk_geraet_lage(gid)
+    if g is None or not g.get('online'):
+        z['aus_naechster'] = jetzt + VK_AUS_WIEDER
+        _LOGGER.warning("Vorkuehlen %s: %s, aber das Geraet antwortet nicht - neuer Versuch in "
+                        "%d s.", gid, grund, VK_AUS_WIEDER)
+        return
+    hand = mi_vorkuehlen.hand_pruefen(z, g)
+    if hand:
+        vk_loslassen(gid, z, hand, tag)
+        return
+    wort, fehler = mi_mqtt.befehl_deuten('ein', '0', True)
+    z.update({'laeuft_seit': None, 'soll': None, 'aus_seit': jetzt})
+    vk_merker_schreiben()
+    vk_melden(gid, 'aus - %s' % grund)
+    await send_to_midea([gid, wort])
+
+
+def vk_stand(en, aussen, pv):
+    """Der Stand fuer den Reiter Test - ohne Zeitstempel des Schreibens."""
+    geraete = {}
+    for gid in vk_geraete():
+        z = _VK_Z.get(gid) or {}
+        geraete[gid] = {'ein': 1 if vk_einstellung(gid).get('ein') else 0,
+                        'laeuft_seit': int(z['laeuft_seit']) if z.get('laeuft_seit') else None,
+                        'hand_tag': z.get('hand_tag'), 'grund': z.get('grund', '')}
+    return {'mqtt': 1 if (MQTT == 1 and mqtt_error == 0) else 0,
+            'energie': {k: en[k] for k in ('energie_ok', 'ueberschuss', 'bezug', 'lebt', 'ok',
+                                            'zaehler_alter', 'empfangen')},
+            'aussen': aussen, 'pv_naechste': pv, 'geraete': geraete,
+            'meldung': _VK_MELDUNG['text']}
+
+
+def vk_stand_schreiben(stand):
+    """data/.../vorkuehlen.json fuer den Reiter Test - unteilbar wie lebenszeichen.json."""
+    try:
+        os.makedirs(data_path, exist_ok=True)
+        ziel = os.path.join(data_path, 'vorkuehlen.json')
+        tmp = ziel + '.tmp'
+        d = dict(stand)
+        d['ts'] = int(time.time())
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(d, f)
+        os.replace(tmp, ziel)
+    except OSError as fehler:
+        _LOGGER.debug("Vorkuehlstand nicht schreibbar: %s", fehler)
+
+
+async def vorkuehlen_schleife():
+    """Der Takt des Vorkuehlens (10 s). Gespraeche mit dem Geraet nur beim Einschalten,
+    Ausschalten und waehrend eines Laufs alle VK_ABFRAGE Sekunden (Handerkennung)."""
+    letzter = None
+    geschrieben = 0.0
+    while True:
+        try:
+            jetzt = time.time()
+            lt = time.localtime(jetzt)
+            tag = time.strftime('%Y%m%d', lt)
+            minute = lt.tm_hour * 60 + lt.tm_min
+            en = vk_energie(jetzt)
+            aussen = vk_aussen(jetzt)
+            pv = vk_pv(jetzt)
+            lebt_a, wert_a, _n, _al = anwesenheit_quelle()
+            anw = wert_a if (lebt_a and wert_a in ('0', '1') and MQTT == 1 and mqtt_error == 0) else None
+            for gid in vk_geraete():
+                k = vk_einstellung(gid)
+                z = _VK_Z.setdefault(gid, mi_vorkuehlen.neuer_zustand())
+                # Ein neuer Tag hebt die Handuebernahme auf; eine alte Pause verfaellt.
+                if (z.get('hand_tag') not in (None, tag)
+                        or (z.get('aus_seit') is not None and jetzt - z['aus_seit'] > 86400)):
+                    if z.get('hand_tag') != tag:
+                        z['hand_tag'] = None
+                    if z.get('aus_seit') is not None and jetzt - z['aus_seit'] > 86400:
+                        z['aus_seit'] = None
+                    vk_merker_schreiben()
+                lage = {'energie_ok': en['energie_ok'], 'ueberschuss': en['ueberschuss'],
+                        'bezug': en['bezug'], 'sperre': vk_sperre(gid), 'anw': anw,
+                        'aussen': aussen, 'pv_naechste': pv}
+                mi_vorkuehlen.zaehlen(k, z, lage, jetzt)
+                if z.get('laeuft_seit') is not None:
+                    # Hand? Erst am zwischengespeicherten Geraet (kostet kein Gespraech),
+                    # alle VK_ABFRAGE Sekunden frisch abgefragt.
+                    g = vk_geraet_lage(gid)
+                    hand = mi_vorkuehlen.hand_pruefen(z, g) if g else ''
+                    if not hand and jetzt - z.get('abgefragt', 0) >= VK_ABFRAGE:
+                        z['abgefragt'] = jetzt
+                        async with GERAETE_SCHLOSS:
+                            try:
+                                await send_to_midea([gid, 'status'])
+                            except Exception as fehler:
+                                _LOGGER.warning("Vorkuehlen %s: Abfrage gescheitert (%s).", gid, fehler)
+                        g = vk_geraet_lage(gid)
+                        hand = mi_vorkuehlen.hand_pruefen(z, g) if g else ''
+                    if hand:
+                        vk_loslassen(gid, z, hand, tag)
+                        z['grund'] = 'heute von Hand bedient - Ruhe bis morgen'
+                        continue
+                aktion, grund = mi_vorkuehlen.entscheiden(k, z, lage, jetzt, tag, minute)
+                if grund != z.get('grund'):
+                    _LOGGER.info("Vorkuehlen %s: %s", gid, grund)
+                z['grund'] = grund
+                if aktion == 'pruefen':
+                    async with GERAETE_SCHLOSS:
+                        await vk_einschalten(gid, k, z, jetzt)
+                elif aktion == 'aus' and z.get('aus_naechster', 0) <= jetzt:
+                    async with GERAETE_SCHLOSS:
+                        await vk_ausschalten(gid, k, z, grund, jetzt, tag)
+            stand = vk_stand(en, aussen, pv)
+            if stand != letzter or jetzt - geschrieben >= 60:
+                vk_stand_schreiben(stand)
+                letzter, geschrieben = stand, jetzt
+            if jetzt - _VK_MELDUNG['ts'] >= 60:
+                _VK_MELDUNG['ts'] = jetzt
+                await veroeffentlichen([
+                    ('vorkuehlen/aktiv', str(len(vk_laufende()))),
+                    ('vorkuehlen/meldung', _VK_MELDUNG['text'] or '-'),
+                ])
+        except Exception as fehler:
+            _LOGGER.error("Vorkuehlen gescheitert: %s", fehler, exc_info=True)
+        await asyncio.sleep(VK_TAKT)
 
 
 def geraete_ids_aus_datei():
@@ -2878,8 +3348,9 @@ def on_connect(client, userdata, flags, rc, properties=None):
         # Netzhaenger blind weiter.
         # c1: dazu die Fensterthemen (leer, solange die Kopplung aus ist).
         # Gruppe 15: dazu die Anwesenheit (leer, solange die Kopplung aus ist).
+        # 4.5.22: dazu haus/energie, haus/wetter und haus/pv (leer, solange kein Geraet vorkuehlt).
         for _thema in ((AUTO_THEMA_REGEL, AUTO_THEMA_PV) + tuple(sorted(FENSTER_THEMEN))
-                       + ANWESENHEIT_THEMEN):
+                       + ANWESENHEIT_THEMEN + VK_THEMEN):
             if _thema:
                 try:
                     client.subscribe(_thema, qos=0)
@@ -2958,6 +3429,8 @@ def on_message(client, userdata, nachricht):
     fenster_merken(nachricht.topic, text, zurueck)
     # V1: die Anwesenheit ebenso.
     anwesenheit_merken(nachricht.topic, text, zurueck)
+    # 4.5.22: die Haus-Themen des Vorkuehlens ebenso.
+    vk_merken(nachricht.topic, text, zurueck)
     _LOGGER.debug("MQTT empfangen: %s = %s%s", nachricht.topic, text[:40],
                   " (zurueckbehalten, Alter unbekannt - zaehlt nicht)" if zurueck else "")
 
@@ -3209,6 +3682,8 @@ try:
     # Retain-Liste und Abraeumen am Broker (ab 4.5.9), liegt neben diesem
     # Programm im Datenordner.
     import mi_mqtt
+    # 4.5.22: "Mit Sonnenstrom vorkuehlen" - Einstellungen und Entscheidung (reines Modul).
+    import mi_vorkuehlen
 
     # Ein Schloss um jede Unterhaltung mit einem Geraet. Damit bleibt die
     # Reihenfolge genau die, die bis 4.2.12 galt - siehe Kopfkommentar.
@@ -3454,6 +3929,24 @@ ANWESENHEIT_THEMEN = (ANWESENHEIT_THEMA, ANWESENHEIT_ZAEHLER) if ANWESENHEIT_EIN
 # Der Halt eines frueheren Laufs (Neustart, Update): er wird bei der Ankunft bzw. wenn die
 # Quelle schweigt zurueckgestellt - auch wenn der Haken inzwischen aus ist.
 _ANW_HALT.update(anwesenheit_halt_lesen())
+
+# --- Mit Sonnenstrom vorkuehlen (4.5.22) -------------------------------------
+# AB WERK AUS: ein Geraet ohne Eintrag in "vorkuehlen" hat ein=0. Ein Stand ohne den
+# Schluessel (Update, Oberflaeche noch nicht geoeffnet) heisst schlicht "aus".
+VK_EINST, _vk_grund = mi_vorkuehlen.vk_lesen(_cfg_text('vorkuehlen'))
+if VK_EINST is None:
+    _LOGGER.warning("vorkuehlen ist nicht lesbar (%s) - 'Mit Sonnenstrom vorkuehlen' bleibt fuer "
+                    "alle Geraete AUS.", _vk_grund[:40])
+    VK_EINST = {}
+VK_EIN = any(k.get('ein') for k in VK_EINST.values())
+for _vg, _vm in vk_merker_lesen().items():
+    _VK_Z.setdefault(_vg, mi_vorkuehlen.neuer_zustand()).update(_vm)
+# Ein Lauf eines frueheren Prozesses wird auch mit Schalter aus regulaer beendet - dafuer
+# braucht der Dienst haus/energie nicht: ohne Werte endet er nach der Ausfallfrist.
+VK_THEMEN = (VK_ENERGIE + VK_WETTER + VK_PV) if (VK_EIN or vk_laufende()) else ()
+VK_BRAUCHT_ANW = any(k.get('ein') and k.get('anw') != 'egal' for k in VK_EINST.values())
+if VK_BRAUCHT_ANW and not ANWESENHEIT_THEMEN:
+    ANWESENHEIT_THEMEN = (ANWESENHEIT_THEMA, ANWESENHEIT_ZAEHLER)
 
 UDP_Port = _cfg_zahl('UDP_PORT', 7013, 1, 65535)
 # Groesste zulaessige Laenge eines Datagramms (siehe datagram_received).

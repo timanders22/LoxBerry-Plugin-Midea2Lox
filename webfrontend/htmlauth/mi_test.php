@@ -417,6 +417,55 @@ function mi_pruefungen($cfg)
                     mi_e((string) $ad2['verhalten'])));
     }
 
+    // 4.5.22: Mit Sonnenstrom vorkuehlen - kommt haus/energie an, und was tut jedes Geraet?
+    list($vok, $vanz, $vab) = mi_vk_probe();
+    $z[] = array(mi_e(mi_t('PRUEF.VK_FELDER')), $vok === null ? 2 : ($vok ? 1 : 0),
+        $vok === null ? mi_t('UI.DIENST_NICHT_LESBAR')
+            : ($vok ? sprintf(mi_t('UI.VK_FELDER_GLEICH'), $vanz)
+                    : sprintf(mi_t('UI.VK_FELDER_UNGLEICH'), mi_e(implode(', ', $vab)))));
+    list($vl, $vd, $valter) = mi_vorkuehlen_lage($cfg);
+    if ($vl === 'aus') {
+        $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 2, mi_t('UI.VK_LAGE_AUS'));
+    } elseif ($vl !== 'ok') {
+        $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, mi_t('UI.VK_LAGE_STUMM'));
+    } else {
+        $ve = (isset($vd['energie']) && is_array($vd['energie'])) ? $vd['energie'] : array();
+        $vzu = isset($ve['empfangen']) && $ve['empfangen'] !== null ? max(0, time() - (int) $ve['empfangen']) : null;
+        if (empty($vd['mqtt'])) {
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, mi_t('UI.VK_OHNE_MQTT'));
+        } elseif (!empty($ve['energie_ok'])) {
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 1, sprintf(mi_t('UI.VK_ENERGIE_OK'),
+                (int) $ve['ueberschuss'], $ve['bezug'] === null ? '-' : (string) (int) $ve['bezug'],
+                $vzu === null ? 0 : $vzu));
+        } elseif ($ve['zaehler_alter'] === null) {
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, mi_t('UI.VK_ENERGIE_NIE'));
+        } elseif (empty($ve['lebt'])) {
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, sprintf(mi_t('UI.VK_ENERGIE_STILL'), (int) $ve['zaehler_alter']));
+        } else {
+            $z[] = array(mi_e(mi_t('PRUEF.VK_ENERGIE')), 0, sprintf(mi_t('UI.VK_ENERGIE_OK0'),
+                mi_e((string) $ve['ok']), $vzu === null ? '-' : (string) $vzu));
+        }
+        $vnamen = array();
+        foreach (mi_devices() as $vdev) { $vnamen[(string) $vdev['id']] = mi_geraetename($vdev); }
+        $vger = (isset($vd['geraete']) && is_array($vd['geraete'])) ? $vd['geraete'] : array();
+        foreach ($vger as $vgid => $vg) {
+            if (!is_array($vg)) { continue; }
+            $vname = isset($vnamen[(string) $vgid]) ? $vnamen[(string) $vgid] : (string) $vgid;
+            $vfrage = mi_e(sprintf(mi_t('PRUEF.VK_GERAET'), $vname));
+            if (!empty($vg['laeuft_seit'])) {
+                // Der Grund nur, wenn er mehr sagt als die Laufzeit (etwa "Mindestlaufzeit noch 5 min").
+                $vgr = (string) $vg['grund'];
+                $z[] = array($vfrage, 1, sprintf(mi_t('UI.VK_LAEUFT_SEIT'),
+                    (int) floor(max(0, time() - (int) $vg['laeuft_seit']) / 60))
+                    . (($vgr !== '' && strpos($vgr, 'laeuft seit') !== 0) ? ' &ndash; ' . mi_e($vgr) : ''));
+            } elseif (empty($vg['ein'])) {
+                $z[] = array($vfrage, 2, mi_t('UI.VK_GERAET_AUS'));
+            } else {
+                $z[] = array($vfrage, 2, sprintf(mi_t('UI.VK_WARTET'), mi_e((string) $vg['grund'])));
+            }
+        }
+    }
+
     return $z;
 }
 
