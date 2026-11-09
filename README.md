@@ -10,6 +10,10 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.25
+
+- Reiter MQTT: Wer „Befehle über MQTT annehmen“ oder „Ein/Aus, Betriebsart, Frostschutz und Selbstreinigung über MQTT zulassen“ abhakt und dabei eine Beanstandung auslöst, sieht den Haken danach abgehakt. Bisher erschien er wieder angehakt, weil ein abgehakter Haken nicht mitreiste. Gespeichert wurde in beiden Fällen nichts.
+
 ## Neu in 4.5.24
 
 - Gemeinsames Sprachmodul 1.4.2: Wird eine Ansage bewusst nicht gesprochen (gerade eben schon gesagt, gesperrt oder Ruhezeit), steht das im Protokoll jetzt so – und nicht mehr als Fehler.

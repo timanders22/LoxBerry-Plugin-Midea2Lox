@@ -3719,6 +3719,20 @@ function mi_x2_formulare()
     );
 }
 
+/**
+ * Die Haken (Kontrollkaestchen) eines Formulars. 4.5.25 (Bestandspruefung 09.11.2026): ein abgehakter Haken
+ * steht nicht in $_POST und reiste deshalb nicht mit - mi_x2_ueberlagern() liess den gespeicherten Wert stehen,
+ * und nach einer Beanstandung erschien der eben abgenommene Haken wieder angehakt. Die Haken reisen jetzt immer,
+ * in derselben Form wie im Handler (index.php, mqtt_speichern): '1' nur fuer den Wert '1', sonst '0'.
+ */
+function mi_x2_haken($form)
+{
+    $h = array(
+        'mqtt' => array('befehle_mqtt_ein', 'befehle_eingreifend_ein'),
+    );
+    return isset($h[$form]) ? $h[$form] : array();
+}
+
 /** Die Eingaben des beanstandeten Formulars aus $_POST - nur Zeichenketten. */
 function mi_x2_eingaben($form, array $falsch)
 {
@@ -3727,7 +3741,12 @@ function mi_x2_eingaben($form, array $falsch)
         return null;
     }
     $werte = array();
+    $haken = mi_x2_haken($form);
     foreach ($liste[$form] as $k) {
+        if (in_array($k, $haken, true)) {
+            $werte[$k] = (isset($_POST[$k]) && $_POST[$k] === '1') ? '1' : '0';
+            continue;
+        }
         if (isset($_POST[$k]) && is_string($_POST[$k]) && mi_wert_taugt($_POST[$k])) {
             $werte[$k] = $_POST[$k];
         }
