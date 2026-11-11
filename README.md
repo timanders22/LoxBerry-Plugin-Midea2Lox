@@ -10,6 +10,11 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.26
+
+- **Ansage-Brücke des Dienstes:** `data/mi_ansage.php` nimmt eine LoxBerry-Wurzel nur noch an, wenn `config/plugins`, `data/plugins` und `config/system/general.json` vorhanden sind; sonst antwortet es mit `KENNUNG=WURZEL` und Rückgabewert 1.
+- **Gemeinsames Sprachmodul 1.4.3:** Als LoxBerry-Wurzel aus `LBHOMEDIR` gilt für die Sprachausgabe nur noch ein Ordner mit `config/plugins`, `data/plugins` und `config/system/general.json`; bis 1.4.2 genügte `config/system`, und ein Prüfstand oder Rest mit diesem Ordner wurde wie ein LoxBerry gelesen. Auf einem LoxBerry ändert sich nichts.
+
 ## Neu in 4.5.25
 
 - Reiter MQTT: Wer „Befehle über MQTT annehmen“ oder „Ein/Aus, Betriebsart, Frostschutz und Selbstreinigung über MQTT zulassen“ abhakt und dabei eine Beanstandung auslöst, sieht den Haken danach abgehakt. Bisher erschien er wieder angehakt, weil ein abgehakter Haken nicht mitreiste. Gespeichert wurde in beiden Fällen nichts.
