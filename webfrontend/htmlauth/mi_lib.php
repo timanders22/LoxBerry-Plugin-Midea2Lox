@@ -491,7 +491,63 @@ function mi_vorgaben()
         /* 4.5.22: Mit Sonnenstrom vorkuehlen - je Geraet, leer = fuer kein Geraet (AB WERK AUS).
          * Form bei mi_vk_lesen(); neuer Schluessel HINTEN, auch in config/midea2lox.cfg (M23). */
         'vorkuehlen'              => '',
+        /* 4.5.27 (Punkt G1-G4, Entscheidung des Hausherrn 11.11.2026, Bauart Dashboard 0.9.44 und BLE-Scanner
+         * 1.3.41): Verbindung des HTTP-Wegs zum Miniserver - 'auto' (wie LoxBerry), '0', '1'. Neuer Schluessel
+         * HINTEN, auch in config/midea2lox.cfg (M23). Fehlt er in einer bestehenden Datei, gilt im Dienst 'auto'. */
+        'tls'                     => 'auto',
     );
+}
+
+/**
+ * Ist tls ein erlaubter Wert? Nur genau 'auto', '0' und '1' (4.5.27, G1) - dieselbe Regel wie
+ * verbindungsart() in data/mi_miniserver.py.
+ */
+function mi_wert_tls($w)
+{
+    return is_string($w) && in_array($w, array('auto', '0', '1'), true);
+}
+
+/** Ein Port: 1 bis 65535 in Ziffern, sonst der Ersatz (wie _port_aus() in data/mi_miniserver.py). */
+function mi_ms_port($roh, $ersatz)
+{
+    $t = (is_scalar($roh) && !is_bool($roh)) ? trim((string) $roh) : '';
+    if (preg_match('/^\d{1,5}$/', $t) && (int) $t >= 1 && (int) $t <= 65535) {
+        return (int) $t;
+    }
+    return $ersatz;
+}
+
+/**
+ * Die Verbindung des HTTP-Wegs, wie der Dienst sie waehlt (4.5.27, G1/G3; Rumpf wie bl_ms_verbindung() im
+ * BLE-Scanner 1.3.41). Was der LoxBerry sagt, steht in general.json unter Miniserver.<nr> (die general.cfg
+ * kennt Porthttps, Preferhttps und Transport nicht, gemessen am Geraet 12.11.2026). $wahl ist der Wert der
+ * Einstellung tls, wie er in der Konfiguration steht.
+ * Rueckgabe: wahl, gelesen (general.json mit diesem Miniserver), lb_https, tls (null bei ungueltiger Wahl),
+ * port, widerspruch (tls '0', der LoxBerry sagt aber https).
+ */
+function mi_ms_verbindung($abschnitt, $wahl)
+{
+    $ms = array();
+    $nr = (is_string($abschnitt) && preg_match('/^MINISERVER(\d{1,2})$/', $abschnitt, $m)) ? $m[1] : '';
+    $f = mi_paths()['general'];
+    $j = ($f !== '' && is_readable($f)) ? json_decode((string) @file_get_contents($f), true) : null;
+    if (is_array($j) && isset($j['Miniserver'][$nr]) && is_array($j['Miniserver'][$nr])) {
+        $ms = $j['Miniserver'][$nr];
+    }
+    $pref = isset($ms['Preferhttps']) ? $ms['Preferhttps'] : null;
+    $lb_https = ($pref === true || (is_scalar($pref) && !is_bool($pref) && trim((string) $pref) === '1'))
+        || (isset($ms['Transport']) && is_string($ms['Transport']) && strtolower(trim($ms['Transport'])) === 'https');
+    $aus = array('wahl' => $wahl, 'gelesen' => (bool) $ms, 'lb_https' => $lb_https, 'tls' => null,
+                 'port' => mi_ms_port(isset($ms['Port']) ? $ms['Port'] : null, 80), 'widerspruch' => false);
+    if (!mi_wert_tls($wahl)) {
+        return $aus;
+    }
+    $aus['tls'] = $wahl === 'auto' ? $lb_https : ($wahl === '1');
+    if ($aus['tls']) {
+        $aus['port'] = mi_ms_port(isset($ms['Porthttps']) ? $ms['Porthttps'] : null, 443);
+    }
+    $aus['widerspruch'] = ($wahl === '0' && $lb_https);
+    return $aus;
 }
 
 /**
@@ -951,6 +1007,10 @@ function mi_wert_pruefen($schluessel, $wert)
             return (ctype_digit($w) && (int) $w <= 100) ? '' : mi_t('UI.PRUEF_VERSCHIEBUNG');
         case 'anwesenheit_frist':
             return (ctype_digit($w) && (int) $w <= 3600) ? '' : mi_t('UI.PRUEF_ANW_FRIST');
+        case 'tls':
+            // 4.5.27 (G1): genau auto, 0 oder 1 - ungetrimmt verglichen wie im Dienst. Eine ganze Zahl aus einer
+            // Sicherung gilt wie jeder andere Zahlenwert dieser Linie als ihre Ziffern; 1.0 nicht.
+            return ((is_string($wert) || is_int($wert)) && mi_wert_tls((string) $wert)) ? '' : mi_t('UI.PRUEF_TLS');
         case 'vorkuehlen':
             $mi_vg = '';
             if (mi_vk_lesen($w, true, $mi_vg) !== null) { return ''; }
@@ -3705,7 +3765,7 @@ function mi_x2_formulare()
 {
     return array(
         'settings'  => array('MINISERVER', 'UDP_PORT', 'lox_timeout', 'MideaUser', 'region',
-                             'abfragetakt', 'maxConnectionLifetime', 'DEBUG'),
+                             'abfragetakt', 'maxConnectionLifetime', 'DEBUG', 'tls'),
         'mqtt'      => array('mqtt_praefix', 'befehle_mqtt_ein', 'befehle_eingreifend_ein'),
         'automatik' => array('auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab',
                              'auto_verschiebung', 'auto_soll_min', 'auto_soll_max',

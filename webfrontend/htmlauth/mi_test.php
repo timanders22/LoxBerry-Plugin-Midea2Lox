@@ -368,6 +368,28 @@ function mi_pruefungen($cfg)
         $z[] = array(mi_e(mi_t('PRUEF.LOXBERRYIP')), 1, sprintf(mi_t('UI.LOXBERRYIP_OK'), mi_e($lip !== '' ? $lip : $loc)));
     }
 
+    /* 4.5.27 (G1/G3/G4): Verbindungsart des HTTP-Wegs. Die Einstellung gegen den LoxBerry, und - Wirkung, nicht
+     * Rueckgabewert - gegen das, womit der laufende Dienst wirklich sendet (lebenszeichen.json, miniserver). */
+    $mi_tw = array_key_exists('tls', $cfg) ? (string) $cfg['tls'] : 'auto';
+    $mi_vb = mi_ms_verbindung(mi_cfg($cfg, 'MINISERVER', 'MINISERVER1'), $mi_tw);
+    list(, , , $mi_ld) = mi_lebenszeichen();
+    $mi_lms = (is_array($mi_ld) && isset($mi_ld['miniserver']) && is_array($mi_ld['miniserver'])) ? $mi_ld['miniserver'] : null;
+    if ($mi_vb['tls'] === null) {
+        $z[] = array(mi_e(mi_t('PRUEF.TLS')), 0, mi_te('UI.PRUEF_TLS'));
+    } elseif ($mi_vb['widerspruch']) {
+        $z[] = array(mi_e(mi_t('PRUEF.TLS')), 0, mi_te('UI.TLS_WIDERSPRUCH'));
+    } elseif ($pid !== null && $mi_lms !== null && isset($mi_lms['tls'], $mi_lms['port'])
+              && ((bool) $mi_lms['tls'] !== $mi_vb['tls'] || (int) $mi_lms['port'] !== (int) $mi_vb['port'])) {
+        $z[] = array(mi_e(mi_t('PRUEF.TLS')), 0, mi_e(sprintf(mi_t('UI.TLS_DIENST_ANDERS'),
+            $mi_lms['tls'] ? 'https' : 'http', (int) $mi_lms['port'], $mi_vb['tls'] ? 'https' : 'http', (int) $mi_vb['port'])));
+    } else {
+        $z[] = array(mi_e(mi_t('PRUEF.TLS')), 1, mi_e(sprintf(mi_t('UI.TLS_ZIEL'), $mi_vb['tls'] ? 'https' : 'http',
+            (int) $mi_vb['port'], $mi_vb['gelesen'] ? ($mi_vb['lb_https'] ? 'https' : 'http') : mi_t('UI.TLS_LB_UNBEKANNT'))));
+    }
+    if ($mi_lms !== null && !empty($mi_lms['umleitung'])) {
+        $z[] = array(mi_e(mi_t('PRUEF.TLS_UMLEITUNG')), 0, mi_te('UI.TLS_UMLEITUNG'));
+    }
+
     list($bl, $bq, $balter) = mi_befehle_lage($cfg);
     if ($bl === 'aus') {
         $z[] = array(mi_e(mi_t('PRUEF.MQTT_BEFEHLE')), 2, mi_t('UI.BEFEHLE_LAGE_AUS'));

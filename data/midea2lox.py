@@ -666,7 +666,9 @@ def lebenszeichen_schreiben(zeit, zaehler, ok):
                        'geraete': len(device_id_list),
                        # Gruppe 15: Lage der MQTT-Befehle und die letzte Quittung (Reiter Test).
                        'befehle': befehle_lage(), 'befehl_zuletzt': dict(_BEFEHL_ZULETZT),
-                       'anwesenheit': anwesenheit_aktiv()}, f)
+                       'anwesenheit': anwesenheit_aktiv(),
+                       # 4.5.27 (G1/G4): womit der HTTP-Weg sendet und ob der letzte Versuch umgeleitet wurde.
+                       'miniserver': {k: _MS_LAGE[k] for k in ('tls_wahl', 'tls', 'port', 'umleitung')}}, f)
         os.replace(tmp, ziel)
     except OSError as fehler:
         _LOGGER.debug("Lebenszeichen nicht schreibbar: %s", fehler)
@@ -3284,10 +3286,8 @@ async def veroeffentlichen(paare, support_mode=0):
                 _LOGGER.warning("MQTT: Bestaetigung des Brokers fehlt: %s", fehler)
         return
 
-    # HTTP-Weg
-    address_loxone = ("http://%s:%s@%s:%s/dev/sps/io/"
-                      % (quote(str(LoxUser), safe=''), quote(str(LoxPassword), safe=''),
-                         LoxIP, LoxPort))
+    # HTTP-Weg. Seit 4.5.27 ueber mi_miniserver.senden(): Zugang im Authorization-Kopf statt in der Adresse,
+    # Klartextfelder, Schema und Port nach der Einstellung tls (G1), keiner Umleitung wird gefolgt (G4).
     for thema, wert in paare:
         if support_mode == 1:   # Loxone-Konfigurationen aus Midea2Lox V2.x
             name = ('Midea/' + thema).replace('/', '.')
@@ -3295,21 +3295,27 @@ async def veroeffentlichen(paare, support_mode=0):
             # 4.5.17: wie das MQTT-Gateway und der Reiter (mi_gateway_name()) - jeder Schraegstrich wird _,
             # auch der im Praefix (Haus/Klima -> Haus_Klima_...). Bis 4.5.16 nur der im Thema.
             name = (MQTT_PRAEFIX + '_' + thema).replace('/', '_')
-        ziel = address_loxone + name + '/' + str(wert)
-        try:
-            # Ohne Zeitgrenze wartet requests unbegrenzt. Haengt der
-            # Miniserver, steht der Dienst.
-            r = await _im_faden(lambda: requests.get(ziel, timeout=LOX_TIMEOUT))
-            if r.status_code != 200:
-                _LOGGER.error("Error %s on set Loxone Input '%s', please check user, "
-                              "password and IP of the Miniserver in the LoxBerry "
-                              "configuration and the names of the Loxone inputs.",
-                              r.status_code, name)
-        except requests.exceptions.Timeout:
-            _LOGGER.error("Miniserver %s hat innerhalb von %s s nicht geantwortet - "
-                          "Wert '%s' verworfen.", LoxIP, LOX_TIMEOUT, name)
-        except requests.exceptions.RequestException as fehler:
-            _LOGGER.error("Miniserver %s nicht erreichbar: %s", LoxIP, fehler)
+        # Ohne Zeitgrenze stuende der Dienst, solange der Miniserver haengt: LOX_TIMEOUT.
+        code, fehler, umgeleitet = await _im_faden(
+            lambda: mi_miniserver.senden(LOX_MS, LOX_TLS, name, wert, LOX_TIMEOUT, 'Midea2Lox'))
+        _MS_LAGE['umleitung'] = 1 if umgeleitet else 0
+        if umgeleitet:
+            if not _MS_LAGE['gemeldet']:
+                _LOGGER.error("%s", mi_miniserver.UMLEITUNG_TEXT)
+                _MS_LAGE['gemeldet'] = True
+            # Bei einer Umleitung kommt kein Wert an; die naechsten dieses Durchgangs nicht nachschieben.
+            break
+        if code is None and _MS_LAGE['tls'] is None:
+            # G1: ungueltige Einstellung tls - beim Start schon gemeldet; nichts gesendet.
+            break
+        if code is None:
+            _LOGGER.error("Miniserver %s nicht erreichbar (innerhalb von %s s): %s - Wert '%s' verworfen.",
+                          LoxIP, LOX_TIMEOUT, fehler, name)
+        elif code != 200:
+            _LOGGER.error("Error %s on set Loxone Input '%s', please check user, "
+                          "password and IP of the Miniserver in the LoxBerry "
+                          "configuration and the names of the Loxone inputs.",
+                          code, name)
 
 
 # ===========================================================================
@@ -3709,6 +3715,8 @@ try:
     import mi_mqtt
     # 4.5.22: "Mit Sonnenstrom vorkuehlen" - Einstellungen und Entscheidung (reines Modul).
     import mi_vorkuehlen
+    # 4.5.27: der HTTP-Weg an den Miniserver - Verbindungsart, Zugang im Kopf, keine Umleitung (reines Modul).
+    import mi_miniserver
 
     # Ein Schloss um jede Unterhaltung mit einem Geraet. Damit bleibt die
     # Reihenfolge genau die, die bis 4.2.12 galt - siehe Kopfkommentar.
@@ -4008,10 +4016,11 @@ BEFEHL_THEMA = MQTT_PRAEFIX + '/befehl/+/+'
 try:
     cfg.read(home_path + '/config/system/general.cfg')
     LoxIP = cfg.get(Miniserver, 'IPADDRESS')
-    LoxPort = cfg.get(Miniserver, 'PORT')
-    LoxPassword = cfg.get(Miniserver, 'PASS')
-    LoxUser = cfg.get(Miniserver, 'ADMIN')
-except (configparser.Error, OSError) as fehler:
+    # 4.5.27: Port, Klartext-Zugang (ADMIN_RAW/PASS_RAW) und was der LoxBerry ueber https sagt
+    # (general.json) kommen aus mi_miniserver.miniserver_daten(). Bis 4.5.26 standen hier ADMIN/PASS
+    # (fuer Adressen kodiert) und gingen ein zweites Mal kodiert in die Adresse.
+    LOX_MS = mi_miniserver.miniserver_daten(home_path, Miniserver)
+except (configparser.Error, OSError, KeyError) as fehler:
     # Hier hatte bis 4.2.12 gar keine eigene Absicherung gestanden: fehlte
     # der Abschnitt MINISERVER1 in der general.cfg, endete der Start wortlos.
     _LOGGER.error("Die Zugangsdaten des Miniservers '%s' stehen nicht in "
@@ -4022,6 +4031,26 @@ except (configparser.Error, OSError) as fehler:
 
 # C1: die zulaessigen Absender des UDP-Befehlseingangs (siehe oben).
 ERLAUBTE_ABSENDER = miniserver_adressen()
+
+# 4.5.27 (Punkt G1-G4): Verbindungsart des HTTP-Wegs. Fehlt der Schluessel (Anlage vor 4.5.27, Oberflaeche
+# noch nicht geoeffnet), gilt "auto" - Entscheidung des Hausherrn 11.11.2026 (Dashboard 0.9.44, BLE-Scanner
+# 1.3.41). Ein ungueltiger Wert wird nicht gedeutet: der HTTP-Weg sendet dann nichts (mi_miniserver.senden).
+LOX_TLS = _cfg_text('tls', 'auto')
+try:
+    _ms_tls, _ms_port = mi_miniserver.verbindungsart(LOX_TLS, LOX_MS)
+    _LOGGER.info("HTTP-Weg an den Miniserver: %s://%s:%s (tls=%s, LoxBerry %s).",
+                 'https' if _ms_tls else 'http', LoxIP, _ms_port, LOX_TLS,
+                 'https' if mi_miniserver.lb_sagt_https(LOX_MS) else 'http')
+except ValueError as _f:
+    _ms_tls, _ms_port = None, None
+    _LOGGER.error("%s", _f)
+# G3: ein bestehendes tls=0 bei einem LoxBerry, der https fuehrt - einmal je Lauf melden, nicht umdeuten.
+_ms_wider = mi_miniserver.widerspruch_tls(LOX_TLS, LOX_MS)
+if _ms_wider:
+    _LOGGER.warning("%s", _ms_wider)
+# G4: die Umleitung auf https einmal je Lauf als eigene Zeile; der Reiter Test liest den letzten Stand
+# aus lebenszeichen.json (Schluessel miniserver).
+_MS_LAGE = {'tls_wahl': LOX_TLS, 'tls': _ms_tls, 'port': _ms_port, 'umleitung': 0, 'gemeldet': False}
 
 ###Version
 # Bis 3.4.8 stand hier ein fest verdrahteter MD5-Schluessel

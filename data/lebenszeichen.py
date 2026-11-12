@@ -158,23 +158,22 @@ def main(argv):
 
     # 2. HTTP an den virtuellen Eingang
     try:
-        import requests
-        from urllib.parse import quote
-        ms = wert(cfg, 'MINISERVER', 'MINISERVER1')
-        allg = configparser.RawConfigParser()
-        allg.read(home_path + '/config/system/general.cfg')
+        # 4.5.27: ueber mi_miniserver.senden() wie der Dienst - Zugang im Authorization-Kopf statt in der
+        # Adresse (bis 4.5.26 http://<benutzer>:<kennwort>@...), Klartextfelder ADMIN_RAW/PASS_RAW, Schema und
+        # Port nach der Einstellung tls, keiner Umleitung wird gefolgt.
+        import mi_miniserver
+        ms = mi_miniserver.miniserver_daten(home_path, wert(cfg, 'MINISERVER', 'MINISERVER1'))
         # 4.5.17: Name wie im MQTT-Gateway und im Reiter - jeder Schraegstrich wird _, auch der im Praefix
         # (Haus/Klima -> Haus_Klima_status_dienst). Bis 4.5.16 blieb er stehen.
         name = (praefix + '_status_dienst').replace('/', '_')
-        ziel = ('http://%s:%s@%s:%s/dev/sps/io/%s/%s'
-                % (quote(allg.get(ms, 'ADMIN'), safe=''),
-                   quote(allg.get(ms, 'PASS'), safe=''),
-                   allg.get(ms, 'IPADDRESS'), allg.get(ms, 'PORT'),
-                   name, laeuft))
-        r = requests.get(ziel, timeout=5)
-        if r.status_code != 200:
+        code, fehler, umgeleitet = mi_miniserver.senden(ms, wert(cfg, 'tls', 'auto'), name, laeuft, 5,
+                                                        'Midea2Lox-Lebenszeichen')
+        if umgeleitet:
+            _LOGGER.warning('Lebenszeichen %s=%s nicht zugestellt: %s', name, laeuft, mi_miniserver.UMLEITUNG_TEXT)
+            return 1
+        if code != 200:
             _LOGGER.warning('Lebenszeichen: Miniserver antwortete mit %s auf '
-                            '%s.', r.status_code, name)
+                            '%s.', code if code is not None else fehler, name)
             return 1
         _LOGGER.info('Lebenszeichen %s=%s ueber HTTP zugestellt.', name, laeuft)
         return 0

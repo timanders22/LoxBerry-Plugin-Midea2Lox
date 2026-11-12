@@ -170,8 +170,9 @@ if (isset($_POST['speichern']) || isset($_POST['speichern_suchen'])) {
     /* Jedes Feld durch mi_wert_pruefen() - dieselbe Positivliste, die auch
      * die zurueckgespielte Sicherung benutzt. Eine zweite Wahrheit ueber
      * zulaessige Werte gibt es nicht. */
+    // 4.5.27: dazu tls (Verbindung zum Miniserver, G1).
     foreach (array('MINISERVER', 'UDP_PORT', 'maxConnectionLifetime',
-                   'region', 'abfragetakt', 'lox_timeout') as $feld) {
+                   'region', 'abfragetakt', 'lox_timeout', 'tls') as $feld) {
         $roh = isset($_POST[$feld]) ? $_POST[$feld] : '';
         if (!is_string($roh)) {
             $mi_fehler[] = sprintf(mi_t('UI.PRUEF_UNTAUGLICH'), mi_e($feld));
@@ -1076,6 +1077,38 @@ if (!$mi_liste) {
   <input data-role="none" type="text" id="lox_timeout" name="lox_timeout"
          value="<?php echo mi_e($mi_cfg['lox_timeout']); ?>">
   <p class="sm-small"><?php echo mi_t('UI.LOX_TIMEOUT_HILFE'); ?></p>
+</div>
+<?php
+/* 4.5.27 (G1/G3): Verbindung des HTTP-Wegs zum Miniserver. Ein ungueltiger Wert (von Hand in der Datei oder
+ * eben beanstandet, X-2) steht als eigene, gewaehlte Option da - das Formular deutet ihn nicht um. */
+$mi_tls = (string) $mi_cfg['tls'];
+$mi_vb = mi_ms_verbindung((string) $mi_cfg['MINISERVER'], $mi_tls);
+?>
+<div class="sm-row">
+  <label for="tls"><?php echo mi_t('UI.TLS'); ?></label>
+  <select data-role="none" id="tls" name="tls">
+<?php
+foreach (array('auto' => 'UI.TLS_AUTO', '0' => 'UI.TLS_AUS', '1' => 'UI.TLS_EIN') as $mi_tw => $mi_tk) {
+    echo '    <option value="' . mi_e($mi_tw) . '"' . ($mi_tls === (string) $mi_tw ? ' selected' : '') . '>'
+       . mi_te($mi_tk) . '</option>' . "\n";
+}
+if (!mi_wert_tls($mi_tls)) {
+    echo '    <option value="' . mi_e($mi_tls) . '" selected>'
+       . mi_e(sprintf(mi_t('UI.TLS_UNGUELTIG'), $mi_tls)) . '</option>' . "\n";
+}
+?>
+  </select>
+  <p class="sm-small"><?php
+if ($mi_vb['tls'] === null) {
+    echo mi_te('UI.PRUEF_TLS');
+} else {
+    echo mi_e(sprintf(mi_t('UI.TLS_ZIEL'), $mi_vb['tls'] ? 'https' : 'http', (int) $mi_vb['port'],
+                      $mi_vb['gelesen'] ? ($mi_vb['lb_https'] ? 'https' : 'http') : mi_t('UI.TLS_LB_UNBEKANNT')));
+} ?></p>
+<?php if ($mi_vb['widerspruch']) { ?>
+  <div class="sm-alert sm-warn"><?php echo mi_te('UI.TLS_WIDERSPRUCH'); ?></div>
+<?php } ?>
+  <p class="sm-small"><?php echo mi_t('UI.TLS_HILFE'); ?></p>
 </div>
 
 <h2><?php echo mi_te('SETTINGS.HEAD_MIDEA'); ?></h2>
