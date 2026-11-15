@@ -139,9 +139,14 @@ if (mi_formtoken() === '') {
  * angenommen. Ein stiller Vorgabewert ist eine Annahme, keine Auskunft. */
 /* M10 (4.5.18): NICHT waehrend einer Aktualisierung - sonst wird im Upgrade-Fenster aus der mitgelieferten
  * Vorgabe "Eigenes", und postinstall.sh spielt die Zweitschrift nicht zurueck. */
+/* 4.5.28 (Entscheidung des Hausherrn 15.11.2026, "Ja, nennen und stehen lassen"): ergaenzt wird nur, was fehlt; eine
+ * Einstellung der Datei, die diese Fassung nicht kennt, bleibt stehen und wird mit Namen genannt, nie mit Wert. Bis
+ * 4.5.27 fiel sie hier still weg (mi_config_read() las nur die Vorgaben). Derselbe Kern wie in der Probe im Reiter
+ * Test (mi_cfg_vervollstaendigen_datei()). */
 if ($mi_fehlten && $mi_wache === '' && !mi_upgrade_laeuft()) {
-    if (mi_config_write($mi_cfg)) {
-        $mi_hinweise[] = sprintf(mi_t('UI.CFG_ERGAENZT'), mi_e(implode(', ', $mi_fehlten)));
+    list($mi_vok, $mi_verg, $mi_vfremd, $mi_vschreib) = mi_cfg_vervollstaendigen_datei($mi_p['config']);
+    if ($mi_vok && $mi_verg) {
+        $mi_hinweise[] = mi_cfg_ergaenzt_satz($mi_verg, $mi_vfremd, $mi_vschreib);
     }
 }
 
@@ -595,38 +600,24 @@ if (isset($_SERVER['REQUEST_METHOD'])
 
 /* ---------------- Einstellungen sichern ----------------
  *
- * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Bei diesem
- * Plugin ist das nicht das Midea-Kennwort, sondern token und key je Geraet
- * aus devices.cfg: nur damit kommt das Plugin ohne die Wolke an ein
- * V3-Geraet. Ohne sie stuenden nach dem Zurueckspielen alle Felder richtig,
- * und man muesste trotzdem neu suchen lassen - die Datei waere fuer ihren
- * eigentlichen Zweck, den Umzug, wertlos.
+ * Seit 4.5.28 baut das gemeinsame Sicherungsmodul Kopf und Inhalt (sicherung_bauen(), Beschreibung
+ * mi_sicherung_beschreibung()): _hinweis, _plugin = Midea2Lox, _fassung, _stand, bei Bedarf _warnung (X-3: das
+ * Zurueckspielen wiese diese Datei ab - nur Namen, nie Werte), danach jede Einstellung oben samt Midea-Konto, die
+ * Sprachansagen ohne Sprechtoken und der Teil "geraete". Bis 4.5.27 lagen die Einstellungen unter "einstellungen".
  *
- * Damit traegt sie ein Geheimnis, und der Warnkasten am Knopf sagt das.
+ * Ausgegeben wird die VOLLE Konfiguration. Bei diesem Plugin ist das Geheimnis nicht nur das Midea-Kennwort, sondern
+ * token und key je Geraet aus devices.cfg: nur damit kommt das Plugin ohne die Wolke an ein V3-Geraet. Ohne sie
+ * stuenden nach dem Zurueckspielen alle Felder richtig, und man muesste trotzdem neu suchen lassen - die Datei waere fuer
+ * ihren eigentlichen Zweck, den Umzug, wertlos. Damit traegt sie ein Geheimnis, und der Warnkasten am Knopf sagt das.
  *
- * Bis 4.2.12 stand hier mi_cfg() ohne Argumente. Die Funktion verlangt zwei;
- * gemessen unter 7.4.33 und 8.4.24 endete der Knopf mit ArgumentCountError,
- * Rueckgabewert 255 und 0 Byte Ausgabe - auf jeder Anlage eine leere Seite.
- * Es ist mi_config_read(), das die volle Konfiguration liefert. */
+ * Kodiert wie sicherung_json() und dazu JSON_INVALID_UTF8_SUBSTITUTE wie seit 4.3.3: eine von Hand in Latin-1
+ * bearbeitete devices.cfg liess json_encode() bis 4.3.2 mit false enden, und der Knopf lieferte nichts. Bei gueltigem
+ * UTF-8 sind die Bytes dieselben wie die von sicherung_json(). */
 if (isset($_SERVER['REQUEST_METHOD'])
     && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_sichern'])) {
-    /* JSON_INVALID_UTF8_SUBSTITUTE: eine von Hand in Latin-1 bearbeitete
-     * devices.cfg liess json_encode() bis 4.3.2 mit false enden, und der
-     * Knopf "Einstellungen sichern" meldete daraufhin, es liesse sich nichts
-     * SCHREIBEN - dabei wird beim Herunterladen gar nichts geschrieben. */
-    /* X-3 (Verbesserungsbau 30.09.2026): bestuende ein gespeicherter Wert
-     * das eigene Zurueckspielen nicht, sagt es der Kopf der Datei - mit den
-     * NAMEN, nie den Werten. Geliefert wird trotzdem, vollstaendig. */
-    $mi_sich = mi_sicherung_bauen($mi_cfg);
-    $mi_altw = mi_rueckspiel_altwerte($mi_sich);
-    if ($mi_altw) {
-        $mi_sich = array('_warnung' => sprintf(mi_t('UI.SICH_ALTWERT_KOPF'),
-                                               implode(', ', $mi_altw))) + $mi_sich;
-    }
-    $mi_js = json_encode($mi_sich,
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-        | JSON_INVALID_UTF8_SUBSTITUTE);
-    if ($mi_js !== false) {
+    $mi_js = json_encode(sicherung_bauen(mi_sicherung_beschreibung(), mi_sicherung_jetzt(), mi_sicherung_teile()),
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if (is_string($mi_js) && $mi_js !== '') {
         while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="midea2lox_einstellungen_'
@@ -639,107 +630,76 @@ if (isset($_SERVER['REQUEST_METHOD'])
 
 /* ---------------- Einstellungen zurueckspielen ----------------
  *
- * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
- * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+ * Seit 4.5.28 ueber das gemeinsame Sicherungsmodul. sicherung_eingang() prueft den Haken zurueck_ok (ohne ihn wird
+ * nichts gelesen und nichts geaendert), dann is_uploaded_file(), den Fehlercode des Uploads und die Groesse (256 KB
+ * wie bisher) - das tat bis 4.5.27 dieser Zweig selbst. sicherung_zurueckspielen() liest (eine Sicherung bis 4.5.27
+ * mit den Einstellungen unter "einstellungen" und den Geraeten daneben packt das Modul aus), prueft jeden Wert und
+ * jedes Geraet, verwirft Unbekanntes mit Namen und aendert bei einer Beanstandung gar nichts. Gespeichert wird genau
+ * der Stand, den das Modul liefert (mi_sicherung_speichern(): Geraetedatei zuerst, dann die Konfiguration, dann die
+ * Zweitschriften). Danach wie bis 4.5.27, im Rueckruf 'nachziehen':
+ *   - M1 (ab 4.5.10): ein anderes Praefix aus der Sicherung - das bisherige merken, der Dienst raeumt es nach dem
+ *     Neustart ab;
+ *   - die Abo-Datei des Gateways neu schreiben;
+ *   - wie viele Geraete die Datei trug (keine: die Geraetedatei blieb, wie sie war);
+ *   - den Dienst neu starten UND sagen, was mit ihm geschah (Punkt 7 der sieben).
+ * Die Saetze des Moduls sind maskiert, die Meldungen dieser Seite werden roh ausgegeben. */
 if (isset($_SERVER['REQUEST_METHOD'])
     && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mi_zurueck'])) {
-    /* Den Fehlercode ZUERST. Eine Datei, die an upload_max_filesize
-     * gescheitert ist, kommt mit leerem tmp_name an und wurde bis 4.3.2 als
-     * "Es wurde keine Datei ausgewaehlt" gemeldet - der Anwender hatte aber
-     * eine ausgewaehlt, sie war nur zu gross fuer den Server. */
-    $mi_uf = isset($_FILES['mi_sicherung']['error']) ? (int) $_FILES['mi_sicherung']['error'] : -1;
-    if ($mi_uf !== UPLOAD_ERR_OK && $mi_uf !== -1 && $mi_uf !== UPLOAD_ERR_NO_FILE) {
-        $mi_fehler[] = sprintf(mi_t('UI.SICH_UPLOAD_FEHLER'), $mi_uf);
-    } elseif (!isset($_FILES['mi_sicherung']) || !is_array($_FILES['mi_sicherung'])
-        || !isset($_FILES['mi_sicherung']['tmp_name'])
-        || !is_string($_FILES['mi_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['mi_sicherung']['tmp_name'])) {
-        $mi_fehler[] = mi_t('UI.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['mi_sicherung']['size'] > 262144) {
-        $mi_fehler[] = mi_t('UI.SICH_ZU_GROSS');
-    } else {
-        $mi_alt_praefix = mi_mqtt_topic($mi_cfg);
-        $mi_erg = mi_sicherung_lesen(
-            (string) @file_get_contents($_FILES['mi_sicherung']['tmp_name']));
-        list($mi_neu, $mi_mangel, $mi_n, $mi_ng) = $mi_erg;
-        $mi_unberuehrt = isset($mi_erg[4]) && is_array($mi_erg[4]) ? $mi_erg[4] : array();
-        if ($mi_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. Eine zur Haelfte uebernommene Konfiguration ist
-             * schlimmer als die alte, und man sieht es ihr nicht an. */
-            $mi_fehler[] = mi_t('UI.SICH_ABGELEHNT') . ' ' . implode(' ', $mi_mangel);
-        } elseif (!mi_devices_write($mi_neu[1])) {
-            /* Die GERAETEDATEI ZUERST.
-             *
-             * Bis 4.3.2 stand hier midea2lox.cfg zuerst. Gemessen:
-             * config_write gelingt, devices_write scheitert - und danach
-             * steht die halbe Sicherung auf der Platte, waehrend die Seite
-             * "Es wurde nichts gespeichert" ueberschreibt. Genau der
-             * Zustand, den mi_sicherung_lesen() mit seinem "entweder den
-             * ganzen Stand oder gar keinen" ausschliessen soll.
-             *
-             * Die Reihenfolge allein macht es nicht unteilbar, aber sie
-             * dreht den Schaden um: scheitert der erste Schritt, ist NICHTS
-             * geschrieben. Scheitert der zweite, steht die Konfiguration
-             * neu und die Geraete alt - und genau das sagt die Meldung
-             * dann auch. */
-            $mi_fehler[] = mi_t('UI.SICH_GERAETE_SCHREIBFEHLER');
-        } elseif (!mi_config_write($mi_neu[0])) {
-            // O2: die Geraetedatei IST geschrieben - das gehoert nicht unter
-            // "Es wurde nichts gespeichert".
-            $mi_misslungen[] = mi_t('UI.SICH_HALB');
-        } else {
-            /* DIE KONFIGURATION NEU LESEN. Ohne diese Zeile zeigte das
-             * Formular darunter weiter den alten Stand; zusammen mit der
-             * fehlenden Meldung sah die Seite aus wie vor dem Klick. Wer
-             * daraufhin "Speichern" drueckte, schrieb alles zurueck - ausser
-             * dem Kennwort, das aus der Sicherung stehen blieb. Genau die
-             * halb zurueckgespielte Konfiguration, die mi_sicherung_lesen()
-             * verhindern soll. Gemessen. */
-            $mi_cfg = mi_config_read();
-            // M1 (ab 4.5.10): ein anderes Praefix aus der Sicherung - das
-            // bisherige merken, der Dienst raeumt es nach dem Neustart ab.
-            if ($mi_alt_praefix !== mi_mqtt_topic($mi_cfg)) {
-                if (mi_praefix_merken($mi_alt_praefix)) {
-                    $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_ALT_ABRAEUMEN'), mi_e($mi_alt_praefix));
+    $mi_sb = mi_sicherung_beschreibung();
+    list($mi_sroh, $mi_sr) = sicherung_eingang($mi_sb, $_POST, $_FILES, 'mi_sicherung');
+    if ($mi_sr === null) {
+        $mi_sb['speichern'] = 'mi_sicherung_speichern';
+        $mi_sb['nachziehen'] = function ($neu, $jetzt, $r) use ($mi_p) {
+            $saetze = array();
+            /* DIE KONFIGURATION NEU LESEN (wie bis 4.5.27): sonst zeigte das Formular darunter weiter den alten Stand. */
+            $nach = mi_config_read();
+            $alt_praefix = mi_mqtt_topic($jetzt);
+            if ($alt_praefix !== mi_mqtt_topic($nach)) {
+                if (mi_praefix_merken($alt_praefix)) {
+                    $saetze[] = sprintf(mi_t('UI.PRAEFIX_ALT_ABRAEUMEN'), mi_e($alt_praefix));
                 } else {
-                    $mi_hinweise[] = sprintf(mi_t('UI.PRAEFIX_LISTE_FEHLER'),
-                                             mi_e($mi_p['praefixe']), mi_e($mi_alt_praefix));
+                    $saetze[] = sprintf(mi_t('UI.PRAEFIX_LISTE_FEHLER'), mi_e($mi_p['praefixe']), mi_e($alt_praefix));
                 }
             }
-            if (!mi_abo_datei_schreiben($mi_cfg)) {
-                $mi_hinweise[] = sprintf(mi_t('UI.ABO_SCHREIBFEHLER'),
-                                         mi_e($mi_p['abo']));
+            if (!mi_abo_datei_schreiben($nach)) {
+                $saetze[] = sprintf(mi_t('UI.ABO_SCHREIBFEHLER'), mi_e($mi_p['abo']));
             }
-            if ($mi_unberuehrt) {
-                // Was die Datei nicht enthielt, ist unveraendert geblieben -
-                // und das gehoert gesagt, nicht verschwiegen.
-                $mi_hinweise[] = sprintf(mi_t('UI.SICH_UNBERUEHRT'),
-                                         mi_e(implode(', ', $mi_unberuehrt)));
-            }
-            /* Punkt 7 der sieben: den Dienst nachziehen UND sagen, was mit
-             * ihm geschehen ist.
-             *
-             * AUSGESCHRIEBEN statt als Bedingungsausdruck.
-             * sprachplatzhalter_pruefen.py erkennt einen Schluessel nur,
-             * wenn er woertlich in der Klammer der Sprachfunktion steht, und
-             * findet ihn nicht mehr, sobald er hinter einem Fragezeichen
-             * liegt - es meldete daraufhin fuer beide Texte "traegt
-             * Platzhalter, wird aber nirgends durch sprintf gereicht". Ein
-             * Werkzeug, das den Schluessel nicht sieht, prueft ihn auch
-             * nicht.
-             *
-             * (Das Beispiel steht hier bewusst NICHT in der Aufrufform. Ein
-             * Erklaertext, der das gesuchte Muster woertlich zeigt, wird vom
-             * Sucher getroffen und meldet einen Schluessel, den es nie gab -
-             * genau das ist beim Schreiben dieser Zeilen passiert.) */
-            $was = mi_dienst('restart');
-            if ($was === '') {
-                $mi_meldung = sprintf(mi_t('UI.SICH_UEBERNOMMEN'), $mi_n, $mi_ng);
+            $mi_ng = (isset($r['teile']['geraete']) && is_array($r['teile']['geraete'])) ? count($r['teile']['geraete']) : 0;
+            if ($mi_ng > 0) {
+                $saetze[] = sprintf(mi_t('UI.SICH_GERAETE_ZAHL'), $mi_ng);
             } else {
-                $mi_meldung = sprintf(mi_t('UI.SICH_UEBERNOMMEN_OHNE_DIENST'), $mi_n, $mi_ng);
+                $saetze[] = mi_t('UI.SICH_GERAETE_KEINE');
             }
+            /* AUSGESCHRIEBEN statt als Bedingungsausdruck: sprachplatzhalter_pruefen.py erkennt einen Schluessel nur,
+             * wenn er woertlich in der Klammer der Sprachfunktion steht. */
+            if (mi_dienst('restart') === '') {
+                $saetze[] = mi_t('UI.SICH_DIENST_NEU');
+            } else {
+                $saetze[] = mi_t('UI.SICH_DIENST_FEHL');
+            }
+            return $saetze;
+        };
+        $mi_sb['log'] = 'mi_ansage_zeile';
+        $mi_sr = sicherung_zurueckspielen($mi_sb, $mi_sroh);
+        $mi_cfg = mi_config_read();
+    }
+    $mi_sm = sicherung_meldungen($mi_sb, $mi_sr);
+    foreach ($mi_sm['fehler'] as $mi_s) {
+        $mi_fehler[] = $mi_s;
+    }
+    // Was beim Speichern misslang, sagt die Linie genauer als K_SCHREIBFEHLER (wie bis 4.5.27).
+    $mi_sl = mi_sicherung_schreiblage();
+    if ($mi_sl === 'geraete') {
+        $mi_fehler[] = mi_t('UI.SICH_GERAETE_SCHREIBFEHLER');
+    } elseif ($mi_sl === 'halb') {
+        // O2: die Geraetedatei IST geschrieben - das gehoert nicht unter "Es wurde nichts gespeichert".
+        $mi_misslungen[] = mi_t('UI.SICH_HALB');
+    }
+    if (!empty($mi_sr['gespeichert']) && !$mi_sm['fehler']) {
+        $mi_meldung = implode(' ', $mi_sm['hinweise']);
+    } else {
+        foreach ($mi_sm['hinweise'] as $mi_s) {
+            $mi_hinweise[] = $mi_s;
         }
     }
     $mi_tab = 'tab-settings';
@@ -1231,6 +1191,7 @@ if ($mi_altwerte) { ?>
     <?php echo mi_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="file" name="mi_sicherung" accept=".json">
+    <?php echo sicherung_haken_zeile(mi_sicherung_beschreibung()); ?>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="mi_zurueck" value="1"><?php echo mi_t('UI.K_ZURUECK'); ?></button>
   </form>
 </div>

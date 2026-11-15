@@ -1,5 +1,37 @@
 #!/bin/bash
 
+# [upgrade_daten] Argumente des Installers festhalten - unten sichert der gemeinsame Baustein
+# [upgrade_daten] upgrade_daten.sh (neben diesem Skript) den ganzen Datenordner.
+UPGD_ORDNER="$3"; UPGD_WURZEL="$5"
+
+# [Midea2Lox] Fehlerweg fuer den gemeinsamen Baustein (upgrade_daten.sh 1.1.0, Regeln/06; seit 4.5.28): scheitert
+# unten das Sichern des Datenordners, bricht die Aktualisierung mit Rueckgabe 2 ab, und die bisherige Fassung bleibt
+# installiert. Bis dahin hat dieses Skript den Dienst angehalten ("stop" nimmt den Merker soll_laufen weg) und die
+# Python-Umgebung beiseitegelegt. Beides nimmt dieser Fehlerweg zurueck: die Umgebung kommt an ihren Platz (wie in
+# zs_schluss()), und lief der Dienst vorher (Merker <ordner>.lief_vorher), wird soll_laufen wieder angelegt - den
+# Dienst startet danach der Minutentakt, denn die Marke <ordner>.upgrade_laeuft hat der Baustein schon entfernt.
+upgd_bei_fehler() {
+    mi_fw_rc=0
+    if [ -n "${MI_VV:-}" ] && [ -d "$MI_VV" ] && [ ! -e "$MI_VJETZT" ]; then
+        if mv -T "$MI_VV" "$MI_VJETZT" 2>/dev/null; then
+            echo "<INFO> Die beiseitegelegte Python-Umgebung ist wieder an ihrem Platz."
+        else
+            echo "<WARNING> Die beiseitegelegte Python-Umgebung liess sich nicht zurueckholen: $MI_VV"
+            mi_fw_rc=1
+        fi
+    fi
+    if [ -n "${MI_LIEF:-}" ] && [ -f "$MI_LIEF" ]; then
+        if : > "$ARGV5/data/plugins/$ARGV3/soll_laufen" 2>/dev/null; then
+            echo "<INFO> Der Dienst lief vorher - der Merker soll_laufen ist wieder angelegt, der Waechter startet ihn."
+        else
+            echo "<WARNING> Der Merker soll_laufen liess sich nicht wieder anlegen - den Dienst bitte im Reiter"
+            echo "<WARNING> Einstellungen mit \"Dienst starten\" starten."
+            mi_fw_rc=1
+        fi
+    fi
+    return $mi_fw_rc
+}
+
 ARGV1=$1 # First argument is temp folder during install
 ARGV3=$3 # Third argument is Plugin installation folder
 ARGV5=$5 # Fifth argument is Base folder of LoxBerry
@@ -520,4 +552,13 @@ if [ -n "$MI_BEISEITE" ] || [ -n "$MI_FEST" ]; then
 fi
 
 zs_schluss
+# [upgrade_daten] Gemeinsamer Baustein (Werkzeuge/gemeinsam/upgrade_daten.sh): den ganzen Datenordner
+# [upgrade_daten] neben den Ordner sichern; misslingt das, bricht die Aktualisierung mit Rueckgabe 2 ab.
+if [ -f "$(dirname "$0")/upgrade_daten.sh" ] && . "$(dirname "$0")/upgrade_daten.sh"; then
+    upgrade_daten_sichern "$UPGD_ORDNER" "$UPGD_WURZEL" || exit 2
+else
+    echo "<FAIL> Der Baustein upgrade_daten.sh fehlt neben $(basename "$0") - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt installiert."
+    exit 2
+fi
 exit 0

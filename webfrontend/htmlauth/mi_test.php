@@ -11,6 +11,53 @@ function mi_block($text)
 }
 
 /**
+ * 4.5.28 (Entscheidung des Hausherrn 15.11.2026, "Ja, nennen und stehen lassen"): Nennt das Ergaenzen fehlender
+ * Einstellungen eine unbekannte Einstellung mit Namen, laesst es sie stehen, und bleibt ihr Wert aus der Meldung?
+ *
+ * Gemessen mit Wirkung an einer PROBEDATEI in einem eigenen Ordner unter dem temporaeren Verzeichnis, nicht an der
+ * echten Konfiguration: die Vorgaben ohne abfragetakt und eine unbekannte Einstellung mit Wert. Gerufen wird derselbe
+ * Kern wie beim Seitenaufruf (mi_cfg_vervollstaendigen_datei(), Satz mi_cfg_ergaenzt_satz()). Danach werden
+ * Probedatei und Ordner entfernt. Rueckgabe: array(1 | 0 | 2, Text) - 2 heisst nicht feststellbar.
+ */
+function mi_vervollstaendigen_probe()
+{
+    $ord = rtrim(sys_get_temp_dir(), '/\\') . '/mi_vprobe_' . getmypid() . '_' . mt_rand(100000, 999999);
+    if (!@mkdir($ord, 0700)) {
+        return array(2, sprintf(mi_t('UI.ERG_FREMD_NICHT'), mi_e($ord)));
+    }
+    $cfg = $ord . '/midea2lox.cfg';
+    $name = 'zz_probe_unbekannt';
+    $wert = 'ProbeWert' . mt_rand(100000, 999999);
+    $d = mi_vorgaben();
+    unset($d['abfragetakt']);
+    $z = "[default]\n";
+    foreach ($d as $k => $v) { $z .= $k . '=' . $v . "\n"; }
+    $z .= $name . '=' . $wert . "\n";
+    $erg = (@file_put_contents($cfg, $z) === strlen($z)) ? mi_cfg_vervollstaendigen_datei($cfg) : null;
+    $satz = is_array($erg) ? mi_cfg_ergaenzt_satz($erg[1], $erg[2], $erg[3]) : '';
+    $nach = is_file($cfg) ? mi_ini_lesen($cfg) : null;
+    foreach (glob($ord . '/*') ?: array() as $f) {
+        if (is_file($f)) { @unlink($f); }
+    }
+    @rmdir($ord);
+    if (!is_array($erg)) {
+        return array(2, sprintf(mi_t('UI.ERG_FREMD_NICHT'), mi_e($ord)));
+    }
+    $default = (is_array($nach) && isset($nach['default']) && is_array($nach['default'])) ? $nach['default'] : array();
+    $mangel = array();
+    if (strpos($satz, $name) === false) { $mangel[] = mi_t('UI.ERG_FREMD_M_NAME'); }
+    if (strpos($satz, $wert) !== false) { $mangel[] = mi_t('UI.ERG_FREMD_M_WERT'); }
+    if (!isset($default[$name]) || $default[$name] !== $wert) { $mangel[] = mi_t('UI.ERG_FREMD_M_WEG'); }
+    if (!$erg[0] || $erg[1] !== array('abfragetakt') || !isset($default['abfragetakt'])) {
+        $mangel[] = mi_t('UI.ERG_FREMD_M_ERG');
+    }
+    if ($mangel) {
+        return array(0, sprintf(mi_t('UI.ERG_FREMD_FEHL'), implode(' ', $mangel)));
+    }
+    return array(1, sprintf(mi_t('UI.ERG_FREMD_OK'), mi_e($name)));
+}
+
+/**
  * Die Selbstpruefung: je Zeile eine Frage mit Haekchen, Kreuz oder Strich.
  *
  * Liefert eine Liste aus (Frage, 1|0|2, Antworttext).
@@ -126,6 +173,10 @@ function mi_pruefungen($cfg)
     // ---- Konfiguration ----
     list($lage, $lagetext) = mi_cfg_lage();
     $z[] = array(mi_e(mi_t('PRUEF.KONFIGURATION')), $lage === 'ok' ? 1 : 0, $lagetext);
+
+    // 4.5.28: nennt das Ergaenzen Unbekanntes und laesst es stehen? (an einer Probedatei, nicht an der Konfiguration)
+    list($mi_vst, $mi_vtx) = mi_vervollstaendigen_probe();
+    $z[] = array(mi_e(mi_t('PRUEF.ERG_FREMD')), $mi_vst, $mi_vtx);
 
     $f = mi_wert_pruefen('UDP_PORT', mi_cfg($cfg, 'UDP_PORT', ''));
     $z[] = array(mi_e(mi_t('PRUEF.UDP_PORT')), $f === '' ? 1 : 0,

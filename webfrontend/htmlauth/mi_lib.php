@@ -1,5 +1,8 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+/* 4.5.28: das gemeinsame Sicherungsmodul ("Einstellungen sichern" und "Einstellungen zurueckspielen"), byte-gleiche
+ * Abschrift der Stammfassung Werkzeuge/gemeinsam/sicherung.php; liegt neben dieser Datei. */
+require_once __DIR__ . '/sicherung.php';
 /**
  * Midea2Lox - gemeinsame Funktionen der Oberflaeche
  *
@@ -1065,7 +1068,12 @@ function mi_wert_pruefen($schluessel, $wert)
  */
 function mi_cfg_fehlende()
 {
-    $datei = mi_paths()['config'];
+    return mi_cfg_fehlende_datei(mi_paths()['config']);
+}
+
+/** Wie mi_cfg_fehlende(), an einer bestimmten Datei (4.5.28, fuer die Probe im Reiter Test). Rein lesend. */
+function mi_cfg_fehlende_datei($datei)
+{
     if (!is_readable($datei)) {
         return array();
     }
@@ -1154,11 +1162,84 @@ function mi_ini_lesen($datei)
     return $aus;
 }
 
+/**
+ * Welche Schluessel stehen in der DATEI, die diese Fassung nicht kennt (4.5.28)?
+ *
+ * Gefragt wird wie bei mi_cfg_fehlende_datei() die Datei selbst. Rueckgabe: die Namen, nie die Werte. Ein Name, der
+ * sich von einer Vorgabe nur in Gross- und Kleinschreibung unterscheidet, steht nicht darin: configparser (Dienst,
+ * discover.py) liest ihn als dieselbe Einstellung, und mi_config_read_datei() uebergeht ihn wie bis 4.5.27.
+ */
+function mi_cfg_fremde_datei($datei)
+{
+    if (!is_readable($datei)) {
+        return array();
+    }
+    $roh = mi_ini_lesen($datei);
+    if (!is_array($roh) || !isset($roh['default']) || !is_array($roh['default'])) {
+        return array();
+    }
+    $vorgaben = mi_vorgaben();
+    $klein = array();
+    foreach (array_keys($vorgaben) as $k) { $klein[strtolower((string) $k)] = true; }
+    $fremd = array();
+    foreach (array_keys($roh['default']) as $k) {
+        $k = (string) $k;
+        if (!array_key_exists($k, $vorgaben) && !isset($klein[strtolower($k)])) { $fremd[] = $k; }
+    }
+    return $fremd;
+}
+
+/**
+ * Welche Schluessel der DATEI unterscheiden sich von einer Vorgabe nur in Gross- und Kleinschreibung (4.5.28)?
+ *
+ * configparser (Dienst, discover.py) liest einen solchen Namen als dieselbe Einstellung (gemessen 15.11.2026:
+ * RawConfigParser liest "MiniServer = MSx" unter MINISERVER). Die Oberflaeche nimmt fuer die Einstellung wie bis
+ * 4.5.27 die Vorgabe (mi_config_read_datei() uebergeht den Namen), und das Ergaenzen schreibt die Vorgabe unter dem
+ * vorgesehenen Namen und laesst den anderen weg - der Dienst liest danach die Vorgabe. Bis 4.5.27 geschah das still;
+ * seit 4.5.28 nennen die Konfigurationslage und die Meldung beim Ergaenzen den Namen, nie den Wert.
+ * Rueckgabe: die Namen, wie sie in der Datei stehen.
+ */
+function mi_cfg_schreibweise_datei($datei)
+{
+    if (!is_readable($datei)) {
+        return array();
+    }
+    $roh = mi_ini_lesen($datei);
+    if (!is_array($roh) || !isset($roh['default']) || !is_array($roh['default'])) {
+        return array();
+    }
+    $vorgaben = mi_vorgaben();
+    $klein = array();
+    foreach (array_keys($vorgaben) as $k) { $klein[strtolower((string) $k)] = true; }
+    $aus = array();
+    foreach (array_keys($roh['default']) as $k) {
+        $k = (string) $k;
+        if (!array_key_exists($k, $vorgaben) && isset($klein[strtolower($k)])) { $aus[] = $k; }
+    }
+    return $aus;
+}
+
 /** midea2lox.cfg lesen. Aufbau: INI mit dem Abschnitt [default]. */
 function mi_config_read()
 {
+    return mi_config_read_datei(mi_paths()['config']);
+}
+
+/**
+ * Eine Konfigurationsdatei dieser Linie lesen: die Vorgaben, darueber jeder Wert der Datei.
+ *
+ * Seit 4.5.28 sortiert die Lesefunktion nichts aus (Entscheidung des Hausherrn 15.11.2026, fuer alle Linien): eine
+ * Einstellung der Datei, die diese Fassung nicht kennt, steht hinter den bekannten mit im Ergebnis. Bis 4.5.27 nahm
+ * diese Funktion nur die Schluessel aus mi_vorgaben(), und jedes Speichern - auch das automatische Vervollstaendigen
+ * beim Seitenaufruf - entfernte eine solche Einstellung still aus der Datei. Jetzt bleibt sie stehen und wird beim
+ * Vervollstaendigen mit Namen genannt; erst das Zurueckspielen einer Sicherung entfernt sie, und das Sicherungsmodul
+ * nennt sie dabei (K_JETZT_ENTFERNT). Ausnahme wie bis 4.5.27: ein Name, der sich von einer Vorgabe nur in Gross- und
+ * Kleinschreibung unterscheidet (mi_cfg_fremde_datei()), wird uebergangen - stuende er neben der Vorgabe in der Datei,
+ * laesen Dienst und mi_ini_lesen() sie als doppelten Schluessel und die Datei als kaputt.
+ */
+function mi_config_read_datei($datei)
+{
     $cfg = mi_vorgaben();
-    $datei = mi_paths()['config'];
     if (is_readable($datei)) {
         $roh = mi_ini_lesen($datei);
         if (is_array($roh) && isset($roh['default']) && is_array($roh['default'])) {
@@ -1166,6 +1247,9 @@ function mi_config_read()
                 if (isset($roh['default'][$k])) {
                     $cfg[$k] = (string) $roh['default'][$k];
                 }
+            }
+            foreach (mi_cfg_fremde_datei($datei) as $k) {
+                $cfg[$k] = (string) $roh['default'][$k];
             }
         }
     }
@@ -1175,15 +1259,65 @@ function mi_config_read()
 }
 
 /**
+ * Fehlende Einstellungen ergaenzen (4.5.28, Entscheidung des Hausherrn 15.11.2026, "Ja, nennen und stehen lassen").
+ *
+ * Ergaenzt wird nur, was fehlt, mit seiner Vorgabe; eine Einstellung der Datei, die diese Fassung nicht kennt, bleibt
+ * mit ihrem Wert stehen und wird mit Namen zurueckgegeben, nie mit Wert (Regeln/05 "fremd -> NENNEN, stehen lassen").
+ * Bis 4.5.27 fiel sie beim Ergaenzen still weg (mi_config_read() kannte sie nicht). Geschrieben wird nur, wenn etwas
+ * fehlt. Gerufen beim Seitenaufruf (index.php) und von der Probe im Reiter Test an einer Probedatei.
+ * Ein Name, der sich von einer Vorgabe nur in Gross- und Kleinschreibung unterscheidet (mi_cfg_schreibweise_datei()),
+ * faellt beim Schreiben weg wie bis 4.5.27; seit 4.5.28 wird er mit Namen zurueckgegeben und genannt.
+ * Rueckgabe: array(geschrieben bzw. nichts zu tun, ergaenzte Namen, unbekannte Namen, entfernte Namen in anderer
+ * Schreibweise).
+ */
+function mi_cfg_vervollstaendigen_datei($datei)
+{
+    $fehlt = mi_cfg_fehlende_datei($datei);
+    $fremd = mi_cfg_fremde_datei($datei);
+    if (!$fehlt) {
+        return array(true, array(), $fremd, array());
+    }
+    $schreib = mi_cfg_schreibweise_datei($datei);
+    $ok = mi_config_write_datei($datei, mi_config_read_datei($datei));
+    return array($ok, $ok ? $fehlt : array(), $fremd, $ok ? $schreib : array());
+}
+
+/** Der Satz zum Ergaenzen: was ergaenzt wurde, was unbekannt stehen blieb und was in anderer Schreibweise entfernt
+ *  wurde - nur Namen (maskiert), nie Werte. */
+function mi_cfg_ergaenzt_satz(array $ergaenzt, array $fremd, array $schreib = array())
+{
+    $s = sprintf(mi_t('UI.CFG_ERGAENZT'), mi_e(implode(', ', $ergaenzt)));
+    if ($fremd) {
+        // Namen durch sicherung_name() (keine Zeilenumbrueche, kein Semikolon, hoechstens 64 Zeichen), dann maskiert.
+        $s .= ' ' . sprintf(mi_t('UI.CFG_FREMD'), mi_e(implode(', ', array_map('sicherung_name', $fremd))));
+    }
+    if ($schreib) {
+        $s .= ' ' . sprintf(mi_t('UI.CFG_SCHREIBWEISE'), mi_e(implode(', ', array_map('sicherung_name', $schreib))));
+    }
+    return $s;
+}
+
+/**
  * Die Lage der Konfigurationsdatei - jeder Zustand, den der Code erzeugen
  * kann, bekommt seinen Satz.
  *
+ * Seit 4.5.28 nennt sie fehlende UND fremde Schluessel mit Namen, nie mit Werten (Regeln/05 "Die Konfigurationslage
+ * nennt fehlende und fremde Schluessel; Fremdes bleibt stehen"), dazu Namen in anderer Gross- und Kleinschreibung
+ * (mi_cfg_schreibweise_datei()). Bis 4.5.27 nannte sie nur fehlende.
+ *
  * Rueckgabe: array(kuerzel, Text). Kuerzel: ok, fehlt, leer, kaputt,
- * unvollstaendig.
+ * unvollstaendig (es fehlt etwas; Fremdes wird mitgenannt), fremd (nichts fehlt, aber Fremdes oder eine andere
+ * Schreibweise steht in der Datei).
  */
 function mi_cfg_lage()
 {
-    $datei = mi_paths()['config'];
+    return mi_cfg_lage_datei(mi_paths()['config']);
+}
+
+/** Die Lage einer bestimmten Konfigurationsdatei (seit 4.5.28 getrennt, damit eine Probe sie an einer Probedatei
+ *  messen kann, ohne die echte Konfiguration anzufassen). Rein lesend. */
+function mi_cfg_lage_datei($datei)
+{
     /* clearstatcache VOR dem Tor, mit dem zweiten Parameter auf genau diese
      * Datei.
      *
@@ -1215,9 +1349,22 @@ function mi_cfg_lage()
     foreach (array_keys(mi_vorgaben()) as $k) {
         if (!isset($roh['default'][$k])) { $fehlt[] = $k; }
     }
+    // Namen durch sicherung_name() (keine Zeilenumbrueche, kein Semikolon, hoechstens 64 Zeichen), dann maskiert.
+    $zusatz = '';
+    $fremd = mi_cfg_fremde_datei($datei);
+    if ($fremd) {
+        $zusatz .= ' ' . sprintf(mi_t('UI.LAGE_FREMD'), mi_e(implode(', ', array_map('sicherung_name', $fremd))));
+    }
+    $schreib = mi_cfg_schreibweise_datei($datei);
+    if ($schreib) {
+        $zusatz .= ' ' . sprintf(mi_t('UI.LAGE_SCHREIBWEISE'), mi_e(implode(', ', array_map('sicherung_name', $schreib))));
+    }
     if ($fehlt) {
         return array('unvollstaendig',
-            sprintf(mi_t('UI.LAGE_UNVOLLSTAENDIG'), mi_e(implode(', ', $fehlt))));
+            sprintf(mi_t('UI.LAGE_UNVOLLSTAENDIG'), mi_e(implode(', ', $fehlt))) . $zusatz);
+    }
+    if ($zusatz !== '') {
+        return array('fremd', ltrim($zusatz));
     }
     return array('ok', mi_t('UI.LAGE_OK'));
 }
@@ -1284,6 +1431,13 @@ function mi_datei_schreiben($ziel, $inhalt, $rechte = 0600)
  */
 function mi_config_write($cfg)
 {
+    return mi_config_write_datei(mi_paths()['config'], $cfg);
+}
+
+/** Wie mi_config_write(), in eine bestimmte Datei (4.5.28, fuer die Probe im Reiter Test). Die Schluessel aus
+ *  mi_vorgaben() zuerst, dahinter jeder weitere aus $cfg (seit 4.5.28 bleiben unbekannte stehen, mi_config_read_datei()). */
+function mi_config_write_datei($datei, $cfg)
+{
     $voll = array_merge(mi_vorgaben(), $cfg);
     foreach ($voll as $k => $v) {
         if (!mi_wert_taugt($v)) {
@@ -1302,7 +1456,7 @@ function mi_config_write($cfg)
     }
     // Seit 4.5.10 ueber mi_datei_schreiben() (C9): Rechte vor dem Inhalt,
     // Laenge verglichen, keine Nebendatei mit dem Kennwort bleibt liegen.
-    return mi_datei_schreiben(mi_paths()['config'], $z, 0600);   // enthaelt das Midea-Passwort
+    return mi_datei_schreiben($datei, $z, 0600);   // enthaelt das Midea-Passwort
 }
 
 /** Einen Wert lesen, mit Vorgabe. */
@@ -2936,48 +3090,6 @@ function mi_ansage_wert($k, $w)
     return false;
 }
 
-/** Fuer die Sicherung: nie ein Sprechtoken, nie der Herkunftsvermerk. Ausgabeart, Ziele, Regeln und Haken reisen mit. */
-function mi_ansage_fuer_sicherung(array $c)
-{
-    unset($c['ansage_token_herkunft'], $c['ansage_aus_datei']);
-    if (isset($c['tts']) && is_array($c['tts'])) { $c['tts'] = ansage_sicherung_bereinigen($c['tts']); }
-    return $c;
-}
-
-/**
- * Vor dem Zurueckspielen. Eine Datei mit Sprechtoken wird abgewiesen (der Block wird unbrauchbar gemacht, die Wertpruefung nennt ihn). Die geltenden Token und der Vermerk bleiben.
- * Fehlt ein Schluessel (Sicherung einer aelteren Fassung), gilt der geltende Wert: Ein bewusstes AUS geht beim Zurueckspielen nicht verloren.
- */
-function mi_ansage_sicherung_vor($roh)
-{
-    $d = json_decode((string) $roh, true);
-    if (!is_array($d)) { return $roh; }
-    $inhalt = false;
-    foreach (array_keys($d) as $k) { if ((string) $k !== '' && ((string) $k)[0] !== '_') { $inhalt = true; } }
-    if (!$inhalt) { return $roh; }
-    $j = mi_ansage_cfg();
-    unset($d['ansage_token_herkunft'], $d['ansage_aus_datei']);
-    $jt = isset($j['tts']) && is_array($j['tts']) ? $j['tts'] : array();
-    if (array_key_exists('tts', $d)) {
-        $g = '';
-        $p = is_array($d['tts']) ? ansage_wert_pruefen($d['tts'], $g, mi_ansage_modi()) : null;
-        if (ansage_sicherung_mangel($d['tts']) || $p === null) {
-            $d['tts'] = 'ABGEWIESEN';
-        } else {
-            list($tv) = ansage_vervollstaendigen($p, 'aus');
-            $d['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
-        }
-    } else {
-        $d['tts'] = mi_tts($j);
-    }
-    foreach (array_diff(mi_ansage_schluessel(), array('tts', 'ansage_token_herkunft', 'ansage_aus_datei')) as $k) {
-        if (!array_key_exists($k, $d) && array_key_exists($k, $j)) { $d[$k] = $j[$k]; }
-    }
-    $d['ansage_token_herkunft'] = isset($j['ansage_token_herkunft']) && is_array($j['ansage_token_herkunft']) ? $j['ansage_token_herkunft'] : array();
-    $d['ansage_aus_datei'] = 1;
-    return (string) json_encode($d);
-}
-
 /**
  * Die Hauptkonfiguration. Liegt eine ansage.json aus einer Probe vom 01.11., wird sie EINMAL uebernommen (Vermerk ansage_aus_datei) und bleibt liegen.
  */
@@ -3355,13 +3467,6 @@ function mi_ansage_flanke($anlass, $gestoert, $name = '', $frist = 0, $jetzt = n
     return mi_ansage_legen(array($ein));
 }
 
-/** Fuer die Sicherung: die Hauptkonfiguration ohne das Feld, dazu die Felder der Sprachansagen ohne Sprechtoken und Vermerk. */
-function mi_ansage_sicherung_felder(array $c)
-{
-    unset($c['ansage_block']);
-    return mi_ansage_fuer_sicherung(mi_ansage_cfg()) + $c;
-}
-
 /** Eine Protokollzeile der Sprachansagen. */
 function mi_ansage_zeile($t)
 {
@@ -3369,39 +3474,163 @@ function mi_ansage_zeile($t)
     if ($f !== '' && is_dir(dirname($f))) { @file_put_contents($f, date('Y-m-d H:i:s') . ' Oberflaeche: ' . $t . "\n", FILE_APPEND | LOCK_EX); }
 }
 
-function mi_sicherung_bauen($cfg = null)
+/* ---------------- Einstellungen sichern und zurueckspielen ----------------
+ *
+ * Seit 4.5.28 ueber das gemeinsame Sicherungsmodul (webfrontend/htmlauth/sicherung.php, byte-gleiche Abschrift der
+ * Stammfassung Werkzeuge/gemeinsam/sicherung.php 1.2.6; Auftrag des Hausherrn 12.11.2026, Entscheidungen vom
+ * 15.11.2026). Lesen, Pruefen und Zurueckspielen macht das Modul; bis 4.5.27 standen hier mi_sicherung_bauen() und
+ * mi_sicherung_lesen().
+ *
+ * Die Datei traegt jede Einstellung aus midea2lox.cfg samt Midea-Konto (MideaUser, MideaPassword), die Sprachansagen
+ * (tts ohne Sprechtoken, ansage_regeln, ansage_haken) und als Teil "geraete" jedes Geraet aus devices.cfg mit token und
+ * key: nur damit erreicht das Plugin ein V3-Geraet ohne die Wolke, ohne sie waere die Datei fuer den Umzug wertlos.
+ * Nie darin: die Sprechtoken, das Feld ansage_block und die Vermerke ansage_token_herkunft und ansage_aus_datei
+ * ('nie_aus_datei'; sie behalten beim Zurueckspielen ihren geltenden Wert). Ein Aktionstoken fuehrt diese Linie nicht.
+ *
+ * Kennzeichen "Midea2Lox", wie es jede Fassung seit 4.3.1 schreibt (Regeln/05 Regel 1: ein bestehendes Kennzeichen in
+ * Namensform bleibt, wie es ist). Bis 4.5.27 lagen die Einstellungen unter "einstellungen" und die Geraete daneben
+ * unter "geraete" (gemessen 15.11.2026 an allen 32 Fassungen 4.3.1 bis 4.5.28 im Arbeitsordner); seit 4.5.28 stehen
+ * die Einstellungen oben. Die Huelle "einstellungen" packt das Modul aus ('huelle'), der Teil "geraete" darf daneben
+ * stehen ('neben_huelle', Modul 1.2.6). Einen eigenen Lesezweig fuer alte Dateien gibt es hier nicht mehr.
+ *
+ * Was sich gegen 4.5.27 aendert (Regeln des Moduls, fuer alle Linien gleich):
+ *  - fehlen darf nur, was eine Vorfassung noch nicht kannte (mi_sicherung_spaet()); es behaelt den geltenden Wert und
+ *    wird genannt. Fehlt eine der elf Einstellungen, die jede Fassung seit 4.3.1 schrieb, wird die Datei abgewiesen
+ *    und der Name genannt (Regel 6 des Moduls); bis 4.5.27 behielt jede fehlende Einstellung still den geltenden
+ *    Wert und wurde nur genannt;
+ *  - eine Datei ohne Kennzeichen wird abgewiesen, auch die flache Form ohne Kopf, die bis 4.5.27 als Sicherung aus
+ *    4.2.x angenommen wurde (Entscheidung des Hausherrn 15.11.2026, "Abweisen"; eine Fassung 4.2.x liegt nicht im
+ *    Arbeitsordner, ihre Form ist nur am Lesezweig von 4.5.27 abgelesen);
+ *  - eine unbekannte Einstellung der Datei wird verworfen und mit Namen genannt, ebenso ein unbekanntes Feld eines
+ *    Geraets; bis 4.5.27 wies die erste die ganze Datei ab, das zweite fiel still weg. Eine Einstellung der GELTENDEN
+ *    Konfiguration, die diese Fassung nicht kennt, faellt beim Zurueckspielen weg und wird genannt;
+ *  - ein leerer Wert ('') ueberschreibt keinen bestehenden, er bleibt und wird genannt (bis 4.5.27 ueberschrieb er,
+ *    auch das Midea-Kennwort);
+ *  - "Einstellungen zurueckspielen" wirkt nur mit dem Haken des Moduls; Datei und Groesse prueft das Modul;
+ *  - die Zweitschriften <ordner>.backup.midea2lox.cfg und <ordner>.backup.devices.cfg neben dem Konfigordner zieht das
+ *    Zurueckspielen mit (Regeln/05, Welle 1 Nr. 4); bis 4.5.27 legte sie nur preupgrade.sh an.
+ * Wie bisher: jeder Wert geht durch mi_wert_pruefen() (dieselbe Positivliste wie das Formular), die Sprachansagen durch
+ * mi_ansage_wert() (eine Datei mit Sprechtoken wird abgewiesen), jedes Geraet durch mi_sicherung_geraete(); eine halb
+ * gueltige Datei aendert nichts, alle Beanstandungen werden gesammelt; die Geraetedatei wird ersetzt, wenn die Datei Geraete traegt, sonst bleibt
+ * sie; danach wird der Dienst neu gestartet, und die Meldung sagt, ob es gelang.
+ */
+
+/** Die Vorgaben fuer das Sicherungsmodul: die Konfiguration und die Sprachansagen (die in ihr im Feld ansage_block liegen). */
+function mi_sicherung_vorgaben()
 {
-    if ($cfg === null) { $cfg = mi_config_read(); }
-    $voll = array_merge(mi_vorgaben(), $cfg);
-    $geraete = array();
-    foreach (mi_devices() as $d) {
-        $geraete[] = array(
-            'id'          => (string) $d['id'],
-            'typ'         => (string) $d['typ'],
-            'ip'          => (string) $d['ip'],
-            'port'        => (string) $d['port'],
-            'bezeichnung' => (string) $d['bezeichnung'],
-            'token'       => (string) $d['token'],
-            'key'         => (string) $d['key'],
-        );
-    }
-    $fassung = '';
-    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-        /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
-         * Antwort am ersten eingebundenen Skript - am Geraet gemessen
-         * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
-         * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
-         * unter webfrontend/html(auth)/plugins/<ordner>/. */
-        $fassung = (string) LBSystem::pluginversion(basename(__DIR__));
-    }
+    return mi_vorgaben() + mi_ansage_vorgaben();
+}
+
+/** Die Felder eines Geraets in der Sicherung, wie bis 4.5.27. */
+function mi_sicherung_geraetefelder()
+{
+    return array('id', 'typ', 'ip', 'port', 'bezeichnung', 'token', 'key');
+}
+
+/**
+ * Was einer Sicherung fehlen darf: die Einstellungen, die eine Vorfassung noch nicht schrieb (Regeln/05, Regel 6 des
+ * Moduls; Bauart wie ZendureSolarFlow 0.9.48). Sie behalten den geltenden Wert ('fehlt' => 'behalten'), und die Meldung
+ * nennt sie (Satz K_FEHLT_BEHALTEN des Moduls). Gemessen 15.11.2026 an den Sicherungen, die der Knopf jeder der 32
+ * Fassungen 4.3.1 bis 4.5.28 baut: jede schrieb unter "einstellungen" array_merge(mi_vorgaben(), Konfiguration), also
+ * jede Vorgabe ihrer Fassung; daneben steht die erste Fassung mit dem Schluessel. Die uebrigen elf Einstellungen
+ * (MINISERVER, UDP_PORT, DEBUG, LoxberryIP, maxConnectionLifetime, region, MideaUser, MideaPassword, mqtt_praefix,
+ * abfragetakt, lox_timeout) schrieb jede dieser Fassungen; fehlt eine, wird die Datei abgewiesen (ab Werk 'pflicht').
+ * Bis 4.5.27 behielt jede fehlende Einstellung den geltenden Wert (Satz UI.SICH_UNBERUEHRT).
+ */
+function mi_sicherung_spaet()
+{
     return array(
-        '_hinweis'      => mi_t('UI.SICH_KOPF'),
-        '_plugin'       => 'Midea2Lox',
-        '_fassung'      => $fassung,
-        '_stand'        => date('Y-m-d H:i:s'),
-        'einstellungen' => mi_ansage_sicherung_felder($voll),     // nie ein Sprechtoken
-        'geraete'       => $geraete,
+        'auto_ein', 'auto_thema_regel', 'auto_thema_pv', 'auto_pv_ab', 'auto_verschiebung',       // seit 4.5.0
+        'auto_soll_min', 'auto_soll_max', 'auto_max_alter', 'auto_sperrzeit', 'auto_takt',
+        'auto_turbo', 'auto_schalten', 'auto_geraete',
+        'fenster_ein', 'fenster_frist', 'fenster_zuordnung',                                      // seit 4.5.11
+        'befehle_mqtt_ein', 'befehle_eingreifend_ein', 'anwesenheit_ein',                         // seit 4.5.18
+        'anwesenheit_verhalten', 'anwesenheit_verschiebung', 'anwesenheit_frist', 'anwesenheit_geraete',
+        'tts', 'ansage_regeln', 'ansage_haken',                                                   // seit 4.5.19
+        'vorkuehlen',                                                                             // seit 4.5.22
+        'tls');                                                                                   // seit 4.5.27
+}
+
+/** Die Beschreibung dieser Linie fuer das gemeinsame Sicherungsmodul. */
+function mi_sicherung_beschreibung()
+{
+    $p = mi_paths();
+    $tts = array_merge(array_keys(ansage_werk_block()), ansage_geheim());
+    $schluessel = array(
+        'tts' => sicherung_block($tts, array('ziele' => sicherung_liste(array('art', 'wo', 'laut', 'sprache', 'ein'))
+                                                        + array('fehlt' => 'behalten')))
+                 + array(
+                     'sichern' => 'ansage_sicherung_bereinigen',
+                     'pruefen' => function ($w, $k = '', $neu = null, $roh = null) {
+                         /* Eine Sicherung dieses Plugins traegt nie ein Sprechtoken - traegt die Datei eines, wird sie
+                          * abgewiesen (wie bis 4.5.27). Gemessen am Block der DATEI ($roh), denn Regel 3 des Moduls
+                          * setzt ein leeres Feld vorher auf den geltenden Wert. */
+                         if (ansage_sicherung_mangel($roh) || mi_ansage_wert('tts', ansage_sicherung_bereinigen($w)) !== true) {
+                             return 'tts: ' . mi_e(mi_t('ANSAGEPLUGIN.M_FEHL'));
+                         }
+                         return '';
+                     },
+                     'wandeln' => function ($w) {
+                         $g = '';
+                         return ansage_wert_pruefen(ansage_sicherung_bereinigen($w), $g, mi_ansage_modi());
+                     }),
+        'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())),
+        'ansage_haken' => sicherung_block(array_keys(mi_ansage_anlaesse())),
+        // Die Felder eines Geraets; ein unbekanntes Feld verwirft das Modul und nennt es (geraete[Nr].Feld).
+        'geraete' => sicherung_liste(mi_sicherung_geraetefelder()),
     );
+    /* Kein 'wandeln' fuer die Einstellungen: mi_config_write() schreibt jeden Wert als Zeichenkette, und
+     * mi_ini_lesen() wie der Dienst nehmen Rand-Leerzeichen weg; das Kennwort setzt mi_kennwort_kodieren() in
+     * Anfuehrungszeichen (b1). Gemessen 15.11.2026: ein 'wandeln' mit trim() wie bis 4.5.27 aenderte an der Datei
+     * nichts (Rueckbau RB11 ohne rote Zeile, Pruefung-Midea2Lox-4.5.28/rueckbauten_lauf1.txt). */
+    foreach (mi_sicherung_spaet() as $k) {
+        if (!isset($schluessel[$k])) { $schluessel[$k] = array(); }
+        $schluessel[$k]['fehlt'] = 'behalten';
+    }
+    $b = array(
+        'kennzeichen' => 'Midea2Lox',
+        'huelle' => 'einstellungen',
+        'neben_huelle' => array('geraete'),
+        // Der Kopftext wie bis 4.5.27: diese Linie fuehrt kein Aktionstoken, der Text des Moduls nennt eines.
+        'hinweis' => mi_t('UI.SICH_KOPF'),
+        /* _fassung aus der Plugin-Datenbank bzw. plugin.cfg (sicherung_fassung_lesen()) - keine weitere Stelle neben
+         * denen, die Werkzeuge/fassung_setzen.py pflegt. */
+        'home' => (string) $p['home'], 'ordner' => (string) $p['plugin'],
+        'plugin_cfg' => dirname(dirname(__DIR__)) . '/plugin.cfg',
+        'vorgaben' => mi_sicherung_vorgaben(),
+        'schluessel' => $schluessel,
+        'nie_aus_datei' => array('ansage_block', 'ansage_token_herkunft', 'ansage_aus_datei'),
+        'teile' => array('geraete' => 'mi_sicherung_geraete'),
+        'pruefen' => function ($k, $w) {
+            $a = mi_ansage_wert($k, $w);
+            if ($a !== null) { return $a ? '' : mi_e($k) . ': ' . mi_e(mi_t('ANSAGEPLUGIN.M_FEHL')); }
+            $g = mi_wert_pruefen((string) $k, $w);
+            return $g === '' ? '' : mi_e($k) . ': ' . $g;
+        },
+        'vorbereiten' => 'mi_sicherung_vorbereiten',
+        'jetzt' => 'mi_sicherung_jetzt',
+        't' => 'mi_t',
+    );
+    if ((string) $p['home'] !== '') {
+        // Die Zweitschrift der Konfiguration misst das Modul nach dem Speichern (inhaltsgleich?); ausserhalb einer
+        // Anlage (ausgepacktes Archiv) wird keine geschrieben.
+        $b['zweitschrift'] = function () {
+            return array(mi_paths()['config'], mi_zweitschrift_pfad('midea2lox.cfg'));
+        };
+    }
+    return $b;
+}
+
+/** Der geltende Stand fuer das Modul: die Konfiguration (mit jeder unbekannten Einstellung der Datei) und die
+ *  Sprachansagen aus ihrem Feld ansage_block. */
+function mi_sicherung_jetzt()
+{
+    $c = mi_config_read();
+    $a = mi_ansage_cfg();
+    foreach (mi_ansage_schluessel() as $k) {
+        if (array_key_exists($k, $a)) { $c[$k] = $a[$k]; }
+    }
+    return $c;
 }
 
 /** Sieht der Wert wie ein Geraetetoken aus? 128 Hexziffern, nichts sonst. */
@@ -3417,144 +3646,31 @@ function mi_ist_key($v)
 }
 
 /**
- * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
- *
- * Die sieben Punkte aus REGELN_2, und der wichtigste ist der dritte: eine
- * halb gueltige Datei ueberschreibt GAR NICHTS. Wer eine Sicherung
- * zurueckspielt, will entweder den ganzen Stand oder gar keinen - eine zur
- * Haelfte uebernommene Konfiguration ist schlimmer als die alte, und man
- * sieht es ihr nicht an.
- *
- * Geprueft wird seit 4.3.0 auch JEDER WERT, nicht nur der Schluessel. Bis
- * dahin ging eine Sicherung mit UDP_PORT 99999999 anstandslos durch, und ein
- * Feld statt einer Zeichenkette landete als "UDP_PORT=Array" in der Datei -
- * der Dienst startete danach nicht mehr.
- *
- * Die alte, flache Form (nur Einstellungen, ohne Kopf) wird weiterhin
- * angenommen: eine Sicherung aus 4.2.x soll sich einspielen lassen.
- *
- * Rueckgabe: array(array(einstellungen, geraete)|null, Beanstandungen[],
- *                  Zahl uebernommener Werte, Zahl uebernommener Geraete).
+ * Der Teil "geraete" einer Sicherung (Rueckruf 'teile' des Moduls): jedes Geraet mit derselben Pruefung wie bis
+ * 4.5.27, je Feld eine Positivliste. Ein Token, das nicht wie eines aussieht, ist eine Beanstandung: es geht spaeter
+ * an das Geraet, und eine geratene Zeichenkette dort ist dasselbe wie eine geratene Registeradresse. Alle
+ * Beanstandungen werden gesammelt; eine einzige weist die ganze Datei ab (Regel 4 des Moduls).
+ * Rueckgabe: array(Geraete | null, Beanstandungen).
  */
-function mi_sicherung_lesen($roh, &$namen = null)
+function mi_sicherung_geraete($w, $jetzt = null)
 {
+    if (!is_array($w) || ($w !== array() && array_keys($w) !== range(0, count($w) - 1))) {
+        return array(null, array(mi_t('UI.SICH_GERAETE_FORM')));
+    }
     $mangel = array();
-    // X-3 (Verbesserungsbau 30.09.2026): die Namen der beanstandeten
-    // Schluessel, nie ihre Werte.
-    $namen = array();
-    $daten = json_decode((string) $roh, true);
-    if (!is_array($daten)) {
-        return array(null, array(mi_t('UI.SICH_KEIN_JSON')), 0, 0);
-    }
-
-    // Form erkennen: neu (mit Abschnitt "einstellungen") oder alt (flach).
-    if (array_key_exists('einstellungen', $daten)) {
-        if (!is_array($daten['einstellungen'])) {
-            return array(null, array(mi_t('UI.SICH_KEIN_JSON')), 0, 0);
-        }
-        $roh_einst = $daten['einstellungen'];
-        $roh_ger = isset($daten['geraete']) ? $daten['geraete'] : array();
-        if (!is_array($roh_ger)) {
-            $mangel[] = mi_t('UI.SICH_GERAETE_FORM');
-            $roh_ger = array();
-        }
-        // Ein fremdes Plugin, das zufaellig "einstellungen" schreibt, wird
-        // am Namen erkannt - nicht durchgelassen und nicht stillschweigend
-        // uebernommen.
-        if (isset($daten['_plugin']) && is_string($daten['_plugin'])
-            && $daten['_plugin'] !== '' && $daten['_plugin'] !== 'Midea2Lox') {
-            $mangel[] = sprintf(mi_t('UI.SICH_FREMDES_PLUGIN'),
-                                 mi_e((string) $daten['_plugin']));
-        }
-    } else {
-        $roh_einst = $daten;
-        $roh_ger = array();
-    }
-    /* Die Sprachansagen: Token und Vermerk bleiben die geltenden, das Feld selbst kommt nie aus einer Datei. */
-    $mi_e2 = json_decode(mi_ansage_sicherung_vor((string) json_encode($roh_einst)), true);
-    if (is_array($mi_e2)) { $roh_einst = $mi_e2; }
-    $mi_ab = array();
-
-    /* Die Grundlage ist die AKTUELLE Konfiguration, nicht die Werksvorgabe.
-     *
-     * Bis 4.3.2 stand hier mi_vorgaben(). Eine Sicherung, die einen
-     * Schluessel nicht enthaelt - jede flache Sicherung aus 4.2.x tut das,
-     * und die soll ausdruecklich weiter angenommen werden -, setzte diesen
-     * Wert damit stillschweigend auf die Werksvorgabe zurueck. Gemessen mit
-     * {"einstellungen":{"UDP_PORT":"7014"}}: angenommen, und danach war das
-     * hinterlegte Midea-Kennwort leer, ohne dass ein Wort darueber fiel.
-     *
-     * Zurueckgespielt wird jetzt, was in der Datei steht; was nicht darin
-     * steht, bleibt unveraendert. WELCHE Schluessel unberuehrt blieben,
-     * gibt diese Funktion als fuenften Rueckgabewert heraus, und die
-     * Oberflaeche sagt es hinterher - unveraendert lassen ist richtig,
-     * unveraendert lassen OHNE es zu sagen waere die naechste stille
-     * Ueberraschung. */
-    $neu = mi_config_read();
-    $bekannt = array_keys(mi_vorgaben());
-    $gesehen = array();
-    $anzahl = 0;
-    foreach ($roh_einst as $k => $w) {
-        if ((string) $k === 'ansage_block') { continue; }     // das Feld mit den Sprechtoken kommt nie aus einer Datei
-        $mi_aw = mi_ansage_wert($k, $w);
-        if ($mi_aw !== null) {
-            if ($mi_aw) { $mi_ab[$k] = $w; } else { $mangel[] = mi_t('ANSAGEPLUGIN.M_FEHL'); $namen[] = (string) $k; }
-            continue;
-        }
-        // Der lesbare Kopf wird UEBERGANGEN, nicht beanstandet.
-        if (is_string($k) && $k !== '' && $k[0] === '_') {
-            continue;
-        }
-        if (!in_array($k, $bekannt, true)) {
-            $mangel[] = sprintf(mi_t('UI.SICH_FREMD'),
-                                 htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
-            $namen[] = (string) $k;
-            continue;
-        }
-        $fehler = mi_wert_pruefen($k, $w);
-        if ($fehler !== '') {
-            $mangel[] = mi_e($k) . ': ' . $fehler;
-            $namen[] = (string) $k;
-            continue;
-        }
-        // b1: das Kennwort woertlich - Leerraum am Rand gehoert seit dem
-        // Verbesserungsbau 30.09.2026 dazu (mi_kennwort_kodieren).
-        $neu[$k] = ($k === 'MideaPassword') ? (string) $w : trim((string) $w);
-        $gesehen[] = $k;
-        $anzahl++;
-    }
-    $unberuehrt = array_values(array_diff($bekannt, $gesehen));
-    if ($anzahl === 0) {
-        $mangel[] = mi_t('UI.SICH_LEER');
-    }
-
-    // Geraete - je Feld eine Positivliste. Ein Token, das nicht wie eines
-    // aussieht, ist eine Beanstandung: er geht spaeter an das Geraet, und
-    // eine geratene Zeichenkette dort ist dasselbe wie eine geratene
-    // Registeradresse.
     $geraete = array();
     $ids_gesehen = array();
-    $mi_gzahl = count($mangel);
-    $mi_gnr = 0;
-    foreach ($roh_ger as $i => $g) {
-        if (count($mangel) > $mi_gzahl) {
-            $namen[] = 'geraete[' . $mi_gnr . ']';
-        }
-        $mi_gzahl = count($mangel);
+    foreach ($w as $i => $g) {
         $nr = (int) $i + 1;
-        $mi_gnr = $nr;
         if (!is_array($g)) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_FORM'), $nr);
             continue;
         }
-        /* C8 (ab 4.5.10): JEDES Feld muss eine Zeichenkette sein (Nummer und
-         * Port duerfen auch eine ganze Zahl sein), BEVOR es umgewandelt wird.
-         * Bis 4.5.9 machte (string) aus einer Liste "Array": Bezeichnung und
-         * Typ wurden als "Array" uebernommen, samt PHP-Meldung "Array to
-         * string conversion" (gemessen unter 7.4, 8.4 und 8.5, Bericht code
-         * Befund 8; Fehlerklasse 10 des Auftrags). */
+        /* C8 (ab 4.5.10): JEDES Feld muss eine Zeichenkette sein (Nummer und Port duerfen auch eine ganze Zahl sein),
+         * BEVOR es umgewandelt wird. Bis 4.5.9 machte (string) aus einer Liste "Array" (gemessen unter 7.4, 8.4 und
+         * 8.5, Bericht code Befund 8). */
         $mi_falsch = '';
-        foreach (array('id', 'typ', 'ip', 'port', 'bezeichnung', 'token', 'key') as $mi_feld) {
+        foreach (mi_sicherung_geraetefelder() as $mi_feld) {
             if (!isset($g[$mi_feld]) || is_string($g[$mi_feld])) {
                 continue;
             }
@@ -3569,16 +3685,13 @@ function mi_sicherung_lesen($roh, &$namen = null)
             continue;
         }
         $id = isset($g['id']) ? trim((string) $g['id']) : '';
-        // 10 bis 19 Ziffern - dieselbe Grenze wie im Dienst, siehe
-        // index.php bei den Bezeichnungen.
+        // 10 bis 19 Ziffern - dieselbe Grenze wie im Dienst, siehe index.php bei den Bezeichnungen.
         if (!preg_match('/^\d{10,19}$/', $id)) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_ID'), $nr);
             continue;
         }
-        /* C7 (ab 4.5.10): eine Geraetenummer nur einmal. Bis 4.5.9 schrieb
-         * mi_devices_write() sie zweimal als [Midea_<id>] - Pythons
-         * configparser wirft darauf DuplicateSectionError, und danach waren
-         * ALLE Geraete stumm, waehrend die Oberflaeche beide anzeigte
+        /* C7 (ab 4.5.10): eine Geraetenummer nur einmal. Bis 4.5.9 schrieb mi_devices_write() sie zweimal als
+         * [Midea_<id>] - Pythons configparser wirft darauf DuplicateSectionError, und danach waren ALLE Geraete stumm
          * (gemessen, Bericht code Befund 7). Die ganze Datei gilt dann nicht. */
         if (isset($ids_gesehen[$id])) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_DOPPELT'), $nr, mi_e($id), $ids_gesehen[$id]);
@@ -3606,8 +3719,7 @@ function mi_sicherung_lesen($roh, &$namen = null)
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_KEY'), $nr);
             continue;
         }
-        // Ein Geraet mit nur einer Haelfte des Paares kann sich nicht
-        // anmelden. Melden statt zurechtbiegen.
+        // Ein Geraet mit nur einer Haelfte des Paares kann sich nicht anmelden. Melden statt zurechtbiegen.
         if (($token === '') !== ($key === '')) {
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_PAAR'), $nr);
             continue;
@@ -3622,51 +3734,109 @@ function mi_sicherung_lesen($roh, &$namen = null)
             $mangel[] = sprintf(mi_t('UI.SICH_GERAET_TYP'), $nr);
             continue;
         }
-        $geraete[] = array('id' => $id, 'typ' => $typ, 'ip' => $ip,
-                           'port' => $port, 'bezeichnung' => $bez,
+        $geraete[] = array('id' => $id, 'typ' => $typ, 'ip' => $ip, 'port' => $port, 'bezeichnung' => $bez,
                            'token' => $token, 'key' => $key);
     }
-    if (count($mangel) > $mi_gzahl) {
-        $namen[] = 'geraete[' . $mi_gnr . ']';
-    }
-
-    if ($mangel) {
-        return array(null, $mangel, $anzahl, count($geraete), $unberuehrt);
-    }
-    // Fuenftes Element: die Schluessel, die in der Datei NICHT standen und
-    // deshalb unveraendert geblieben sind. Aeltere Aufrufer, die nur vier
-    // Elemente auslesen, stoert das nicht - list() nimmt weniger entgegen,
-    // als das Feld hergibt.
-    if ($mi_ab) { $neu['ansage_block'] = base64_encode((string) json_encode($mi_ab)); }     // die Felder der Sprachansagen zurueck in das eine Feld
-    return array(array($neu, $geraete), array(), $anzahl, count($geraete), $unberuehrt);
+    return $mangel ? array(null, $mangel) : array($geraete, array());
 }
 
 /**
- * X-3 (Verbesserungsbau 30.09.2026): Welche gespeicherten Werte bestuenden
- * das eigene Zurueckspielen nicht? Die Sicherung wird gebaut und durch
- * mi_sicherung_lesen() geschickt - dieselbe Pruefung wie beim Zurueckspielen.
- * Rueckgabe: Liste der NAMEN (Schluessel bzw. geraete[<Nr>]), nie der Werte;
- * leer = die Sicherung liesse sich zurueckspielen; '?' = abgewiesen ohne
- * einen benennbaren Schluessel.
- * Der Name traegt bewusst kein "sicherung": Werkzeuge/sicherung_pruefen.py
- * nimmt die erste Funktion *_sicherung* fuer die Ausfuhr (so in Heimkino
- * gemessen, Scheinbefund).
+ * Vor dem Speichern (Rueckruf 'vorbereiten' des Moduls): der Block tts wird vervollstaendigt wie bis 4.5.27, und die
+ * geltenden Sprechtoken bleiben (die Sicherung traegt keine); kam er nicht aus der Datei, steht dort schon der
+ * geltende. ansage_aus_datei = 1 wie bis 4.5.27: nach dem Zurueckspielen gilt die Sprachausgabe der Sicherung, eine
+ * liegengebliebene ansage.json wird nicht mehr uebernommen. Den Herkunftsvermerk haelt das Modul ('nie_aus_datei').
  */
-function mi_rueckspiel_altwerte($sicherung = null)
+function mi_sicherung_vorbereiten($neu, $jetzt, $r)
 {
-    $s = is_array($sicherung) ? $sicherung : mi_sicherung_bauen();
-    $js = json_encode($s, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-                          | JSON_INVALID_UTF8_SUBSTITUTE);
-    if ($js === false) {
-        // Nicht kodierbar: der Knopf meldet das selbst (UI.SICH_DL_FEHLER).
-        return array();
+    if (!in_array('tts', $r['fehlt_behalten'], true) && isset($neu['tts']) && is_array($neu['tts'])) {
+        $jt = (is_array($jetzt) && isset($jetzt['tts']) && is_array($jetzt['tts'])) ? $jetzt['tts'] : array();
+        list($tv) = ansage_vervollstaendigen($neu['tts'], 'aus');
+        $neu['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
     }
-    $namen = array();
-    $erg = mi_sicherung_lesen($js, $namen);
-    if ($erg[0] !== null) {
-        return array();
+    $neu['ansage_aus_datei'] = 1;
+    return $neu;
+}
+
+/** Was beim Speichern der zurueckgespielten Sicherung misslang ('' | 'geraete' | 'halb'), fuer die Meldung der Seite. */
+function mi_sicherung_schreiblage($setzen = null)
+{
+    static $l = '';
+    if (is_string($setzen)) { $l = $setzen; }
+    return $l;
+}
+
+/** Die Zweitschrift einer Datei des Konfigordners: <config/plugins>/<ordner>.backup.<datei>, wie preupgrade.sh sie anlegt. */
+function mi_zweitschrift_pfad($datei)
+{
+    $cfg = mi_paths()['config'];
+    return dirname(dirname($cfg)) . '/' . basename(dirname($cfg)) . '.backup.' . $datei;
+}
+
+/**
+ * Speichern (Rueckruf 'speichern' des Moduls): genau den Stand, den das Modul liefert.
+ *
+ * DIE GERAETEDATEI ZUERST, wie seit 4.3.3: scheitert sie, ist NICHTS geschrieben. Bis 4.3.2 stand midea2lox.cfg
+ * zuerst; gemessen gelang config_write, devices_write scheiterte, und die halbe Sicherung stand auf der Platte. Die
+ * Reihenfolge macht es nicht unteilbar, aber sie dreht den Schaden um: scheitert der zweite Schritt, steht die
+ * Geraetedatei neu und die Konfiguration alt - und genau das sagt die Meldung (UI.SICH_HALB).
+ * Traegt die Datei keine Geraete (Teil fehlt oder leer), bleibt devices.cfg, wie sie ist (mi_devices_write()).
+ * Dann die Sprachansagen zurueck in das Feld ansage_block (Form wie mi_ansage_block_schreiben()), die Konfiguration
+ * und die Zweitschriften (seit 4.5.28; ob die der Konfiguration mitzog, misst das Modul, 'zweitschrift').
+ */
+function mi_sicherung_speichern($neu, $jetzt, $r)
+{
+    mi_sicherung_schreiblage('');
+    $geraete = (isset($r['teile']['geraete']) && is_array($r['teile']['geraete'])) ? $r['teile']['geraete'] : array();
+    if (!mi_devices_write($geraete)) {
+        mi_sicherung_schreiblage('geraete');
+        return false;
     }
-    return $namen ? array_values(array_unique($namen)) : array('?');
+    $x = array();
+    foreach (mi_ansage_schluessel() as $k) {
+        if (array_key_exists($k, $neu)) { $x[$k] = $neu[$k]; }
+        unset($neu[$k]);
+    }
+    $neu['ansage_block'] = base64_encode((string) json_encode($x));
+    if (!mi_config_write($neu)) {
+        mi_sicherung_schreiblage($geraete ? 'halb' : '');
+        return false;
+    }
+    if ((string) mi_paths()['home'] !== '') {
+        $paare = array(array(mi_paths()['config'], mi_zweitschrift_pfad('midea2lox.cfg')));
+        if ($geraete) { $paare[] = array(mi_paths()['devices'], mi_zweitschrift_pfad('devices.cfg')); }
+        foreach ($paare as $pz) {
+            $inhalt = @file_get_contents($pz[0]);
+            // Gelingt es nicht, meldet das Modul es fuer die Konfiguration (K_ZWEITSCHRIFT); gespeichert ist trotzdem.
+            if (is_string($inhalt)) { mi_datei_schreiben($pz[1], $inhalt, 0600); }
+        }
+    }
+    return true;
+}
+
+/**
+ * Welche gespeicherten Werte bestuenden das eigene Zurueckspielen nicht? Seit 4.5.28 dieselbe Pruefung des Moduls
+ * (sicherung_selbstpruefung()) an genau der Datei, die "Einstellungen sichern" liefert. Rueckgabe: Liste der NAMEN,
+ * nie der Werte; leer = die Sicherung liesse sich zurueckspielen.
+ * Der Name traegt bewusst kein "sicherung": Werkzeuge/sicherung_pruefen.py nimmt die erste Funktion *_sicherung* fuer
+ * die Ausfuhr (so in Heimkino gemessen, Scheinbefund).
+ */
+function mi_rueckspiel_altwerte()
+{
+    $b = mi_sicherung_beschreibung();
+    $jetzt = mi_sicherung_jetzt();
+    return sicherung_selbstpruefung($b, sicherung_bauen($b, $jetzt, mi_sicherung_teile()), $jetzt);
+}
+
+/** Die Teile der Sicherung: jedes Geraet aus devices.cfg mit token und key, wie bis 4.5.27. */
+function mi_sicherung_teile()
+{
+    $geraete = array();
+    foreach (mi_devices() as $d) {
+        $g = array();
+        foreach (mi_sicherung_geraetefelder() as $f) { $g[$f] = (string) $d[$f]; }
+        $geraete[] = $g;
+    }
+    return array('geraete' => $geraete);
 }
 
 /**
@@ -3674,9 +3844,10 @@ function mi_rueckspiel_altwerte($sicherung = null)
  *
  * Ersetzt, haengt nicht an: eine Sicherung ist ein Stand, kein Zusatz. Wird
  * keine einzige Geraetezeile mitgebracht, bleibt die vorhandene Datei
- * unangetastet - eine Sicherung aus 4.2.x kennt den Abschnitt gar nicht, und
- * die vorhandenen Geraete deswegen zu loeschen waere das Gegenteil von
- * hilfreich.
+ * unangetastet - eine Sicherung ohne Geraete (Teil "geraete" fehlt oder ist
+ * leer) sagt nichts ueber die Geraete der Anlage, und die vorhandenen deswegen
+ * zu loeschen waere das Gegenteil von hilfreich. (Bis 4.5.27 stand hier als
+ * Anlass die flache Sicherung aus 4.2.x; sie wird seit 4.5.28 abgewiesen.)
  *
  * Rechte VOR dem Inhalt: in der Datei stehen Token und Schluessel.
  */
