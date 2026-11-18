@@ -10,6 +10,11 @@ Integration von Klimaanlagen der Midea-Gruppe in Loxone — als LoxBerry-Plugin.
 > Was sich gegenüber 3.4.8 geändert hat, steht in den Release-Beschreibungen
 > ab 4.0.0.
 
+## Neu in 4.5.29
+
+- **Einstellungen sichern und zurückspielen mit dem gemeinsamen Sicherungsmodul 1.2.9 statt 1.2.6:** Die übrigen Neuerungen der Modulfassungen bis 1.2.9 betreffen Fähigkeiten, die dieses Plugin nicht nutzt; an ihm ändert sich dadurch nichts.
+- Sicherungen der früheren Fassungen werden weiter angenommen wie bisher; gemessen mit dem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4, der über einen Webserver die echten Knöpfe drückt und 3 Vorfassungen zurückspielt. Am Gerät nicht gemessen.
+
 ## Neu in 4.5.28
 
 - **Einstellungen sichern und zurückspielen über das gemeinsame Sicherungsmodul** (Fassung 1.2.6, wie in den übrigen Plugins dieses Autors). Die Sicherungsdatei trägt die Einstellungen jetzt oben statt unter `einstellungen`; Kennzeichen (`_plugin` = `Midea2Lox`) und Inhalt bleiben: alle Einstellungen samt Midea-Konto, die Sprachansagen ohne Sprechtoken und unter `geraete` jedes Gerät samt Token und Schlüssel. Sicherungen aus 4.3.1 bis 4.5.27 werden weiter zurückgespielt. Umgekehrt nicht: 4.5.27 weist eine Sicherung aus 4.5.28 ab (gemessen); wer zu einer älteren Fassung zurückkehrt, braucht eine Sicherung aus dieser Fassung.
