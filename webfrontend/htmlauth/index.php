@@ -742,16 +742,6 @@ $mi_port    = mi_cfg($mi_cfg, 'UDP_PORT', '7013');
 $mi_ip      = mi_cfg($mi_cfg, 'LoxberryIP', mi_localip());
 $mi_bsp     = mi_beispiel_id();
 
-$mi_version = '';
-if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-    /* Ueber den Ordnernamen fragen (Regeln/03): ohne Argument haengt die
-     * Antwort am ersten eingebundenen Skript - am Geraet gemessen
-     * 17.09.2026: aus einem fremden Einstieg (php -r) NULL, mit dem
-     * Ordnernamen die installierte Fassung. Installiert liegt diese Datei
-     * unter webfrontend/html(auth)/plugins/<ordner>/. */
-    $mi_version = (string) LBSystem::pluginversion(basename(__DIR__));
-}
-
 /* Eine unbekannte Region ist ein Aktualisierungsfall, kein Grund zu raten.
  * Bis 4.2.12 bot die Liste elf Regionen an; msmart-ng kennt drei. */
 if (!array_key_exists($mi_cfg['region'], mi_regionen())) {
@@ -766,7 +756,8 @@ if ($mi_msf !== '') {
     $mi_hinweise[] = $mi_msf . ' ' . mi_t('UI.MINISERVER_WAEHLEN');
 }
 
-LBWeb::lbheader('Midea2Lox' . ($mi_version !== '' ? ' V' . $mi_version : ''),
+require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+LBWeb::lbheader(plugin_kopftitel('Midea2Lox', __DIR__),
                 'https://wiki.loxberry.de/plugins/midea2lox/start', 'help.html');
 
 ?>
