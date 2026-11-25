@@ -666,6 +666,26 @@ def praefixe_abraeumen(zugang, aktuell, datei):
     return erg
 
 
+def _haus_bereiche():
+    """4.5.34 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): das gemeinsame
+    Modul haus_bereiche.py neben dem Dienst, beim ersten Aufruf geladen."""
+    hier = os.path.dirname(os.path.abspath(__file__))
+    if hier not in sys.path:
+        sys.path.insert(0, hier)
+    import haus_bereiche  # noqa: E402
+    return haus_bereiche
+
+
+def praefix_haus_melden(praefix):
+    """4.5.34: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich unter
+    haus/ faellt; der Versand bleibt, wie er ist. Rueckgabe der gemeldete Bereich oder ""."""
+    hb = _haus_bereiche()
+    bereich = hb.hb_melden_faellig(praefix)
+    if bereich:
+        __import__("logging").getLogger("Midea2Lox.py").warning("%s", hb.hb_logtext(praefix, bereich))
+    return bereich
+
+
 def mqtt_leeren():
     """Die retained Themen dieser Linie abraeumen - fuer die Deinstallation.
 

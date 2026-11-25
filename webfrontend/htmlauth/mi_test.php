@@ -213,6 +213,10 @@ function mi_pruefungen($cfg)
         $dev ? sprintf(mi_t('UI.GERAETE_ANZAHL'), count($dev))
              : mi_t('UI.GERAETE_KEINE'));
 
+    // 4.5.34: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $mi_hb = mi_pruef_praefix_haus($cfg);
+    $z[] = array(mi_e(mi_t('HAUSBEREICH.F_TEST')), $mi_hb[0] === -1 ? 2 : $mi_hb[0], $mi_hb[1]);
+
     // ---- MQTT ----
     $mq = mi_mqtt_config();
     if (!$mq) {

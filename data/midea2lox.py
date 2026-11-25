@@ -4008,6 +4008,7 @@ except (configparser.NoOptionError, configparser.NoSectionError):
 if not MQTT_PRAEFIX:
     MQTT_PRAEFIX = 'Midea2Lox'
     _LOGGER.info("Kein MQTT-Praefix eingetragen - es gilt Midea2Lox.")
+mi_mqtt.praefix_haus_melden(MQTT_PRAEFIX)   # 4.5.34: im gemeinsamen Bereich? melden, nicht anhalten (Regeln/07)
 # Gruppe 15: genau drei Ebenen hinter dem Praefix (befehl/<Geraetenummer>/<name>); die eigene
 # Quittung (vier) kommt nie zurueck.
 BEFEHL_THEMA = MQTT_PRAEFIX + '/befehl/+/+'

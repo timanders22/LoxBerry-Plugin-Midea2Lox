@@ -156,6 +156,12 @@ if ($mi_fehlten && $mi_wache === '' && !mi_upgrade_laeuft()) {
 
 // ---------- Einstellungen speichern ----------
 /* Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+/* 4.5.34: Testmeldung an SignalBot (Knopf unter den Sprachansagen) - wie die Testansage darunter. */
+if ((isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') && isset($_POST['meld_test'])) {
+    list($mi_at, $mi_ag) = mi_meld_test();
+    if ($mi_at) { $mi_hinweise[] = mi_e(mi_t('SIGNALMELDUNG.T_OK')); } else { $mi_fehler[] = mi_e($mi_ag); }
+    $mi_tab = 'tab-settings';
+}
 if ((isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') && isset($_POST['ansage_test'])) {
     list($mi_at, $mi_ag) = mi_ansage_test();
     if ($mi_at) { $mi_hinweise[] = mi_e(mi_t('ANSAGEPLUGIN.M_TEST_OK')); } else { $mi_fehler[] = mi_e(mi_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $mi_ag); }
@@ -320,6 +326,13 @@ if (isset($_POST['mqtt_speichern'])) {
         $f = mi_wert_pruefen('mqtt_praefix', $roh);
         if ($f !== '') {
             $mi_fehler[] = $f;
+            $mi_x2_falsch[] = 'mqtt_praefix';
+        } elseif (hb_bereich($roh) !== '' && $roh !== (string) mi_cfg($mi_cfg, 'mqtt_praefix', '')) {   // nur NEUE Eingaben: ein schon gespeichertes Praefix sperrt das Speichern
+            // des Reiters nicht (Regeln/07; Bauart Einspeisebremse 0.9.25)
+            /* 4.5.34 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): kein Praefix auf einem
+             * gemeinsamen Bereich unter haus/ - nur hier und beim Zurueckspielen, nicht in der Pruefung beim Lesen der
+             * Konfiguration: ein schon gespeichertes bleibt in Betrieb, der Reiter Test meldet es. */
+            $mi_fehler[] = sprintf(mi_t('HAUSBEREICH.FEHLER'), mi_e($roh), mi_e(hb_bereich($roh)));
             $mi_x2_falsch[] = 'mqtt_praefix';
         } else {
             $neu = $mi_cfg;
